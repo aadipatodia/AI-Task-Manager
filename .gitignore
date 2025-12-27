@@ -1,0 +1,15 @@
+# Environment variables (contains secrets)
+.env
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Google Auth Secrets
+token.json
+credentials.json
