@@ -22,24 +22,29 @@ SCOPES = ['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.co
 # Initialize Gemini client correctly
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-def get_creds():
-    creds = None
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
-    return creds
+# Manager's (your) credentials — always available for sending emails
+MANAGER_CREDS = None
+if os.path.exists('token.json'):
+    MANAGER_CREDS = Credentials.from_authorized_user_file('token.json', SCOPES)
+    if MANAGER_CREDS.expired and MANAGER_CREDS.refresh_token:
+        MANAGER_CREDS.refresh(Request())
 
-# Global Google services (using your Google account)
-google_creds = get_creds()
-calendar = build('calendar', 'v3', credentials=google_creds)
-gmail = build('gmail', 'v1', credentials=google_creds)
+def get_creds_for_user(phone_number):
+    try:
+        with open('user_tokens.json', 'r') as f:
+            user_tokens = json.load(f)
+        
+        user_data = user_tokens.get(phone_number)
+        if user_data and "google_credentials" in user_data:
+            creds_data = user_data["google_credentials"]
+            creds = Credentials.from_authorized_user_info(creds_data, SCOPES)
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            return creds
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        pass
+
+    return None  # No credentials for this user
 
 # File helpers
 def load_team():
@@ -193,7 +198,8 @@ def handle_add_employee(data, sender_phone):
         return "Please provide at least email or phone.", data
 
     team = load_team()
-    matches = [m for m in team if m["name"].lower() == name_key]
+    name_lower = name_key.lower()
+    matches = [m for m in team if name_lower in m["name"].lower()]
 
     if matches:
         state = load_state()
@@ -220,39 +226,60 @@ def add_employee(data, sender_phone):
     }
     team.append(new_member)
     save_team(team)
-    reply = (f"New employee added!\nName: {data['name'].title()}\n"
+    reply = (f" New employee added!\nName: {data['name'].title()}\n"
              f"Email: {new_member['email'] or 'not set'}\n"
              f"Phone: {new_member['phone'] or 'not set'}")
     return reply, data
 
 def handle_assign_task(data, sender_phone, message):
     team = load_team()
-    name_key = data.get("name", "").lower().strip()
-    matches = [m for m in team if m["name"].lower() == name_key]
+    name_key = data.get("name", "").strip()
 
+    if not name_key:
+        return "Please specify a person's name in the task.", data
+
+    name_lower = name_key.lower()
+
+    # Partial match: anyone whose full name contains the keyword (case-insensitive)
+    matches = [
+        member for member in team
+        if name_lower in member["name"].lower()
+    ]
+
+    # No one found
     if not matches:
-        return f"No one named '{data.get('name')}' found. Add them first.", data
+        return f"No one found with name containing '{name_key}'. Add them first with 'Add employee...'", data
 
-    if len(matches) > 1:
-        state = load_state()
-        state[sender_phone] = {
-            "pending": {
-                "action": "disambiguate_task",
-                "data": data,
-                "context": {"matches": matches}
-            }
+    # Exactly one match → assign directly
+    if len(matches) == 1:
+        selected = matches[0]
+        return assign_task(data, selected, message)
+
+    # Multiple matches → disambiguate
+    state = load_state()
+    state[sender_phone] = {
+        "pending": {
+            "action": "disambiguate_task",
+            "data": data,
+            "context": {"matches": matches}
         }
-        save_state(state)
-        options = "\n".join([f"{i+1}. {m['name'].title()} — Email: {m.get('email','none')}, Phone: {m.get('phone','none')}"
-                             for i, m in enumerate(matches)])
-        return f"Multiple people named {name_key.title()}:\n{options}\nReply with number (1, 2, ...)", data
+    }
+    save_state(state)
 
-    selected = matches[0]
-    return assign_task(data, selected, message)
+    # Build user-friendly list
+    options = "\n".join([
+        f"{i+1}. {m['name'].title()} — Email: {m.get('email', 'none')}, Phone: {m.get('phone', 'none')}"
+        for i, m in enumerate(matches)
+    ])
+
+    return (
+        f"Multiple people found with name containing '{name_key}':\n{options}\n\n"
+        f"Which one do you mean? Reply with the number (1, 2, ...)"
+    ), data
 
 def assign_task(data, selected, message):
     today = datetime.datetime.now()
-    deadline = data.get("deadline")
+    deadline = data.get('deadline')
     if not deadline:
         start = today.replace(hour=9, minute=0, second=0, microsecond=0)
         deadline = start.isoformat() + "Z"
@@ -261,55 +288,111 @@ def assign_task(data, selected, message):
         start_dt = datetime.datetime.fromisoformat(deadline.replace("Z", "+00:00"))
         end_time = (start_dt + datetime.timedelta(hours=1)).isoformat() + "Z"
 
-    # Calendar event
-    calendar.events().insert(
-        calendarId='primary',
-        body={
-            'summary': data['task'],
-            'start': {'dateTime': deadline, 'timeZone': 'UTC'},
-            'end': {'dateTime': end_time, 'timeZone': 'UTC'}
-        }
-    ).execute()
+    assignee_name = data['name'].title()
+    assignee_phone = selected.get('phone', "")
+    assignee_email = selected.get('email', "")
 
-    # Email with optional attachment
-    msg = EmailMessage()
-    msg.set_content(f"Task: {data['task']}\nDue: {data.get('deadline') or 'ASAP'}")
-    msg['To'] = selected.get('email', '')
-    msg['Subject'] = 'New Task Assigned'
-    msg['From'] = 'me'
+    if not assignee_email:
+        return f"Task assigned to {assignee_name}, but no email found in team — email not sent.", data
 
-    file_path = None
-    filename = None
-    mime_type = None
-    if message and "document" in message:
-        doc = message["document"]
-        downloaded = download_document(doc["id"], doc["mime_type"], doc.get("filename", "document"))
-        if downloaded:
-            file_path, mime_type, filename = downloaded
-            with open(file_path, 'rb') as f:
-                msg.add_attachment(f.read(), maintype=mime_type.split('/')[0],
-                                   subtype=mime_type.split('/')[1], filename=filename)
+    # 1. Calendar: Only in employee's calendar if they connected
+    assignee_creds = get_creds_for_user(assignee_phone) if assignee_phone else None
 
-    if selected.get('email'):
-        gmail.users().messages().send(
-            userId="me",
-            body={'raw': base64.urlsafe_b64encode(msg.as_bytes()).decode()}
-        ).execute()
+    calendar_created = False
+    calendar_note = ""
 
-    # WhatsApp to assignee with optional document
-    recipient_phone = selected.get('phone', "")
-    if recipient_phone:
-        whatsapp_msg = f"🚀 *New Task*\nTask: {data['task']}\nDue: {data.get('deadline', 'ASAP')}"
-        send_whatsapp_message(recipient_phone, whatsapp_msg, PHONE_NUMBER_ID)
-        if file_path:
-            send_whatsapp_document(recipient_phone, file_path, filename, mime_type, PHONE_NUMBER_ID)
+    if assignee_creds:
+        try:
+            calendar_service = build('calendar', 'v3', credentials=assignee_creds)
+            calendar_service.events().insert(
+                calendarId='primary',
+                body={
+                    'summary': f"Task: {data['task']}",
+                    'description': f"Assigned by manager via WhatsApp Bot\nDue: {data.get('deadline') or 'ASAP'}",
+                    'start': {'dateTime': deadline, 'timeZone': 'UTC'},
+                    'end': {'dateTime': end_time, 'timeZone': 'UTC'}
+                }
+            ).execute()
+            calendar_created = True
+        except Exception as e:
+            print("Calendar error:", e)
+            calendar_note = "Calendar event failed (check permissions)."
+    else:
+        calendar_note = f"{assignee_name} has not connected their Google account — no event created in their calendar."
 
-    # Cleanup temp file
-    if file_path and os.path.exists(file_path):
-        os.remove(file_path)
+    # 2. Email: Always from YOUR (manager's) Gmail
+    email_sent = False
+    if MANAGER_CREDS:
+        try:
+            gmail_service = build('gmail', 'v1', credentials=MANAGER_CREDS)
+            msg = EmailMessage()
+            body = f"New task assigned to you:\n\nTask: {data['task']}\nDue: {data.get('deadline') or 'ASAP'}\n\n— Assigned via WhatsApp AI Task Bot"
+            msg.set_content(body)
+            msg['Subject'] = 'New Task Assignment'
+            msg['From'] = 'me'  # Your email
+            msg['To'] = assignee_email
 
-    due_str = data.get('deadline', 'ASAP') or 'ASAP'
-    return f"Task assigned to {data['name'].title()} (Due: {due_str})", data
+            file_path = None
+            if message and "document" in message:
+                doc = message["document"]
+                downloaded = download_document(doc["id"], doc["mime_type"], doc.get("filename", "document"))
+                if downloaded:
+                    file_path, mime_type, filename = downloaded
+                    with open(file_path, 'rb') as f:
+                        msg.add_attachment(f.read(), maintype=mime_type.split('/')[0],
+                                           subtype=mime_type.split('/')[1], filename=filename)
+
+            gmail_service.users().messages().send(
+                userId="me",
+                body={'raw': base64.urlsafe_b64encode(msg.as_bytes()).decode()}
+            ).execute()
+            email_sent = True
+
+            if file_path and os.path.exists(file_path):
+                os.remove(file_path)
+        except Exception as e:
+            print("Email send failed:", e)
+    else:
+        email_sent = False
+
+    # 3. WhatsApp to employee (from bot number)
+    whatsapp_sent = False
+    if assignee_phone:
+        try:
+            whatsapp_msg = f"🚀 *New Task Assigned*\n\nTask: {data['task']}\nDue: {data.get('deadline', 'ASAP')}"
+            send_whatsapp_message(assignee_phone, whatsapp_msg, PHONE_NUMBER_ID)
+
+            if message and "document" in message:
+                doc = message["document"]
+                downloaded = download_document(doc["id"], doc["mime_type"], doc.get("filename", "document"))
+                if downloaded:
+                    file_path, mime_type, filename = downloaded
+                    send_whatsapp_document(assignee_phone, file_path, filename, mime_type, PHONE_NUMBER_ID)
+                    os.remove(file_path)
+
+            whatsapp_sent = True
+        except Exception as e:
+            print("WhatsApp send failed:", e)
+
+    # Final reply to you (manager)
+    reply = f" Task assigned to {assignee_name} (Due: {data.get('deadline', 'ASAP')})"
+
+    if calendar_created:
+        reply += "\n Event created in their calendar"
+    else:
+        reply += f"\n {calendar_note}"
+
+    if email_sent:
+        reply += "\n Email sent from your account"
+    else:
+        reply += "\n Email not sent (check your Gmail connection)"
+
+    if whatsapp_sent:
+        reply += "\n WhatsApp notification sent"
+    else:
+        reply += "\n WhatsApp not sent (test mode restriction or no phone)"
+
+    return reply, data
 
 def handle_message(user_command, sender_phone, phone_number_id, message=None, full_message=None):
     state = load_state()
@@ -373,13 +456,8 @@ def handle_message(user_command, sender_phone, phone_number_id, message=None, fu
 def load_processed_messages():
     try:
         with open('processed_messages.json', 'r') as f:
-            content = f.read().strip()
-            if not content:
-                return set()  # Empty file
-            data = json.loads(content)
-            return set(data)
-    except (FileNotFoundError, json.JSONDecodeError, ValueError):
-        print("processed_messages.json missing or corrupted — starting fresh")
+            return set(json.load(f))
+    except FileNotFoundError:
         return set()
 
 def save_processed_messages(processed_set):
