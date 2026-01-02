@@ -10,7 +10,3 @@ env/
 __pycache__/
 *.py[cod]
 
-# Google Auth Secrets
-token.json
-credentials.json
-team.json
