@@ -11,6 +11,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from dotenv import load_dotenv
 from send_message import send_whatsapp_message, send_whatsapp_document
+from google_auth_oauthlib.flow import Flow # Added for employee OAuth
 
 load_dotenv()
 
@@ -18,6 +19,10 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 SCOPES = ['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/gmail.send']
+
+# Constants for OAuth
+CLIENT_SECRETS_FILE = "credentials.json"
+REDIRECT_URI = "https://farmable-acrimoniously-teresa.ngrok-free.dev/oauth2callback"
 
 # Initialize Gemini client correctly
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -40,11 +45,15 @@ def get_creds_for_user(phone_number):
             creds = Credentials.from_authorized_user_info(creds_data, SCOPES)
             if creds and creds.expired and creds.refresh_token:
                 creds.refresh(Request())
+                # Save refreshed token back to file so it doesn't expire
+                user_tokens[phone_number]["google_credentials"] = json.loads(creds.to_json())
+                with open('user_tokens.json', 'w') as f:
+                    json.dump(user_tokens, f, indent=4)
             return creds
     except (FileNotFoundError, json.JSONDecodeError, KeyError):
         pass
 
-    return None  # No credentials for this user
+    return None
 
 # File helpers
 def load_team():
@@ -87,6 +96,21 @@ def download_document(document_id, mime_type, filename):
             f.write(download_response.content)
         return file_path, mime_type, filename
     return None
+
+def get_authorization_url(phone_number):
+    flow = Flow.from_client_secrets_file(
+        CLIENT_SECRETS_FILE,
+        scopes=SCOPES,
+        redirect_uri=REDIRECT_URI
+    )
+    # Added prompt='consent' to ensure a refresh_token is returned every time
+    auth_url, _ = flow.authorization_url(
+        access_type='offline',
+        include_granted_scopes='true',
+        state=phone_number,
+        prompt='consent'  # <--- ADD THIS LINE
+    )
+    return auth_url
 
 def process_task(user_command, sender_phone, message=None):
     state = load_state()
@@ -160,7 +184,7 @@ Only JSON. No markdown or code blocks.
 
     try:
         response = client.models.generate_content(
-            model="gemini-3-flash-preview",
+            model="gemini-2.5-pro", 
             contents=prompt
         )
         clean_text = response.text.strip()
@@ -219,16 +243,64 @@ def handle_add_employee(data, sender_phone):
 
 def add_employee(data, sender_phone):
     team = load_team()
+    
+    # Get the phone number and remove any extra spaces
+    phone = data.get("phone", "").strip()
+    
+    # Normalize phone: Add 91 if it is a 10-digit number missing the country code
+    if len(phone) == 10 and not phone.startswith('91'):
+        phone = f"91{phone}"
+    
+    email = data.get("email", "").strip()
+    
     new_member = {
         "name": data["name"].lower(),
-        "email": data.get("email", ""),
-        "phone": data.get("phone", "")
+        "email": email,
+        "phone": phone,
+        "manager_phone": sender_phone # Ensuring manager is tracked for callback notifications
     }
+    
     team.append(new_member)
     save_team(team)
-    reply = (f" New employee added!\nName: {data['name'].title()}\n"
-             f"Email: {new_member['email'] or 'not set'}\n"
-             f"Phone: {new_member['phone'] or 'not set'}")
+    
+    reply = f"✅ New employee added: {data['name'].title()}\n"
+    
+    # 1. Generate the authorization link
+    # Note: We still use phone as the 'state' to identify them in the callback
+    auth_link = get_authorization_url(phone) if phone else None
+    
+    if auth_link:
+        welcome_msg = (f"Hello {data['name'].title()}! 🚀\n\n"
+                       f"You've been added to the Task Manager. To sync tasks to your Google Calendar, "
+                       f"please authorize here: {auth_link}")
+
+        # 2. Send via WhatsApp
+        if phone:
+            try:
+                send_whatsapp_message(phone, welcome_msg, PHONE_NUMBER_ID)
+                reply += f"📩 Authorization link sent via WhatsApp to {phone}.\n"
+            except Exception as e:
+                print(f"WhatsApp Auth Send Failed: {e}")
+
+        # 3. Send via Email (Using Manager's Gmail)
+        if email and MANAGER_CREDS:
+            try:
+                gmail_service = build('gmail', 'v1', credentials=MANAGER_CREDS)
+                msg = EmailMessage()
+                msg.set_content(welcome_msg)
+                msg['Subject'] = 'Action Required: Authorize Task Manager Calendar'
+                msg['From'] = 'me'
+                msg['To'] = email
+
+                gmail_service.users().messages().send(
+                    userId="me",
+                    body={'raw': base64.urlsafe_b64encode(msg.as_bytes()).decode()}
+                ).execute()
+                reply += f"📧 Authorization link sent via Email to {email}."
+            except Exception as e:
+                print(f"Email Auth Send Failed: {e}")
+                reply += "\n⚠️ Email sending failed. Check your Gmail connection."
+    
     return reply, data
 
 def handle_assign_task(data, sender_phone, message):
@@ -282,11 +354,14 @@ def assign_task(data, selected, message):
     deadline = data.get('deadline')
     if not deadline:
         start = today.replace(hour=9, minute=0, second=0, microsecond=0)
-        deadline = start.isoformat() + "Z"
-        end_time = (start + datetime.timedelta(hours=1)).isoformat() + "Z"
+        # Removed "Z" to prevent UTC override
+        deadline = start.isoformat() 
+        end_time = (start + datetime.timedelta(hours=1)).isoformat()
     else:
-        start_dt = datetime.datetime.fromisoformat(deadline.replace("Z", "+00:00"))
-        end_time = (start_dt + datetime.timedelta(hours=1)).isoformat() + "Z"
+        # Remove "Z" and treat as local IST time
+        start_dt = datetime.datetime.fromisoformat(deadline.replace("Z", ""))
+        deadline = start_dt.isoformat()
+        end_time = (start_dt + datetime.timedelta(hours=1)).isoformat()
 
     assignee_name = data['name'].title()
     assignee_phone = selected.get('phone', "")
@@ -309,8 +384,9 @@ def assign_task(data, selected, message):
                 body={
                     'summary': f"Task: {data['task']}",
                     'description': f"Assigned by manager via WhatsApp Bot\nDue: {data.get('deadline') or 'ASAP'}",
-                    'start': {'dateTime': deadline, 'timeZone': 'UTC'},
-                    'end': {'dateTime': end_time, 'timeZone': 'UTC'}
+                    # Changed timeZone to Asia/Kolkata
+                    'start': {'dateTime': deadline, 'timeZone': 'Asia/Kolkata'},
+                    'end': {'dateTime': end_time, 'timeZone': 'Asia/Kolkata'}
                 }
             ).execute()
             calendar_created = True
@@ -326,10 +402,9 @@ def assign_task(data, selected, message):
         try:
             gmail_service = build('gmail', 'v1', credentials=MANAGER_CREDS)
             msg = EmailMessage()
-            body = f"New task assigned to you:\n\nTask: {data['task']}\nDue: {data.get('deadline') or 'ASAP'}\n\n— Assigned via WhatsApp AI Task Bot"
-            msg.set_content(body)
+            msg.set_content(f"New task assigned to you:\n\nTask: {data['task']}\nDue: {data.get('deadline') or 'ASAP'}\n\n— Assigned via WhatsApp AI Task Bot")
             msg['Subject'] = 'New Task Assignment'
-            msg['From'] = 'me'  # Your email
+            msg['From'] = 'me'
             msg['To'] = assignee_email
 
             file_path = None
@@ -339,8 +414,7 @@ def assign_task(data, selected, message):
                 if downloaded:
                     file_path, mime_type, filename = downloaded
                     with open(file_path, 'rb') as f:
-                        msg.add_attachment(f.read(), maintype=mime_type.split('/')[0],
-                                           subtype=mime_type.split('/')[1], filename=filename)
+                        msg.add_attachment(f.read(), maintype=mime_type.split('/')[0], subtype=mime_type.split('/')[1], filename=filename)
 
             gmail_service.users().messages().send(
                 userId="me",
@@ -355,7 +429,7 @@ def assign_task(data, selected, message):
     else:
         email_sent = False
 
-    # 3. WhatsApp to employee (from bot number)
+    # 3. WhatsApp to employee
     whatsapp_sent = False
     if assignee_phone:
         try:
@@ -374,23 +448,10 @@ def assign_task(data, selected, message):
         except Exception as e:
             print("WhatsApp send failed:", e)
 
-    # Final reply to you (manager)
     reply = f" Task assigned to {assignee_name} (Due: {data.get('deadline', 'ASAP')})"
-
-    if calendar_created:
-        reply += "\n Event created in their calendar"
-    else:
-        reply += f"\n {calendar_note}"
-
-    if email_sent:
-        reply += "\n Email sent from your account"
-    else:
-        reply += "\n Email not sent (check your Gmail connection)"
-
-    if whatsapp_sent:
-        reply += "\n WhatsApp notification sent"
-    else:
-        reply += "\n WhatsApp not sent (test mode restriction or no phone)"
+    reply += "\n Event created in their calendar" if calendar_created else f"\n {calendar_note}"
+    reply += "\n Email sent from your account" if email_sent else "\n Email not sent"
+    reply += "\n WhatsApp notification sent" if whatsapp_sent else "\n WhatsApp not sent"
 
     return reply, data
 
@@ -398,57 +459,31 @@ def handle_message(user_command, sender_phone, phone_number_id, message=None, fu
     state = load_state()
     processed = load_processed_messages()
 
-    # Get unique message ID for deduplication
-    msg_id = None
-    if full_message and "id" in full_message:
-        msg_id = full_message["id"]
-    elif message and "document" in message:
-        msg_id = message["document"].get("id")
+    msg_id = full_message.get("id") if full_message else (message["document"].get("id") if message and "document" in message else None)
 
-    # Skip if already processed
     if msg_id and msg_id in processed:
-        print(f"Skipping duplicate message ID: {msg_id}")
         return
 
-    # Restore pending document if user is replying after being asked
     pending_doc = state.get(sender_phone, {}).get("pending_document")
-    if pending_doc and not message:  # Text reply after document-only message
+    if pending_doc and not message:
         message = {"document": pending_doc}
 
-    # Case 1: Document sent with no caption/command
     if not user_command and message and "document" in message:
-        doc = message["document"]
-        # Save document for later use
-        state[sender_phone] = {"pending_document": doc}
+        state[sender_phone] = {"pending_document": message["document"]}
         save_state(state)
-
-        reply = ("You sent a document! 📎\n"
-                 "Who should I assign this to and what task?\n\n"
-                 "Reply like:\n"
-                 "• Send to Aadi and tell him to summarize by 9pm\n"
-                 "• Assign this to John for review tomorrow")
-        send_whatsapp_message(sender_phone, reply, phone_number_id)
-
-        # Mark as processed
+        send_whatsapp_message(sender_phone, "Document received! Who should I assign this to?", phone_number_id)
         if msg_id:
             processed.add(msg_id)
             save_processed_messages(processed)
         return
 
-    # Case 2: Normal message with text/caption (with or without document)
     if user_command:
         status, _ = process_task(user_command.strip(), sender_phone, message)
-        print("Bot reply:", status)
         send_whatsapp_message(sender_phone, status, phone_number_id)
-
-        # Clear pending document after successful use
-        if sender_phone in state and "pending_document" in state[sender_phone]:
-            state[sender_phone].pop("pending_document")
-            if not state[sender_phone]:
-                state.pop(sender_phone)
+        if sender_phone in state:
+            state[sender_phone].pop("pending_document", None)
             save_state(state)
 
-    # Mark message as processed (after successful handling)
     if msg_id:
         processed.add(msg_id)
         save_processed_messages(processed)

@@ -1,11 +1,18 @@
 from fastapi import FastAPI, Request, HTTPException, Query
+from fastapi.responses import HTMLResponse # Added for the OAuth success page
 import os
+import json # Fixes "json is not defined"
 from dotenv import load_dotenv
-from engine import handle_message
+
+# Import functions from your other files
+from engine import handle_message, SCOPES, REDIRECT_URI # Fixes "REDIRECT_URI is not defined"
+from send_message import send_whatsapp_message # Fixes "send_whatsapp_message is not defined"
 
 load_dotenv()
 app = FastAPI()
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
+PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
+MANAGER_PHONE = "91XXXXXXXXXX" # Replace with your actual WhatsApp number
 
 @app.get("/")
 async def home():
@@ -63,7 +70,54 @@ async def handle_webhook(request: Request):
                         user_command = doc.get("caption", "").strip()
                         message_data = {"image": doc}
 
-                if user_command or message_data:  # Only process if there's command or document
+                if user_command or message_data:
                     handle_message(user_command, sender_phone, phone_number_id, message=message_data, full_message=message)
 
     return {"status": "EVENT_RECEIVED"}
+
+@app.get("/oauth2callback")
+async def oauth2callback(request: Request):
+    from google_auth_oauthlib.flow import Flow
+    
+    code = request.query_params.get("code")
+    phone = request.query_params.get("state")
+    error = request.query_params.get("error")
+
+    # Dynamically find the manager
+    from engine import load_team, SCOPES, REDIRECT_URI
+    team = load_team()
+    employee_record = next((m for m in team if m.get("phone") == phone), None)
+    target_manager = employee_record.get("manager_phone") if employee_record else None
+
+    if error:
+        if target_manager:
+            send_whatsapp_message(target_manager, f"⚠️ Employee ({phone}) denied access.", PHONE_NUMBER_ID)
+        return HTMLResponse("Access Denied.")
+
+    if code and phone:
+        flow = Flow.from_client_secrets_file("credentials.json", scopes=SCOPES, redirect_uri=REDIRECT_URI)
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+
+        # --- PROTECTED JSON LOADING ---
+        tokens = {}
+        if os.path.exists('user_tokens.json'):
+            try:
+                with open('user_tokens.json', 'r') as f:
+                    content = f.read().strip()
+                    if content: # Only load if file is NOT empty
+                        tokens = json.loads(content)
+            except json.JSONDecodeError:
+                tokens = {} # Reset if file was corrupted/empty
+
+        tokens[phone] = {"google_credentials": json.loads(creds.to_json())}
+        
+        with open('user_tokens.json', 'w') as f:
+            json.dump(tokens, f, indent=4)
+
+        if target_manager:
+            send_whatsapp_message(target_manager, f"✅ Employee ({phone}) connected!", PHONE_NUMBER_ID)
+        
+        return HTMLResponse("<h1>Success!</h1><p>Calendar connected. You can close this.</p>")
+
+    return {"status": "invalid_request"}
