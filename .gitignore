@@ -13,4 +13,4 @@ __pycache__/
 credentials.json
 team.json
 token.json
-user_token.json
+user_tokens.json

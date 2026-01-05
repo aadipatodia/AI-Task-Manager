@@ -83,6 +83,14 @@ async def oauth2callback(request: Request):
     phone = request.query_params.get("state")
     error = request.query_params.get("error")
 
+    # --- START OF NECESSARY CHANGE: PHONE NORMALIZATION ---
+    if phone:
+        phone = phone.strip()
+        # Add 91 if it's a 10-digit number to ensure it matches team.json keys
+        if len(phone) == 10 and not phone.startswith('91'):
+            phone = f"91{phone}"
+    # --- END OF NECESSARY CHANGE ---
+
     # Dynamically find the manager
     from engine import load_team, SCOPES, REDIRECT_URI
     team = load_team()
