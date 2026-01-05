@@ -1,7 +1,6 @@
 import os
 import json
 import datetime
-import requests
 import base64
 from google import genai
 from email.message import EmailMessage
@@ -11,7 +10,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from dotenv import load_dotenv
 from send_message import send_whatsapp_message, send_whatsapp_document
-from google_auth_oauthlib.flow import Flow # Added for employee OAuth
+from google_auth_oauthlib.flow import Flow 
 
 load_dotenv()
 
@@ -20,25 +19,67 @@ PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 SCOPES = ['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/gmail.send']
 
-# Constants for OAuth
 CLIENT_SECRETS_FILE = "credentials.json"
 REDIRECT_URI = "https://farmable-acrimoniously-teresa.ngrok-free.dev/oauth2callback"
 
 # Initialize Gemini client correctly
 client = genai.Client(api_key=GEMINI_API_KEY)
-
 # Manager's (your) credentials — always available for sending emails
 MANAGER_CREDS = None
+
 if os.path.exists('token.json'):
     MANAGER_CREDS = Credentials.from_authorized_user_file('token.json', SCOPES)
     if MANAGER_CREDS.expired and MANAGER_CREDS.refresh_token:
         MANAGER_CREDS.refresh(Request())
+TASKS_FILE = "tasks.json"
+
+USER_DATA_FILE = "users.json"
+
+def load_users():
+    """Loads users from the JSON file as a dictionary."""
+    if not os.path.exists(USER_DATA_FILE):
+        return {}
+    try:
+        with open(USER_DATA_FILE, "r") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        return {}
+    
+def save_user(phone_number, name, email, role="Employee", supervisor_id=None):
+    users = load_users()
+    clean_phone = str(phone_number).replace("+", "").strip()
+    users[clean_phone] = {
+        "name": name,
+        "email": email,
+        "role": role,
+        "supervisor_id": supervisor_id,
+        "subordinates": users.get(clean_phone, {}).get("subordinates", [])
+    }
+    with open(USER_DATA_FILE, "w") as f:
+        json.dump(users, f, indent=4)
+   
+    return f"User {name} successfully {'updated' if clean_phone in users else 'added'}."
+
+def load_tasks():
+    if not os.path.exists(TASKS_FILE):
+        return []
+    try:
+        with open(TASKS_FILE, 'r') as f:
+            content = f.read().strip()
+            return json.loads(content) if content else []
+    except Exception as e:
+        print(f"Error loading tasks: {e}")
+        return []
+
+def save_tasks(tasks):
+    with open(TASKS_FILE, 'w') as f:
+        json.dump(tasks, f, indent=4)
 
 def get_creds_for_user(phone_number):
     try:
         with open('user_tokens.json', 'r') as f:
             user_tokens = json.load(f)
-        
+      
         user_data = user_tokens.get(phone_number)
         if user_data and "google_credentials" in user_data:
             creds_data = user_data["google_credentials"]
@@ -52,7 +93,6 @@ def get_creds_for_user(phone_number):
             return creds
     except (FileNotFoundError, json.JSONDecodeError, KeyError):
         pass
-
     return None
 
 # File helpers
@@ -81,14 +121,14 @@ def save_state(state):
 def download_document(document_id, mime_type, filename):
     url = f"https://graph.facebook.com/v20.0/{document_id}/"
     headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
-    response = requests.get(url, headers=headers)
+    response = send_whatsapp_message.get(url, headers=headers)
     if response.status_code != 200:
         print("Failed to get media URL:", response.text)
         return None
     media_url = response.json().get("url")
     if not media_url:
         return None
-    download_response = requests.get(media_url, headers=headers)
+    download_response = send_whatsapp_message.get(media_url, headers=headers)
     if download_response.status_code == 200:
         safe_filename = "".join(c for c in filename if c.isalnum() or c in "._-")
         file_path = f"temp_{safe_filename}"
@@ -112,11 +152,64 @@ def get_authorization_url(phone_number):
     )
     return auth_url
 
-def process_task(user_command, sender_phone, message=None):
+def format_task_list(task_list, title, is_assigned=False, limit=5):
+    if not task_list:
+        return f"*{title}*\nNo pending tasks.\n\n"
+    
+    now = datetime.datetime.now()
+    sorted_tasks = sorted(task_list, key=lambda x: x['deadline'])
+    response = f"*{title}*\n\n"
+    
+    for i, t in enumerate(sorted_tasks[:limit], 1):
+        dt = datetime.datetime.fromisoformat(t['deadline'])
+        clean_time = dt.strftime("%I:%M %p Today") if dt.date() == now.date() else dt.strftime("%d %b, %I:%M %p")
+            
+        # Line format: 1. Task Description    task id: 10
+        assignee_str = f" (to {t.get('assignee_name', 'Unknown').title()})" if is_assigned else ""
+        response += f"{i}. {t['task']}{assignee_str}    task id: {t['task_id']}\nDue: {clean_time}\n\n"
+            
+    if len(sorted_tasks) > limit:
+        response += f"... and {len(sorted_tasks)-limit} more.\n"
+    return response
+
+def get_pending_tasks(phone, limit=5, today_only=False):
+    tasks = load_tasks()
+    my_tasks = [t for t in tasks if t['assignee_phone'] == phone and t['status'] == 'pending']
+    if today_only:
+        today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+        my_tasks = [t for t in my_tasks if t['deadline'].startswith(today_str)]
+    return format_task_list(my_tasks, "Your Pending Tasks", is_assigned=False, limit=limit)
+
+def get_all_pending_counts(phone):
+    tasks = load_tasks()
+    team = load_team()
+    subs = [e for e in team if e.get('manager_phone') == phone]
+    if not subs:
+        return "You don't have any direct reports."
+    my_employees = {e['phone']: e['name'].title() for e in subs}
+    now = datetime.datetime.now()
+    user_counts = {name: 0 for name in my_employees.values()}
+    for t in tasks:
+        if t['assignee_phone'] in my_employees and t['status'] == 'pending':
+            assignee_name = t['assignee_name'].title()
+            user_counts[assignee_name] += 1
+    report = "*Team Pending Task Counts*\n\n"
+    for name, count in user_counts.items():
+        report += f"{name}: {count} pending\n"
+    return report
+
+def get_user_pending_tasks(target_name, phone, limit=10):
+    team = load_team()
+    employee = next((e for e in team if e.get("name").lower() == target_name.lower() and e.get("manager_phone") == phone), None)
+    if not employee:
+        return f"Could not find employee '{target_name}' in your team.", None
+    return get_pending_tasks(employee['phone'], limit=limit, today_only=False)
+
+def process_task(user_command, sender_phone, message=None, role="manager"):
     state = load_state()
     pending = state.get(sender_phone, {}).get("pending", {})
 
-    # Handle pending yes/no for update employee
+    # 1. Existing Pending State Logic (Unchanged)
     if pending and user_command.lower() in ["yes", "no"] and pending.get("action") == "confirm_update":
         if user_command.lower() == "yes":
             team = load_team()
@@ -132,69 +225,96 @@ def process_task(user_command, sender_phone, message=None):
         else:
             return add_employee(pending["data"], sender_phone)
 
-    # Handle number choice for duplicate names in task assignment
     if pending and user_command.isdigit() and pending.get("action") == "disambiguate_task":
         choice = int(user_command) - 1
         matches = pending["context"]["matches"]
         if 0 <= choice < len(matches):
             selected = matches[choice]
             data = pending["data"]
-            reply, _ = assign_task(data, selected, message)
+            reply, _ = assign_task(data, selected, message, sender_phone)
             state.pop(sender_phone, None)
             save_state(state)
             return reply, data
         return "Invalid choice. Please reply with a valid number.", None
 
-    # Main AI processing with Gemini
+    # 2. Main AI processing with Gemini (Prompt remains exactly as requested)
     today = datetime.datetime.now()
     prompt = f"""
 Today's date is {today.strftime('%A, %b %d, %Y')}.
+User Role: {role.title()}
 User Command: "{user_command}"
 
-You are a smart task & team manager bot. Return ONLY valid JSON.
+You are a smart task & team manager bot. Analyze the command and decide the best action. Return ONLY valid JSON.
+
+Key Guidelines:
+- There is a heirarchal system, so if a person A assigns task to B and C, so A will be called manager of B and C, if B assigns task to D and E, then B will be manager of D and E but still an junior/employee of A 
+- If the user asks for their own pending tasks (e.g., "show me all my tasks", "my tasks", "what tasks do I have"), use "get_my_pending_tasks".
+- If the user asks for tasks they have assigned to others (e.g., "report of all tasks I have assigned", "tasks I assigned", "tasks assigned by me"), use "get_assigned_by_me_tasks".
+- For team-wide report/counts (e.g., "team report", "pending for all"), use "get_all_pending_counts" (Manager only).
+- For a specific person's tasks (e.g., "Adi's tasks"), use "get_user_pending_tasks" (Manager only).
+- For assigning tasks, use "assign_task".
+- For closing a task, use "close_task".
 
 Possible actions:
 - assign_task
-- add_employee
-
-For assign_task:
 {{
   "action": "assign_task",
-  "name": "person name lowercase",
+  "name": "name1, name2, etc in lowercase",
   "task": "full task description",
   "deadline": "ISO datetime or null"
 }}
-
-For add_employee:
+- add_employee
 {{
   "action": "add_employee",
   "name": "person name lowercase",
   "email": "email or empty string",
   "phone": "international phone without + or empty string"
 }}
-
-For error:
+- get_user_pending_tasks 
+{{
+  "action": "get_user_pending_tasks",
+  "name": "person name lowercase",
+  "limit": 10
+}}
+- get_all_pending_counts 
+{{
+  "action": "get_all_pending_counts"
+}}
+- get_my_pending_tasks
+{{
+  "action": "get_my_pending_tasks",
+  "limit": 10,
+  "today_only": false
+}}
+- get_assigned_by_me_tasks
+{{
+  "action": "get_assigned_by_me_tasks",
+  "limit": 10,
+  "today_only": false
+}}
+- close_task
+{{
+  "action": "close_task",
+  "task_id": "the numeric ID of the task",
+  "remarks": "closure comments or status remarks"
+}}
+- error
 {{
   "action": "error",
   "message": "short error"
 }}
-
-Only JSON. No markdown or code blocks.
+Only JSON. No markdown.
 """
-
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-pro", 
+            model="gemini-2.0-flash",
             contents=prompt
         )
         clean_text = response.text.strip()
-
-        # Clean possible markdown
         if clean_text.startswith("```json"):
             clean_text = clean_text[7:].strip()
         if clean_text.endswith("```"):
             clean_text = clean_text[:-3].strip()
-
         data = json.loads(clean_text)
     except Exception as e:
         print("Gemini Error:", e)
@@ -202,29 +322,150 @@ Only JSON. No markdown or code blocks.
 
     action = data.get("action")
 
-    if action == "add_employee":
+    # 3. Action Handling
+    if action == "get_my_pending_tasks":
+        limit = data.get("limit", 5)
+        today_only = data.get("today_only", False)
+        return get_pending_tasks(sender_phone, limit=limit, today_only=today_only), data
+
+    elif action == "get_assigned_by_me_tasks":
+        return get_assigned_by_me_tasks(sender_phone), data
+
+    elif action == "get_all_pending_counts":
+        # Restrict to manager only based on the role determined in handle_message
+        if role != "manager":
+            return "This feature is for managers only.", data
+        return get_all_pending_counts(sender_phone), data
+
+    elif action == "get_user_pending_tasks":
+        if role != "manager":
+            return "This feature is for managers only.", data
+        target_name = data.get("name", "").lower()
+        limit = data.get("limit", 10)
+        return get_user_pending_tasks(target_name, sender_phone, limit=limit), data
+
+    elif action == "add_employee":
         return handle_add_employee(data, sender_phone)
 
     elif action == "assign_task":
-        return handle_assign_task(data, sender_phone, message)
+        names = [n.strip() for n in data['name'].split(',')]
+        all_replies = []
+        for individual_name in names:
+            temp_data = data.copy()
+            temp_data['name'] = individual_name
+            reply, _ = handle_assign_task(temp_data, sender_phone, message)
+            all_replies.append(reply)
+        return "\n\n".join(all_replies), data
+
+    elif action == "close_task":
+        return handle_close_task(data, sender_phone)
 
     else:
         return data.get("message", "I didn't understand that command."), data
 
+# --- Helper function for the new action ---
+def get_assigned_by_me_tasks(phone, limit=20):
+    tasks = load_tasks()
+    my_tasks = [t for t in tasks if t.get('manager_phone') == phone]
+    
+    if not my_tasks:
+        return "You haven't assigned any tasks yet."
+
+    now = datetime.datetime.now()
+    
+    completed = []
+    overdue = []
+    due_today = []
+    upcoming = []
+
+    for t in my_tasks:
+        deadline_dt = datetime.datetime.fromisoformat(t['deadline'])
+        
+        if t['status'] == 'done':
+            completed.append(t)
+        elif deadline_dt < now:
+            overdue.append(t)
+        elif deadline_dt.date() == now.date():
+            due_today.append(t)
+        else:
+            upcoming.append(t)
+
+    # Building the report string
+    report = "📊 *Task Assignment Report*\n\n"
+    
+    report += format_report_section(" OVERDUE", overdue, now)
+    report += format_report_section(" DUE TODAY", due_today, now)
+    report += format_report_section(" UPCOMING", upcoming, now)
+    report += format_report_section(" COMPLETED", completed, now)
+
+    return report
+
+def format_report_section(title, task_list, now):
+    if not task_list:
+        return ""
+    
+    section = f"*{title}*\n"
+    for i, t in enumerate(task_list, 1):
+        dt = datetime.datetime.fromisoformat(t['deadline'])
+        clean_time = dt.strftime("%I:%M %p Today") if dt.date() == now.date() else dt.strftime("%d %b")
+        
+        assignee = t.get('assignee_name', 'Unknown').title()
+        status_note = f" (Done: {t.get('remarks', 'No notes')})" if t['status'] == 'done' else ""
+        
+        section += f"{i}. {t['task']} (to {assignee})    task id: {t['task_id']}\n   Due: {clean_time}{status_note}\n"
+    return section + "\n"
+
+def handle_close_task(data, sender_phone):
+    tasks = load_tasks()
+    task_id = str(data.get("task_id"))
+    remarks = data.get("remarks", "No remarks provided.")
+   
+    # Find the task assigned to this specific sender with this ID
+    task_index = next((i for i, t in enumerate(tasks) if str(t.get("task_id")) == task_id and t.get("assignee_phone") == sender_phone), None)
+   
+    if task_index is None:
+        return f"Could not find a pending task with ID #{task_id} assigned to you.", None
+    # Update Task Status
+    tasks[task_index]["status"] = "done"
+    tasks[task_index]["remarks"] = remarks
+    save_tasks(tasks)
+   
+    task_name = tasks[task_index]["task"]
+    manager_phone = tasks[task_index].get("manager_phone")
+    assignee_name = tasks[task_index].get("assignee_name", "Employee").title()
+    # Notify Manager of the closure
+    if manager_phone:
+        manager_msg = f" *Task Completed*\n\nEmployee: {assignee_name}\nTask: {task_name}\nRemarks: {remarks}"
+        try:
+            send_whatsapp_message(manager_phone, manager_msg, PHONE_NUMBER_ID)
+        except Exception as e:
+            print(f"Failed to notify manager: {e}")
+    return f" Task #{task_id} marked as completed. Your manager has been notified.", data
+
+def handle_get_specific_user_tasks(data, sender_phone):
+    target_name = data.get("name", "").lower()
+    team = load_team()
+   
+    # Find the employee record
+    employee = next((e for e in team if e.get("name") == target_name and e.get("manager_phone") == sender_phone), None)
+   
+    if not employee:
+        return f"Could not find employee '{target_name}' in your team.", None
+   
+    # Use the existing function we wrote earlier but for a specific phone
+    return get_pending_tasks(employee['phone'], limit=10), None
+   
 def handle_add_employee(data, sender_phone):
     name_key = data.get("name", "").lower().strip()
     email = data.get("email", "").strip()
     phone = data.get("phone", "").strip()
-
     if not name_key:
         return "Please provide a name.", data
     if not email and not phone:
         return "Please provide at least email or phone.", data
-
     team = load_team()
     name_lower = name_key.lower()
     matches = [m for m in team if name_lower in m["name"].lower()]
-
     if matches:
         state = load_state()
         state[sender_phone] = {
@@ -238,42 +479,40 @@ def handle_add_employee(data, sender_phone):
         existing = matches[0]
         return (f"Found existing {name_key.title()} (Email: {existing.get('email','none')}, "
                 f"Phone: {existing.get('phone','none')}).\nUpdate this profile? Reply yes/no"), data
-
     return add_employee(data, sender_phone)
 
 def add_employee(data, sender_phone):
     team = load_team()
-    
+   
     # Get the phone number and remove any extra spaces
     phone = data.get("phone", "").strip()
-    
+   
     # Normalize phone: Add 91 if it is a 10-digit number missing the country code
     if len(phone) == 10 and not phone.startswith('91'):
         phone = f"91{phone}"
-    
+   
     email = data.get("email", "").strip()
-    
+   
     new_member = {
         "name": data["name"].lower(),
         "email": email,
         "phone": phone,
         "manager_phone": sender_phone # Ensuring manager is tracked for callback notifications
     }
-    
+   
     team.append(new_member)
     save_team(team)
-    
+   
     reply = f"✅ New employee added: {data['name'].title()}\n"
-    
+   
     # 1. Generate the authorization link
     # Note: We still use phone as the 'state' to identify them in the callback
     auth_link = get_authorization_url(phone) if phone else None
-    
+   
     if auth_link:
         welcome_msg = (f"Hello {data['name'].title()}! 🚀\n\n"
                        f"You've been added to the Task Manager. To sync tasks to your Google Calendar, "
                        f"please authorize here: {auth_link}")
-
         # 2. Send via WhatsApp
         if phone:
             try:
@@ -281,7 +520,6 @@ def add_employee(data, sender_phone):
                 reply += f"📩 Authorization link sent via WhatsApp to {phone}.\n"
             except Exception as e:
                 print(f"WhatsApp Auth Send Failed: {e}")
-
         # 3. Send via Email (Using Manager's Gmail)
         if email and MANAGER_CREDS:
             try:
@@ -291,7 +529,6 @@ def add_employee(data, sender_phone):
                 msg['Subject'] = 'Action Required: Authorize Task Manager Calendar'
                 msg['From'] = 'me'
                 msg['To'] = email
-
                 gmail_service.users().messages().send(
                     userId="me",
                     body={'raw': base64.urlsafe_b64encode(msg.as_bytes()).decode()}
@@ -300,33 +537,27 @@ def add_employee(data, sender_phone):
             except Exception as e:
                 print(f"Email Auth Send Failed: {e}")
                 reply += "\n⚠️ Email sending failed. Check your Gmail connection."
-    
+   
     return reply, data
 
 def handle_assign_task(data, sender_phone, message):
     team = load_team()
     name_key = data.get("name", "").strip()
-
     if not name_key:
         return "Please specify a person's name in the task.", data
-
     name_lower = name_key.lower()
-
     # Partial match: anyone whose full name contains the keyword (case-insensitive)
     matches = [
         member for member in team
         if name_lower in member["name"].lower()
     ]
-
     # No one found
     if not matches:
         return f"No one found with name containing '{name_key}'. Add them first with 'Add employee...'", data
-
     # Exactly one match → assign directly
     if len(matches) == 1:
         selected = matches[0]
-        return assign_task(data, selected, message)
-
+        return assign_task(data, selected, message, sender_phone)
     # Multiple matches → disambiguate
     state = load_state()
     state[sender_phone] = {
@@ -337,45 +568,38 @@ def handle_assign_task(data, sender_phone, message):
         }
     }
     save_state(state)
-
     # Build user-friendly list
     options = "\n".join([
         f"{i+1}. {m['name'].title()} — Email: {m.get('email', 'none')}, Phone: {m.get('phone', 'none')}"
         for i, m in enumerate(matches)
     ])
-
     return (
         f"Multiple people found with name containing '{name_key}':\n{options}\n\n"
         f"Which one do you mean? Reply with the number (1, 2, ...)"
     ), data
 
-def assign_task(data, selected, message):
+def assign_task(data, selected, message, sender_phone):
     today = datetime.datetime.now()
     deadline = data.get('deadline')
     if not deadline:
         start = today.replace(hour=9, minute=0, second=0, microsecond=0)
         # Removed "Z" to prevent UTC override
-        deadline = start.isoformat() 
+        deadline = start.isoformat()
         end_time = (start + datetime.timedelta(hours=1)).isoformat()
     else:
         # Remove "Z" and treat as local IST time
         start_dt = datetime.datetime.fromisoformat(deadline.replace("Z", ""))
         deadline = start_dt.isoformat()
         end_time = (start_dt + datetime.timedelta(hours=1)).isoformat()
-
     assignee_name = data['name'].title()
     assignee_phone = selected.get('phone', "")
     assignee_email = selected.get('email', "")
-
     if not assignee_email:
         return f"Task assigned to {assignee_name}, but no email found in team — email not sent.", data
-
     # 1. Calendar: Only in employee's calendar if they connected
     assignee_creds = get_creds_for_user(assignee_phone) if assignee_phone else None
-
     calendar_created = False
     calendar_note = ""
-
     if assignee_creds:
         try:
             calendar_service = build('calendar', 'v3', credentials=assignee_creds)
@@ -395,7 +619,6 @@ def assign_task(data, selected, message):
             calendar_note = "Calendar event failed (check permissions)."
     else:
         calendar_note = f"{assignee_name} has not connected their Google account — no event created in their calendar."
-
     # 2. Email: Always from YOUR (manager's) Gmail
     email_sent = False
     if MANAGER_CREDS:
@@ -406,7 +629,6 @@ def assign_task(data, selected, message):
             msg['Subject'] = 'New Task Assignment'
             msg['From'] = 'me'
             msg['To'] = assignee_email
-
             file_path = None
             if message and "document" in message:
                 doc = message["document"]
@@ -415,27 +637,23 @@ def assign_task(data, selected, message):
                     file_path, mime_type, filename = downloaded
                     with open(file_path, 'rb') as f:
                         msg.add_attachment(f.read(), maintype=mime_type.split('/')[0], subtype=mime_type.split('/')[1], filename=filename)
-
             gmail_service.users().messages().send(
                 userId="me",
                 body={'raw': base64.urlsafe_b64encode(msg.as_bytes()).decode()}
             ).execute()
             email_sent = True
-
             if file_path and os.path.exists(file_path):
                 os.remove(file_path)
         except Exception as e:
             print("Email send failed:", e)
     else:
         email_sent = False
-
     # 3. WhatsApp to employee
     whatsapp_sent = False
     if assignee_phone:
         try:
             whatsapp_msg = f"🚀 *New Task Assigned*\n\nTask: {data['task']}\nDue: {data.get('deadline', 'ASAP')}"
             send_whatsapp_message(assignee_phone, whatsapp_msg, PHONE_NUMBER_ID)
-
             if message and "document" in message:
                 doc = message["document"]
                 downloaded = download_document(doc["id"], doc["mime_type"], doc.get("filename", "document"))
@@ -443,51 +661,93 @@ def assign_task(data, selected, message):
                     file_path, mime_type, filename = downloaded
                     send_whatsapp_document(assignee_phone, file_path, filename, mime_type, PHONE_NUMBER_ID)
                     os.remove(file_path)
-
             whatsapp_sent = True
         except Exception as e:
             print("WhatsApp send failed:", e)
-
+         
+    tasks = load_tasks()
+    max_id = max([t.get('task_id', 0) for t in tasks] or [0])
+    new_task = {
+        "task_id": max_id + 1,
+        "task": data['task'],
+        "assignee_name": selected.get('name'),
+        "assignee_phone": selected.get('phone'),
+        "manager_phone": sender_phone,
+        "deadline": deadline,  # This is already in IST format now
+        "status": "pending",
+        "remarks": ""
+    }
+    tasks.append(new_task)
+    save_tasks(tasks)
     reply = f" Task assigned to {assignee_name} (Due: {data.get('deadline', 'ASAP')})"
     reply += "\n Event created in their calendar" if calendar_created else f"\n {calendar_note}"
     reply += "\n Email sent from your account" if email_sent else "\n Email not sent"
     reply += "\n WhatsApp notification sent" if whatsapp_sent else "\n WhatsApp not sent"
-
     return reply, data
 
 def handle_message(user_command, sender_phone, phone_number_id, message=None, full_message=None):
     state = load_state()
     processed = load_processed_messages()
-
+    team = load_team()
+    tasks = load_tasks()
+  
+    # 1. Standardize sender_phone
+    if len(sender_phone) == 10 and not sender_phone.startswith('91'):
+        sender_phone = f"91{sender_phone}"
+    
+    # 2. De-duplication check
     msg_id = full_message.get("id") if full_message else (message["document"].get("id") if message and "document" in message else None)
-
     if msg_id and msg_id in processed:
         return
 
-    pending_doc = state.get(sender_phone, {}).get("pending_document")
-    if pending_doc and not message:
-        message = {"document": pending_doc}
+    # Check if they have subordinates in team.json
+    has_subordinates = any(m.get("manager_phone") == sender_phone for m in team)
+    # Check if they have assigned any tasks in tasks.json
+    has_assigned_tasks = any(t.get("manager_phone") == sender_phone for t in tasks)
+    # Check if they are listed as an employee
+    is_listed_as_employee = any(m.get("phone") == sender_phone for m in team)
 
+    # Logic: If you have people under you, you are a manager. 
+    # If you are not in the team file at all, you are likely the "Super Admin" (Manager).
+    if has_subordinates or has_assigned_tasks or not is_listed_as_employee:
+        role = "manager"
+    else:
+        role = "employee"
+
+    # 4. Handle Incoming Documents (Assignment Flow)
     if not user_command and message and "document" in message:
         state[sender_phone] = {"pending_document": message["document"]}
         save_state(state)
-        send_whatsapp_message(sender_phone, "Document received! Who should I assign this to?", phone_number_id)
+        
+        doc_reply = " Document received! Who should I assign this to? (e.g., 'Assign this to Adi by Friday')"
+        send_whatsapp_message(sender_phone, doc_reply, phone_number_id)
+        
         if msg_id:
             processed.add(msg_id)
             save_processed_messages(processed)
         return
 
+    # 5. Process Commands via Gemini
     if user_command:
-        status, _ = process_task(user_command.strip(), sender_phone, message)
-        send_whatsapp_message(sender_phone, status, phone_number_id)
+        # We pass the dynamic role to process_task so Gemini knows what the user is allowed to do
+        status, _ = process_task(user_command.strip(), sender_phone, message, role=role)
+        
+        # Send the final response back to WhatsApp
+        try:
+            send_whatsapp_message(sender_phone, status, phone_number_id)
+        except Exception as e:
+            print(f"Critical WhatsApp Send Failure: {e}")
+
+        # Cleanup state if they were in the middle of a document assignment
         if sender_phone in state:
             state[sender_phone].pop("pending_document", None)
             save_state(state)
 
+    # 6. Save message ID to prevent double-processing
     if msg_id:
         processed.add(msg_id)
         save_processed_messages(processed)
-        
+      
 def load_processed_messages():
     try:
         with open('processed_messages.json', 'r') as f:

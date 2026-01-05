@@ -14,3 +14,6 @@ credentials.json
 team.json
 token.json
 user_tokens.json
+users.json
+tasks.json
+state.json

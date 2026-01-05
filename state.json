@@ -1,1 +1,29 @@
-{}
+{
+    "917428134319": {
+        "pending": {
+            "action": "disambiguate_task",
+            "data": {
+                "action": "assign_task",
+                "name": "abhay",
+                "task": "complete chatbot",
+                "deadline": "2026-01-05T21:00:00"
+            },
+            "context": {
+                "matches": [
+                    {
+                        "name": "abhay",
+                        "email": "ap@mobineers.com",
+                        "phone": "919818006468",
+                        "manager_phone": "919818006468"
+                    },
+                    {
+                        "name": "abhay patodia",
+                        "email": "ap@mobineers.com",
+                        "phone": "919818006468",
+                        "manager_phone": "917428134319"
+                    }
+                ]
+            }
+        }
+    }
+}
