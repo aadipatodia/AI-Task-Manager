@@ -251,7 +251,7 @@ Key Guidelines:
 - If the user asks for their own pending tasks (e.g., "show me all my tasks", "my tasks", "what tasks do I have"), use "get_my_pending_tasks".
 - If the user asks for tasks they have assigned to others (e.g., "report of all tasks I have assigned", "tasks I assigned", "tasks assigned by me"), use "get_assigned_by_me_tasks".
 - For team-wide report/counts (e.g., "team report", "pending for all"), use "get_all_pending_counts" (Manager only).
-- For a specific person's tasks (e.g., "Adi's tasks"), use "get_user_pending_tasks" (Manager only).
+- For a specific person's tasks (e.g., "ABC's tasks"), use "get_user_pending_tasks" (Manager only).
 - For assigning tasks, use "assign_task".
 - For closing a task, use "close_task".
 
@@ -364,7 +364,7 @@ Only JSON. No markdown.
         return data.get("message", "I didn't understand that command."), data
 
 # --- Helper function for the new action ---
-def get_assigned_by_me_tasks(phone, limit=20):
+def get_assigned_by_me_tasks(phone):
     tasks = load_tasks()
     my_tasks = [t for t in tasks if t.get('manager_phone') == phone]
     
@@ -391,7 +391,7 @@ def get_assigned_by_me_tasks(phone, limit=20):
             upcoming.append(t)
 
     # Building the report string
-    report = "📊 *Task Assignment Report*\n\n"
+    report = " *Task Assignment Report*\n\n"
     
     report += format_report_section(" OVERDUE", overdue, now)
     report += format_report_section(" DUE TODAY", due_today, now)
@@ -503,7 +503,7 @@ def add_employee(data, sender_phone):
     team.append(new_member)
     save_team(team)
    
-    reply = f"✅ New employee added: {data['name'].title()}\n"
+    reply = f" New employee added: {data['name'].title()}\n"
    
     # 1. Generate the authorization link
     # Note: We still use phone as the 'state' to identify them in the callback
