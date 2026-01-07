@@ -1,14 +1,20 @@
 [
     {
         "name": "aadi",
-        "email": "aadipatodia2912@gmail.com",
+        "email": "patodiaaadi@gmail.com",
         "phone": "917428134319",
         "manager_phone": "917428134319"
     },
     {
-        "name": "abhay",
-        "email": "abhaypatodia3@gmail.com",
-        "phone": "919818006468",
-        "manager_phone": "917428134319"
+        "name": "ankita mishra",
+        "email": "ankita.mishra@mobineers.com",
+        "phone": "919871536210",
+        "manager_phone": "919871536210"
+    },
+    {
+        "name": "amankitamishra1",
+        "email": "amankitamishra1@gmail.com",
+        "phone": "9871536210",
+        "manager_phone": "919871536210"
     }
 ]

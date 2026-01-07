@@ -206,12 +206,37 @@ def get_user_pending_tasks(target_name, phone, limit=10):
     return get_pending_tasks(employee['phone'], limit=limit, today_only=False)
 
 def process_task(user_command, sender_phone, message=None, role="manager"):
+    # Always load fresh state to ensure we are acting on the most recent data
     state = load_state()
-    pending = state.get(sender_phone, {}).get("pending", {})
+    user_state = state.get(sender_phone, {})
+    pending = user_state.get("pending", {})
+    
+    # 1. State-Based Logic (Digits for Disambiguation and Yes/No for Updates)
+    # We execute this BEFORE the AI call to ensure pending actions take priority.
 
-    # 1. Existing Pending State Logic (Unchanged)
-    if pending and user_command.lower() in ["yes", "no"] and pending.get("action") == "confirm_update":
-        if user_command.lower() == "yes":
+    # Handle Digit Selections (Disambiguation)
+    if pending and user_command.strip().isdigit() and pending.get("action") == "disambiguate_task":
+        choice = int(user_command.strip()) - 1
+        matches = pending.get("context", {}).get("matches", [])
+        if 0 <= choice < len(matches):
+            selected = matches[choice]
+            data = pending["data"]
+            
+            # Proceed with the assignment
+            reply, _ = assign_task(data, selected, message, sender_phone)
+            
+            # Clear state immediately to finalize the action
+            state = load_state()
+            if sender_phone in state:
+                state[sender_phone].pop("pending", None)
+                save_state(state)
+            return reply, data
+        else:
+            return f"Invalid choice. Please reply with a number between 1 and {len(matches)}.", None
+
+    # Handle Yes/No Confirmations
+    if pending and user_command.strip().lower() in ["yes", "no"] and pending.get("action") == "confirm_update":
+        if user_command.strip().lower() == "yes":
             team = load_team()
             existing_index = pending["context"]["existing_index"]
             new_data = pending["data"]
@@ -219,23 +244,19 @@ def process_task(user_command, sender_phone, message=None, role="manager"):
             team[existing_index]["phone"] = new_data.get("phone") or team[existing_index]["phone"]
             save_team(team)
             reply = f"✅ Updated {team[existing_index]['name'].title()}'s profile."
-            state.pop(sender_phone, None)
-            save_state(state)
+            
+            state = load_state()
+            if sender_phone in state:
+                state[sender_phone].pop("pending", None)
+                save_state(state)
             return reply, None
         else:
+            # If "no", clear pending state and proceed to add as a new employee
+            state = load_state()
+            if sender_phone in state:
+                state[sender_phone].pop("pending", None)
+                save_state(state)
             return add_employee(pending["data"], sender_phone)
-
-    if pending and user_command.isdigit() and pending.get("action") == "disambiguate_task":
-        choice = int(user_command) - 1
-        matches = pending["context"]["matches"]
-        if 0 <= choice < len(matches):
-            selected = matches[choice]
-            data = pending["data"]
-            reply, _ = assign_task(data, selected, message, sender_phone)
-            state.pop(sender_phone, None)
-            save_state(state)
-            return reply, data
-        return "Invalid choice. Please reply with a valid number.", None
 
     # 2. Main AI processing with Gemini (Prompt remains exactly as requested)
     today = datetime.datetime.now()
@@ -348,7 +369,7 @@ Only JSON. No markdown.
         return handle_add_employee(data, sender_phone)
 
     elif action == "assign_task":
-        names = [n.strip() for n in data['name'].split(',')]
+        names = [n.strip() for n in data.get('name', '').split(',')]
         all_replies = []
         for individual_name in names:
             temp_data = data.copy()
@@ -737,6 +758,12 @@ def handle_message(user_command, sender_phone, phone_number_id, message=None, fu
             send_whatsapp_message(sender_phone, status, phone_number_id)
         except Exception as e:
             print(f"Critical WhatsApp Send Failure: {e}")
+
+        # --- CRITICAL FIX START ---
+        # Reload state from disk to catch changes made inside process_task 
+        # (like moving to a disambiguation state) before we do any final saving.
+        state = load_state() 
+        # --- CRITICAL FIX END ---
 
         # Cleanup state if they were in the middle of a document assignment
         if sender_phone in state:
