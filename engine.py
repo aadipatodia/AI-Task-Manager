@@ -48,7 +48,7 @@ PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 SCOPES = ['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/gmail.send']
 CLIENT_SECRETS_FILE = "credentials.json"
-REDIRECT_URI = "https://your-app-name.onrender.com/oauth2callback" # UPDATE THIS LATER
+REDIRECT_URI = "https://ai-task-manager-38w7.onrender.com/oauth2callback" 
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 MANAGER_CREDS = None
