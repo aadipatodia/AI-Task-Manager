@@ -1,12 +1,13 @@
 from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import HTMLResponse # Added for the OAuth success page
 import os
-import json # Fixes "json is not defined"
+import json 
 from dotenv import load_dotenv
+from engine import tokens_col
 
 # Import functions from your other files
-from engine import handle_message, SCOPES, REDIRECT_URI # Fixes "REDIRECT_URI is not defined"
-from send_message import send_whatsapp_message # Fixes "send_whatsapp_message is not defined"
+from engine import handle_message, SCOPES, REDIRECT_URI 
+from send_message import send_whatsapp_message 
 
 load_dotenv()
 app = FastAPI()
@@ -108,20 +109,13 @@ async def oauth2callback(request: Request):
         creds = flow.credentials
 
         # --- PROTECTED JSON LOADING ---
-        tokens = {}
-        if os.path.exists('user_tokens.json'):
-            try:
-                with open('user_tokens.json', 'r') as f:
-                    content = f.read().strip()
-                    if content: # Only load if file is NOT empty
-                        tokens = json.loads(content)
-            except json.JSONDecodeError:
-                tokens = {} # Reset if file was corrupted/empty
-
-        tokens[phone] = {"google_credentials": json.loads(creds.to_json())}
-        
-        with open('user_tokens.json', 'w') as f:
-            json.dump(tokens, f, indent=4)
+        # --- MONGODB TOKEN SAVING ---
+        from engine import tokens_col
+        tokens_col.update_one(
+            {"phone": phone}, 
+            {"$set": {"google_credentials": json.loads(creds.to_json())}}, 
+            upsert=True
+        )
 
         if target_manager:
             send_whatsapp_message(target_manager, f"✅ Employee ({phone}) connected!", PHONE_NUMBER_ID)

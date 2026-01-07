@@ -2,6 +2,7 @@ import os
 import json
 import datetime
 import base64
+import requests # Added for download_document fix
 from google import genai
 from email.message import EmailMessage
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -11,112 +12,132 @@ from googleapiclient.discovery import build
 from dotenv import load_dotenv
 from send_message import send_whatsapp_message, send_whatsapp_document
 from google_auth_oauthlib.flow import Flow 
+from pymongo import MongoClient
 
 load_dotenv()
 
+# --- DATABASE INITIALIZATION ---
+MONGO_URI = os.getenv("MONGO_URI")
+db_client = MongoClient(MONGO_URI)
+db = db_client['ai_task_manager']
+
+# MongoDB Collections (Replace your JSON files)
+users_col = db['users']
+tasks_col = db['tasks']
+team_col = db['team']
+state_col = db['state']
+tokens_col = db['user_tokens']
+processed_col = db['processed_messages']
+
+# --- CONFIG FILE RECREATORS (Static Secrets) ---
+def create_file_from_env(filename, env_var_name):
+    """Recreates static config files from Render environment variables."""
+    if not os.path.exists(filename):
+        content = os.getenv(env_var_name)
+        if content:
+            with open(filename, 'w') as f:
+                f.write(content)
+            print(f"✅ Created {filename} from environment.")
+
+create_file_from_env("credentials.json", "CREDENTIALS_JSON")
+create_file_from_env("token.json", "TOKEN_JSON")
+
+# --- GLOBAL CONFIG ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 SCOPES = ['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/gmail.send']
-
 CLIENT_SECRETS_FILE = "credentials.json"
-REDIRECT_URI = "https://farmable-acrimoniously-teresa.ngrok-free.dev/oauth2callback"
+REDIRECT_URI = "https://your-app-name.onrender.com/oauth2callback" # UPDATE THIS LATER
 
-# Initialize Gemini client correctly
 client = genai.Client(api_key=GEMINI_API_KEY)
-# Manager's (your) credentials — always available for sending emails
 MANAGER_CREDS = None
-
 if os.path.exists('token.json'):
     MANAGER_CREDS = Credentials.from_authorized_user_file('token.json', SCOPES)
     if MANAGER_CREDS.expired and MANAGER_CREDS.refresh_token:
         MANAGER_CREDS.refresh(Request())
-TASKS_FILE = "tasks.json"
 
-USER_DATA_FILE = "users.json"
+# --- DATABASE HELPERS (REPLACING JSON HELPERS) ---
 
 def load_users():
-    """Loads users from the JSON file as a dictionary."""
-    if not os.path.exists(USER_DATA_FILE):
-        return {}
-    try:
-        with open(USER_DATA_FILE, "r") as f:
-            return json.load(f)
-    except json.JSONDecodeError:
-        return {}
-    
+    users = {}
+    for user in users_col.find():
+        phone = user.pop("phone_id", None)
+        if phone:
+            user.pop("_id", None)
+            users[phone] = user
+    return users
+
 def save_user(phone_number, name, email, role="Employee", supervisor_id=None):
-    users = load_users()
     clean_phone = str(phone_number).replace("+", "").strip()
-    users[clean_phone] = {
+    existing_user = users_col.find_one({"phone_id": clean_phone})
+    subordinates = existing_user.get("subordinates", []) if existing_user else []
+    
+    user_data = {
         "name": name,
         "email": email,
         "role": role,
         "supervisor_id": supervisor_id,
-        "subordinates": users.get(clean_phone, {}).get("subordinates", [])
+        "subordinates": subordinates
     }
-    with open(USER_DATA_FILE, "w") as f:
-        json.dump(users, f, indent=4)
-   
-    return f"User {name} successfully {'updated' if clean_phone in users else 'added'}."
+    result = users_col.update_one({"phone_id": clean_phone}, {"$set": user_data}, upsert=True)
+    status = "updated" if result.matched_count > 0 else "added"
+    return f"User {name} successfully {status}."
+
+def load_team():
+    """Priority: 1. MongoDB, 2. Seed from Env Var."""
+    team_list = list(team_col.find({}, {"_id": 0}))
+    if not team_list:
+        team_env = os.getenv("TEAM_JSON")
+        if team_env:
+            try:
+                team_list = json.loads(team_env)
+                if team_list:
+                    team_col.insert_many(team_list)
+                    print("🌱 Seeded team from environment.")
+            except: pass
+    return team_list
+
+def save_team(team_list):
+    if not team_list: return
+    team_col.delete_many({})
+    team_col.insert_many(team_list)
 
 def load_tasks():
-    if not os.path.exists(TASKS_FILE):
-        return []
-    try:
-        with open(TASKS_FILE, 'r') as f:
-            content = f.read().strip()
-            return json.loads(content) if content else []
-    except Exception as e:
-        print(f"Error loading tasks: {e}")
-        return []
+    return list(tasks_col.find({}, {"_id": 0}))
 
-def save_tasks(tasks):
-    with open(TASKS_FILE, 'w') as f:
-        json.dump(tasks, f, indent=4)
-
-def get_creds_for_user(phone_number):
-    try:
-        with open('user_tokens.json', 'r') as f:
-            user_tokens = json.load(f)
-      
-        user_data = user_tokens.get(phone_number)
-        if user_data and "google_credentials" in user_data:
-            creds_data = user_data["google_credentials"]
-            creds = Credentials.from_authorized_user_info(creds_data, SCOPES)
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-                # Save refreshed token back to file so it doesn't expire
-                user_tokens[phone_number]["google_credentials"] = json.loads(creds.to_json())
-                with open('user_tokens.json', 'w') as f:
-                    json.dump(user_tokens, f, indent=4)
-            return creds
-    except (FileNotFoundError, json.JSONDecodeError, KeyError):
-        pass
-    return None
-
-# File helpers
-def load_team():
-    try:
-        with open('team.json', 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return []
-
-def save_team(team):
-    with open('team.json', 'w') as f:
-        json.dump(team, f, indent=4)
+def save_tasks(tasks_list):
+    tasks_col.delete_many({})
+    if tasks_list:
+        tasks_col.insert_many(tasks_list)
 
 def load_state():
-    try:
-        with open('state.json', 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
+    doc = state_col.find_one({"id": "global_state"})
+    return doc.get("data", {}) if doc else {}
 
-def save_state(state):
-    with open('state.json', 'w') as f:
-        json.dump(state, f, indent=4)
+def save_state(state_dict):
+    state_col.update_one({"id": "global_state"}, {"$set": {"data": state_dict}}, upsert=True)
+
+def load_processed_messages():
+    return {d["msg_id"] for d in processed_col.find({}, {"msg_id": 1})}
+
+def save_processed_messages(processed_set):
+    for msg_id in processed_set:
+        processed_col.update_one({"msg_id": msg_id}, {"$set": {"msg_id": msg_id}}, upsert=True)
+
+def get_creds_for_user(phone_number):
+    user_data = tokens_col.find_one({"phone": phone_number})
+    if user_data and "google_credentials" in user_data:
+        creds_data = user_data["google_credentials"]
+        creds = Credentials.from_authorized_user_info(creds_data, SCOPES)
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            tokens_col.update_one(
+                {"phone": phone_number}, 
+                {"$set": {"google_credentials": json.loads(creds.to_json())}}
+            )
+        return creds
+    return None
 
 def download_document(document_id, mime_type, filename):
     url = f"https://graph.facebook.com/v20.0/{document_id}/"
@@ -721,11 +742,8 @@ def handle_message(user_command, sender_phone, phone_number_id, message=None, fu
     if msg_id and msg_id in processed:
         return
 
-    # Check if they have subordinates in team.json
     has_subordinates = any(m.get("manager_phone") == sender_phone for m in team)
-    # Check if they have assigned any tasks in tasks.json
     has_assigned_tasks = any(t.get("manager_phone") == sender_phone for t in tasks)
-    # Check if they are listed as an employee
     is_listed_as_employee = any(m.get("phone") == sender_phone for m in team)
 
     # Logic: If you have people under you, you are a manager. 
