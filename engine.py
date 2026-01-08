@@ -13,12 +13,13 @@ from dotenv import load_dotenv
 from send_message import send_whatsapp_message, send_whatsapp_document
 from google_auth_oauthlib.flow import Flow 
 from pymongo import MongoClient
+import certifi
 
 load_dotenv()
 
 # --- DATABASE INITIALIZATION ---
 MONGO_URI = os.getenv("MONGO_URI")
-db_client = MongoClient(MONGO_URI)
+db_client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
 db = db_client['ai_task_manager']
 
 # MongoDB Collections (Replace your JSON files)
@@ -37,7 +38,7 @@ def create_file_from_env(filename, env_var_name):
         if content:
             with open(filename, 'w') as f:
                 f.write(content)
-            print(f"✅ Created {filename} from environment.")
+            print(f" Created {filename} from environment.")
 
 create_file_from_env("credentials.json", "CREDENTIALS_JSON")
 create_file_from_env("token.json", "TOKEN_JSON")
