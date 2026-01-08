@@ -6,7 +6,7 @@ load_dotenv()
 
 ACCESS_TOKEN = os.getenv('ACCESS_TOKEN')
 VERSION = os.getenv('VERSION', 'v21.0')
-PHONE_NUMBER_ID = os.getenv('PHONE_NUMBER_ID')  # Ensure this is set to '951533594704931'
+PHONE_NUMBER_ID = os.getenv('PHONE_NUMBER_ID')  
 
 def get_waba_id_for_phone():
     # Step 1: Get businesses

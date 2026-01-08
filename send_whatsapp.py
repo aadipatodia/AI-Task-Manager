@@ -1,17 +1,19 @@
 import os
 import requests
-import json
 from dotenv import load_dotenv
 
-# Load variables from .env
 load_dotenv()
 
 ACCESS_TOKEN = os.getenv('ACCESS_TOKEN')
-PHONE_NUMBER_ID = "951533594704931"
+# This will now pull 951533594704931 from your environment
+PHONE_NUMBER_ID = os.getenv('PHONE_NUMBER_ID') 
 VERSION = os.getenv('VERSION', 'v21.0')
 
 def send_whatsapp_message(recipient_number, customer_name):
-    
+    """
+    Sends a WhatsApp message using the 'task_manager' template.
+    Uses named parameters ('parameter_name') for variables like {{cust_name}}.
+    """
     url = f"https://graph.facebook.com/{VERSION}/{PHONE_NUMBER_ID}/messages"
     
     headers = {
@@ -26,15 +28,16 @@ def send_whatsapp_message(recipient_number, customer_name):
         "template": {
             "name": "task_manager", 
             "language": {
-                "code": "en_US"  
+                "code": "en"  
             },
             "components": [
                 {
-                    "type": "body",
+                    "type": "header", 
                     "parameters": [
                         {
                             "type": "text",
-                            "text": customer_name  
+                            "text": customer_name,
+                            "parameter_name": "cust_name"  # <--- CRITICAL FIX: Add the variable name here
                         }
                     ]
                 }
@@ -46,17 +49,18 @@ def send_whatsapp_message(recipient_number, customer_name):
         response = requests.post(url, headers=headers, json=payload)
         
         if response.status_code == 200:
-            print(f" Success! Message sent to {customer_name}")
+            print(f" ✅ Success! Message sent to {customer_name}")
             return True
         else:
-            print(f" Failed! Status Code: {response.status_code}")
-            print(f"Response: {response.text}")
+            print(f" ❌ Failed! Status Code: {response.status_code}")
+            print(f" Response: {response.text}")
             return False
             
     except Exception as e:
-        print(f"An error occurred: {e}")
+        print(f" An error occurred: {e}")
         return False
 
 if __name__ == "__main__":
-    CLIENT_PHONE = "917428134319" 
-    send_whatsapp_message(CLIENT_PHONE, "Aadi")
+    # Test with Ankita's number
+    CLIENT_PHONE = "919871536210" 
+    send_whatsapp_message(CLIENT_PHONE, "Ankita")

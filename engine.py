@@ -1,6 +1,6 @@
 import os
 import json
-import datetime
+from datetime import datetime
 import base64
 import requests # Added for download_document fix
 from google import genai
@@ -57,8 +57,6 @@ if os.path.exists('token.json'):
     MANAGER_CREDS = Credentials.from_authorized_user_file('token.json', SCOPES)
     if MANAGER_CREDS.expired and MANAGER_CREDS.refresh_token:
         MANAGER_CREDS.refresh(Request())
-
-# --- DATABASE HELPERS (REPLACING JSON HELPERS) ---
 
 def load_users():
     users = {}
@@ -227,6 +225,86 @@ def get_user_pending_tasks(target_name, phone, limit=10):
         return f"Could not find employee '{target_name}' in your team.", None
     return get_pending_tasks(employee['phone'], limit=limit, today_only=False)
 
+
+def get_performance_stats(target_phone=None):
+    tasks = load_tasks() # Fetch from MongoDB tasks_col
+    team = load_team()   # Fetch from MongoDB team_col
+    now = datetime.now()
+    
+    # Logic for Requirement 2 (Specific) vs Requirement 1 (All)
+    if target_phone:
+        display_team = [e for e in team if e.get('phone') == target_phone]
+    else:
+        display_team = team
+
+    if not display_team:
+        return "No employees found in the database."
+
+    report = "*Performance Report*\n" + "="*20 + "\n"
+
+    for member in display_team:
+        phone = member.get('phone')
+        name = member.get('name', 'Unknown').title()
+        
+        # Filter all tasks for this specific member
+        member_tasks = [t for t in tasks if t.get('assignee_phone') == phone]
+        
+        assigned = len(member_tasks)
+        completed = len([t for t in member_tasks if t.get('status') == 'done'])
+        
+        # Split Pending tasks into Within vs Beyond Time
+        pending_tasks = [t for t in member_tasks if t.get('status') == 'pending']
+        within_time = 0
+        beyond_time = 0
+        
+        for t in pending_tasks:
+            try:
+                # Compare deadline string to current time
+                deadline_dt = datetime.fromisoformat(t['deadline'].replace("Z", ""))
+                if deadline_dt > now:
+                    within_time += 1
+                else:
+                    beyond_time += 1
+            except:
+                within_time += 1 # Fallback for formatting issues
+
+        # Requirement 1 formatting: Aggregates for each person in the loop
+        report += f"\n *Name:* {name}\n"
+        report += f"Task Assigned: {assigned}\n"
+        report += f"Task Completed: {completed}\n"
+        report += f"Task Pending: {len(pending_tasks)}\n"
+        report += f"  - Within time: {within_time}\n"
+        report += f"  - Beyond time: {beyond_time}\n"
+        report += "-"*15
+
+    return report
+
+
+def delete_employee(target_name, manager_phone):
+    """
+    Deletes an employee from the 'team' collection.
+    Only allows deletion if the requester is a manager.
+    """
+    team = load_team() #
+    
+    # 1. Find the employee by name (matching lowercase)
+    # Ensuring the manager can only delete their own reports
+    employee = next((e for e in team if target_name in e.get("name", "").lower()), None)
+    
+    if not employee:
+        return f" Could not find an employee named '{target_name.title()}' in your team."
+
+    # 2. Perform the deletion in MongoDB
+    result = team_col.delete_one({"phone": employee['phone']}) #
+    
+    if result.deleted_count > 0:
+        return f" Successfully removed {employee['name'].title()} from the database."
+    else:
+        return f" Error: Failed to delete {employee['name'].title()} from MongoDB."
+    
+    if employee['phone'] == manager_phone:
+        return " Error: You cannot delete your own profile."
+
 def process_task(user_command, sender_phone, message=None, role="manager"):
     # Always load fresh state to ensure we are acting on the most recent data
     state = load_state()
@@ -265,7 +343,7 @@ def process_task(user_command, sender_phone, message=None, role="manager"):
             team[existing_index]["email"] = new_data.get("email") or team[existing_index]["email"]
             team[existing_index]["phone"] = new_data.get("phone") or team[existing_index]["phone"]
             save_team(team)
-            reply = f"✅ Updated {team[existing_index]['name'].title()}'s profile."
+            reply = f" Updated {team[existing_index]['name'].title()}'s profile."
             
             state = load_state()
             if sender_phone in state:
@@ -282,6 +360,7 @@ def process_task(user_command, sender_phone, message=None, role="manager"):
 
     # 2. Main AI processing with Gemini (Prompt remains exactly as requested)
     today = datetime.datetime.now()
+    
     prompt = f"""
 Today's date is {today.strftime('%A, %b %d, %Y')}.
 User Role: {role.title()}
@@ -346,6 +425,20 @@ Possible actions:
   "action": "error",
   "message": "short error"
 }}
+- get_team_performance 
+{
+  "action": "get_team_performance"
+}
+- get_employee_performance
+{
+  "action": "get_employee_performance",
+  "name": "person name lowercase"
+}
+- delete_employee
+{
+  "action": "delete_employee",
+  "name": "person name lowercase"
+}
 Only JSON. No markdown.
 """
     try:
@@ -402,6 +495,40 @@ Only JSON. No markdown.
 
     elif action == "close_task":
         return handle_close_task(data, sender_phone)
+    
+    # REQUIREMENT 1: Team-wide stats
+    elif action == "get_team_performance":
+        if role != "manager": 
+            return "This feature is for managers only.", data
+        # No target_phone passed -> Returns stats for everyone
+        return get_performance_stats(), data
+
+    # REQUIREMENT 2: Specific employee stats
+    elif action == "get_employee_performance":
+        if role != "manager": 
+            return "This feature is for managers only.", data
+        
+        target_name = data.get("name", "").lower()
+        team = load_team() #
+        
+        # Search for the specific employee by name
+        employee = next((e for e in team if target_name in e.get("name", "").lower()), None)
+        
+        if not employee:
+            return f"Could not find employee '{target_name}' in your team.", data
+            
+        # Specific phone passed -> Returns stats ONLY for that person
+        return get_performance_stats(target_phone=employee['phone']), data
+    
+    elif action == "delete_employee":
+        if role != "manager": # Restrict to Managers only
+            return "Unauthorized. Only managers can delete users.", data
+            
+        target_name = data.get("name", "").lower()
+        if not target_name:
+            return "Please specify the name of the person you want to delete.", data
+            
+        return delete_employee(target_name, sender_phone)
 
     else:
         return data.get("message", "I didn't understand that command."), data
