@@ -103,7 +103,7 @@ def save_team(team_list):
     team_col.insert_many(team_list)
 
 def load_tasks():
-    return list(tasks_col.find({}, {"_id": 0}))
+    return list(tasks_col.find({}, {"_id": 0}).sort("deadline", 1))
 
 def save_tasks(tasks_list):
     tasks_col.delete_many({})
@@ -901,7 +901,7 @@ def handle_message(user_command, sender_phone, phone_number_id, message=None, fu
         
         # Send the final response back to WhatsApp
         try:
-            send_whatsapp_message(sender_phone, status, phone_number_id)
+            send_whatsapp_message(sender_phone, str(status), phone_number_id)
         except Exception as e:
             print(f"Critical WhatsApp Send Failure: {e}")
 
