@@ -997,14 +997,3 @@ def handle_message(user_command, sender_phone, phone_number_id, message=None, fu
     if msg_id:
         processed.add(msg_id)
         save_processed_messages(processed)
-      
-def load_processed_messages():
-    try:
-        with open('processed_messages.json', 'r') as f:
-            return set(json.load(f))
-    except FileNotFoundError:
-        return set()
-
-def save_processed_messages(processed_set):
-    with open('processed_messages.json', 'w') as f:
-        json.dump(list(processed_set), f)
