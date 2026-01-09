@@ -263,7 +263,7 @@ def get_user_pending_tasks(target_name, phone, limit=10):
 def get_performance_stats(target_phone=None):
     tasks = load_tasks() # Fetch from MongoDB tasks_col
     team = load_team()   # Fetch from MongoDB team_col
-    now = datetime.now()
+    now = datetime.datetime.now()
     
     # Logic for Requirement 2 (Specific) vs Requirement 1 (All)
     if target_phone:
@@ -319,25 +319,27 @@ def delete_employee(target_name, manager_phone):
     Deletes an employee from the 'team' collection.
     Only allows deletion if the requester is a manager.
     """
-    team = load_team() #
+    team = load_team()
     
     # 1. Find the employee by name (matching lowercase)
-    # Ensuring the manager can only delete their own reports
     employee = next((e for e in team if target_name in e.get("name", "").lower()), None)
     
     if not employee:
-        return f" Could not find an employee named '{target_name.title()}' in your team."
+        return f"❌ Could not find an employee named '{target_name.title()}' in your team."
 
-    # 2. Perform the deletion in MongoDB
-    result = team_col.delete_one({"phone": employee['phone']}) #
-    
-    if result.deleted_count > 0:
-        return f" Successfully removed {employee['name'].title()} from the database."
-    else:
-        return f" Error: Failed to delete {employee['name'].title()} from MongoDB."
-    
+    # 2. CRITICAL CHECK: Prevent the manager from deleting themselves
+    # We do this BEFORE the deletion happens.
     if employee['phone'] == manager_phone:
-        return " Error: You cannot delete your own profile."
+        return "❌ Error: You cannot delete your own profile. Access denied."
+
+    # 3. Perform the deletion in MongoDB
+    result = team_col.delete_one({"phone": employee['phone']})
+    
+    # 4. Return the result based on whether the DB actually removed a document
+    if result.deleted_count > 0:
+        return f"✅ Successfully removed {employee['name'].title()} from the database."
+    else:
+        return f"⚠️ Error: Found {employee['name'].title()} but failed to remove from MongoDB."
 
 def process_task(user_command, sender_phone, message=None, role="manager"):
     # Always load fresh state to ensure we are acting on the most recent data
@@ -413,7 +415,7 @@ Key Guidelines:
 
 Possible actions:
 - assign_task
-{{
+{{  
   "action": "assign_task",
   "name": "name1, name2, etc in lowercase",
   "task": "full task description",
