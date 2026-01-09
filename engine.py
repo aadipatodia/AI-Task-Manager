@@ -232,7 +232,8 @@ def get_pending_tasks(phone, limit=5, today_only=False):
     if today_only:
         today_str = datetime.datetime.now().strftime("%Y-%m-%d")
         my_tasks = [t for t in my_tasks if t['deadline'].startswith(today_str)]
-    return format_task_list(my_tasks, "Your Pending Tasks", is_assigned=False, limit=limit)
+    
+    return format_task_list(my_tasks[:limit], "Your Pending Tasks", is_assigned=False)
 
 def get_all_pending_counts(phone):
     tasks = load_tasks()
@@ -513,11 +514,21 @@ Only JSON. No markdown.
 
     # Change get_user_pending_tasks
     elif action == "get_user_pending_tasks":
-        if role != "manager": return "Managers only.", data
+        if role != "manager": 
+            return "This feature is for managers only.", data
+            
         target_name = data.get("name", "").lower()
         team = load_team()
         employee = next((e for e in team if target_name in e.get("name", "").lower()), None)
-        if not employee: return f"Could not find {target_name}.", data
+        
+        if not employee:
+            return f"Could not find employee '{target_name}' in your team.", data
+        
+        tasks = load_tasks()
+        user_tasks = [t for t in tasks if t.get('assignee_phone') == employee['phone']]
+        
+        # FIX: Ensure we return a tuple (Message, Data)
+        return format_task_list(user_tasks, f"Pending Tasks for {target_name.title()}"), data
 
         tasks = load_tasks()
         user_tasks = [t for t in tasks if t.get('assignee_phone') == employee['phone']]
@@ -564,14 +575,16 @@ Only JSON. No markdown.
         return get_performance_stats(target_phone=employee['phone']), data
     
     elif action == "delete_employee":
-        if role != "manager": # Restrict to Managers only
+        if role != "manager": 
             return "Unauthorized. Only managers can delete users.", data
             
         target_name = data.get("name", "").lower()
         if not target_name:
             return "Please specify the name of the person you want to delete.", data
             
-        return delete_employee(target_name, sender_phone)
+        # FIX: Ensure we return a tuple (Message, Data)
+        result_message = delete_employee(target_name, sender_phone)
+        return result_message, data
 
     else:
         return data.get("message", "I didn't understand that command."), data
