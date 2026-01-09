@@ -538,15 +538,26 @@ Only JSON. No markdown.
             model="gemini-2.0-flash",
             contents=prompt
         )
+        # 1. Clean the text thoroughly
         clean_text = response.text.strip()
-        if clean_text.startswith("```json"):
-            clean_text = clean_text[7:].strip()
-        if clean_text.endswith("```"):
-            clean_text = clean_text[:-3].strip()
+        
+        # 2. Remove Markdown code blocks if present
+        if clean_text.startswith("```"):
+            # This handles ```json ... ``` or just ``` ... ```
+            lines = clean_text.splitlines()
+            if len(lines) > 2:
+                clean_text = "\n".join(lines[1:-1]).strip()
+        
+        # 3. Final check for empty response before parsing
+        if not clean_text:
+            raise ValueError("Gemini returned an empty response.")
+            
         data = json.loads(clean_text)
+        
     except Exception as e:
-        print("Gemini Error:", e)
-        return "Sorry, AI is having trouble understanding. Try again.", None
+        print(f"Gemini/JSON Error: {e}")
+        print(f"Raw Response received: {response.text if 'response' in locals() else 'None'}")
+        return "Sorry, I had trouble processing that command. Please try again with a clearer instruction.", None
 
     action = data.get("action")
 
