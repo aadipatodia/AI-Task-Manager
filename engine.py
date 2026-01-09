@@ -1052,19 +1052,22 @@ def handle_message(user_command, sender_phone, phone_number_id, message=None, fu
     if len(sender_phone) == 10 and not sender_phone.startswith('91'):
         sender_phone = f"91{sender_phone}"
     
+    # Look up user in the database
     user = team_col.find_one({"phone": sender_phone})
+    
+    # --- AUTHORIZATION FEATURE REMOVED ---
+    # Instead of blocking unknown users, we assign them a default setup role
     if not user:
-        send_whatsapp_message(sender_phone, "Unauthorized. Please contact your company Chairman.", phone_number_id)
-        return
-
-    company_id = user.get("company_id")
-    role = user.get("role", "employee") 
+        # Defaulting to 'MASTER_CO' and 'chairman' role for initial setup/testing
+        company_id = "MASTER_CO"
+        role = "chairman" 
+    else:
+        company_id = user.get("company_id")
+        role = user.get("role", "employee") 
     # ------------------------------------------
 
-    state = load_state(company_id) # Updated to pass company_id
+    state = load_state(company_id) 
     processed = load_processed_messages()
-    team = load_team(company_id)   # Updated to pass company_id
-    tasks = load_tasks(company_id) # Updated to pass company_id
   
     # 2. De-duplication check
     msg_id = full_message.get("id") if full_message else (message["document"].get("id") if message and "document" in message else None)
@@ -1074,7 +1077,7 @@ def handle_message(user_command, sender_phone, phone_number_id, message=None, fu
     # 4. Handle Incoming Documents (Assignment Flow)
     if not user_command and message and "document" in message:
         state[sender_phone] = {"pending_document": message["document"]}
-        save_state(state, company_id) # Updated to pass company_id
+        save_state(state, company_id) 
         
         doc_reply = " Document received! Who should I assign this to? (e.g., 'Assign this to Adi by Friday')"
         send_whatsapp_message(sender_phone, doc_reply, phone_number_id)
@@ -1086,7 +1089,7 @@ def handle_message(user_command, sender_phone, phone_number_id, message=None, fu
 
     # 5. Process Commands via Gemini
     if user_command:
-        # We pass the company_id and the explicit role from the database
+        # Passes the company_id and role (either from DB or default) to the AI
         status, _ = process_task(user_command.strip(), sender_phone, company_id, message, role=role)
         
         # Send the final response back to WhatsApp
@@ -1095,15 +1098,11 @@ def handle_message(user_command, sender_phone, phone_number_id, message=None, fu
         except Exception as e:
             print(f"Critical WhatsApp Send Failure: {e}")
 
-        # --- CRITICAL FIX START ---
-        # Reload state from disk using company_id
+        # Reload and cleanup state
         state = load_state(company_id) 
-        # --- CRITICAL FIX END ---
-
-        # Cleanup state if they were in the middle of a document assignment
         if sender_phone in state:
             state[sender_phone].pop("pending_document", None)
-            save_state(state, company_id) # Updated to pass company_id
+            save_state(state, company_id)
 
     # 6. Save message ID to prevent double-processing
     if msg_id:
