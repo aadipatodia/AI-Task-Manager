@@ -229,10 +229,16 @@ def format_task_list(task_list, title, is_assigned=False):
 def get_pending_tasks(phone, limit=5, today_only=False):
     tasks = load_tasks()
     my_tasks = [t for t in tasks if t['assignee_phone'] == phone and t['status'] == 'pending']
+    
     if today_only:
         today_str = datetime.datetime.now().strftime("%Y-%m-%d")
         my_tasks = [t for t in my_tasks if t['deadline'].startswith(today_str)]
-    return format_task_list(my_tasks, "Your Pending Tasks", is_assigned=False, limit=limit)
+    
+    # Apply the limit here by slicing the list
+    limited_tasks = my_tasks[:limit]
+    
+    # Remove 'limit=limit' from the function call
+    return format_task_list(limited_tasks, "Your Pending Tasks", is_assigned=False)
 
 def get_all_pending_counts(phone):
     tasks = load_tasks()
