@@ -14,9 +14,6 @@ from send_message import send_whatsapp_message, send_whatsapp_document
 from google_auth_oauthlib.flow import Flow 
 from pymongo import MongoClient
 import certifi
-from azure.ai.contentsafety import ContentSafetyClient
-from azure.core.credentials import AzureKeyCredential
-from azure.ai.contentsafety.models import AnalyzeTextOptions
 
 load_dotenv()
 
@@ -262,31 +259,6 @@ def get_user_pending_tasks(target_name, phone, limit=10):
         return f"Could not find employee '{target_name}' in your team.", None
     return get_pending_tasks(employee['phone'], limit=limit, today_only=False)
 
-def is_safe(text):
-    """Checks text for inappropriate content using Azure AI Content Safety."""
-    key = os.getenv("CONTENT_SAFETY_KEY")
-    endpoint = os.getenv("CONTENT_SAFETY_ENDPOINT")
-    
-    if not key or not endpoint:
-        print("⚠️ Content Safety credentials missing. Skipping check.")
-        return True
-
-    client = ContentSafetyClient(endpoint, AzureKeyCredential(key))
-    
-    try:
-        # Request a check for Hate, Self-Harm, Sexual, and Violence
-        request = AnalyzeTextOptions(text=text)
-        response = client.analyze_text(request)
-        
-        for category in [response.hate_result, response.self_harm_result, 
-                         response.sexual_result, response.violence_result]:
-            if category.severity > 0:
-                return False
-        return True
-    except Exception as e:
-        print(f"Content Safety Error: {e}")
-        return True 
-
 def get_performance_stats(target_phone=None):
     tasks = load_tasks() # Fetch from MongoDB tasks_col
     team = load_team()   # Fetch from MongoDB team_col
@@ -375,11 +347,6 @@ def process_task(user_command, sender_phone, message=None, role="manager"):
     pending = user_state.get("pending", {})
     
     # 1. State-Based Logic (Digits for Disambiguation and Yes/No for Updates)
-    # We execute this BEFORE the AI call to ensure pending actions take priority.
-
-    # Handle Digit Selections (Disambiguation)
-    if not is_safe(user_command):
-        return "❌ Action Blocked: The message contains inappropriate content and cannot be processed.", None
     
     if pending and user_command.strip().isdigit() and pending.get("action") == "disambiguate_task":
         choice = int(user_command.strip()) - 1
