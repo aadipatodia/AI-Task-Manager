@@ -172,25 +172,59 @@ def get_authorization_url(phone_number):
     )
     return auth_url
 
-def format_task_list(task_list, title, is_assigned=False, limit=5):
+def format_task_list(task_list, title, is_assigned=False):
+    """
+    Requirement 3: Groups tasks into OVERDUE, DUE TODAY, UPCOMING, and COMPLETED.
+    Includes team pending counts at the bottom.
+    """
     if not task_list:
-        return f"*{title}*\nNo pending tasks.\n\n"
+        return f"*{title}*\nNo tasks found.\n"
     
     now = datetime.datetime.now()
-    sorted_tasks = sorted(task_list, key=lambda x: x['deadline'])
-    response = f"*{title}*\n\n"
-    
-    for i, t in enumerate(sorted_tasks[:limit], 1):
-        dt = datetime.datetime.fromisoformat(t['deadline'])
-        clean_time = dt.strftime("%I:%M %p Today") if dt.date() == now.date() else dt.strftime("%d %b, %I:%M %p")
-            
-        # Line format: 1. Task Description    task id: 10
-        assignee_str = f" (to {t.get('assignee_name', 'Unknown').title()})" if is_assigned else ""
-        response += f"{i}. {t['task']}{assignee_str}    task id: {t['task_id']}\nDue: {clean_time}\n\n"
-            
-    if len(sorted_tasks) > limit:
-        response += f"... and {len(sorted_tasks)-limit} more.\n"
-    return response
+    overdue, due_today, upcoming, completed = [], [], [], []
+    team_counts = {}
+
+    for t in task_list:
+        # 1. Track Pending Counts for Footer
+        assignee_name = t.get('assignee_name', 'Unknown').title()
+        if t['status'] != 'done':
+            team_counts[assignee_name] = team_counts.get(assignee_name, 0) + 1
+
+        # 2. Parse Date (Removing 'Z' if present)
+        dt = datetime.datetime.fromisoformat(t['deadline'].replace("Z", ""))
+        
+        # 3. Format Strings
+        is_today = dt.date() == now.date()
+        time_str = f"{dt.strftime('%I:%M %p')} Today" if is_today else dt.strftime("%d %b")
+        assignee_ctx = f" (to {assignee_name})" if is_assigned else ""
+        status_note = f" (Done: {t.get('remarks', 'closed')})" if t['status'] == 'done' else ""
+        
+        task_line = f"{t['task']}{assignee_ctx}    task id: {t['task_id']}\n   Due: {time_str}{status_note}"
+
+        # 4. Categorize
+        if t['status'] == 'done':
+            completed.append(task_line)
+        elif dt < now:
+            overdue.append(task_line)
+        elif is_today:
+            due_today.append(task_line)
+        else:
+            upcoming.append(task_line)
+
+    # 5. Build final report
+    report = f"*{title}*\n"
+    if overdue: report += "\n*🔴 OVERDUE*\n" + "\n".join([f"{i+1}. {l}" for i, l in enumerate(overdue)]) + "\n"
+    if due_today: report += "\n*🟡 DUE TODAY*\n" + "\n".join([f"{i+1}. {l}" for i, l in enumerate(due_today)]) + "\n"
+    if upcoming: report += "\n*🟢 UPCOMING*\n" + "\n".join([f"{i+1}. {l}" for i, l in enumerate(upcoming)]) + "\n"
+    if completed: report += "\n*✅ COMPLETED*\n" + "\n".join([f"{i+1}. {l}" for i, l in enumerate(completed)]) + "\n"
+
+    # 6. Add Team Pending Summary
+    if is_assigned and team_counts:
+        report += "\n*team pending task count*\n"
+        for name, count in team_counts.items():
+            report += f"{name}: {count}\n"
+
+    return report
 
 def get_pending_tasks(phone, limit=5, today_only=False):
     tasks = load_tasks()
@@ -464,22 +498,32 @@ Only JSON. No markdown.
         today_only = data.get("today_only", False)
         return get_pending_tasks(sender_phone, limit=limit, today_only=today_only), data
 
-    elif action == "get_assigned_by_me_tasks":
-        return get_assigned_by_me_tasks(sender_phone), data
-
+    # Change get_all_pending_counts to use the new categorized view
     elif action == "get_all_pending_counts":
-        # Restrict to manager only based on the role determined in handle_message
-        if role != "manager":
-            return "This feature is for managers only.", data
-        return get_all_pending_counts(sender_phone), data
+        if role != "manager": return "Managers only.", data
+        tasks = load_tasks()
+        # Filter for all tasks assigned by this manager
+        my_assigned = [t for t in tasks if t.get('manager_phone') == sender_phone]
+        return format_task_list(my_assigned, "Team Pending Tasks", is_assigned=True), data
 
+    # Change get_assigned_by_me_tasks to use the same view
+    elif action == "get_assigned_by_me_tasks":
+        tasks = load_tasks()
+        my_assigned = [t for t in tasks if t.get('manager_phone') == sender_phone]
+        return format_task_list(my_assigned, "Tasks Assigned by Me", is_assigned=True), data
+
+    # Change get_user_pending_tasks
     elif action == "get_user_pending_tasks":
-        if role != "manager":
-            return "This feature is for managers only.", data
+        if role != "manager": return "Managers only.", data
         target_name = data.get("name", "").lower()
-        limit = data.get("limit", 10)
-        return get_user_pending_tasks(target_name, sender_phone, limit=limit), data
+        team = load_team()
+        employee = next((e for e in team if target_name in e.get("name", "").lower()), None)
+        if not employee: return f"Could not find {target_name}.", data
 
+        tasks = load_tasks()
+        user_tasks = [t for t in tasks if t.get('assignee_phone') == employee['phone']]
+        return format_task_list(user_tasks, f"Pending Tasks for {target_name.title()}", is_assigned=True), data
+    
     elif action == "add_employee":
         return handle_add_employee(data, sender_phone)
 
@@ -535,7 +579,7 @@ Only JSON. No markdown.
 
 # --- Helper function for the new action ---
 def get_assigned_by_me_tasks(phone):
-    tasks = load_tasks()
+    tasks = load_tasks() # Already sorts by deadline
     my_tasks = [t for t in tasks if t.get('manager_phone') == phone]
     
     if not my_tasks:
@@ -543,14 +587,20 @@ def get_assigned_by_me_tasks(phone):
 
     now = datetime.datetime.now()
     
-    completed = []
-    overdue = []
-    due_today = []
-    upcoming = []
+    # Categories for Requirement 3
+    completed, overdue, due_today, upcoming = [], [], [], []
+    # Dictionary for Team Pending Task Count summary
+    team_counts = {}
 
     for t in my_tasks:
-        deadline_dt = datetime.datetime.fromisoformat(t['deadline'])
+        assignee_name = t.get('assignee_name', 'Unknown').title()
+        deadline_dt = datetime.datetime.fromisoformat(t['deadline'].replace("Z", ""))
         
+        # Track pending counts for the bottom summary
+        if t['status'] != 'done':
+            team_counts[assignee_name] = team_counts.get(assignee_name, 0) + 1
+
+        # Categorize tasks
         if t['status'] == 'done':
             completed.append(t)
         elif deadline_dt < now:
@@ -560,30 +610,49 @@ def get_assigned_by_me_tasks(phone):
         else:
             upcoming.append(t)
 
-    # Building the report string
-    report = " *Task Assignment Report*\n\n"
+    # Build the final formatted string
+    report = " *Task Assignment Report*\n"
     
+    # Use the helper to format each section exactly as requested
     report += format_report_section(" OVERDUE", overdue, now)
     report += format_report_section(" DUE TODAY", due_today, now)
     report += format_report_section(" UPCOMING", upcoming, now)
     report += format_report_section(" COMPLETED", completed, now)
 
+    # Add the "Team Pending Task Count" at the bottom
+    if team_counts:
+        report += "\n*team pending task count*\n"
+        for name, count in team_counts.items():
+            report += f"{name}: {count}\n"
+
     return report
+
 
 def format_report_section(title, task_list, now):
     if not task_list:
         return ""
     
-    section = f"*{title}*\n"
+    section = f"\n* {title}*\n"
     for i, t in enumerate(task_list, 1):
-        dt = datetime.datetime.fromisoformat(t['deadline'])
-        clean_time = dt.strftime("%I:%M %p Today") if dt.date() == now.date() else dt.strftime("%d %b")
+        dt = datetime.datetime.fromisoformat(t['deadline'].replace("Z", ""))
+        
+        # Specific formatting: Show "Today" if it matches, else show the Date
+        if dt.date() == now.date():
+            time_str = f"{dt.strftime('%I:%M %p')} Today"
+        else:
+            time_str = dt.strftime("%d %b")
         
         assignee = t.get('assignee_name', 'Unknown').title()
-        status_note = f" (Done: {t.get('remarks', 'No notes')})" if t['status'] == 'done' else ""
         
-        section += f"{i}. {t['task']} (to {assignee})    task id: {t['task_id']}\n   Due: {clean_time}{status_note}\n"
-    return section + "\n"
+        # Requirement 6: Specific "Done" status format
+        status_note = ""
+        if t['status'] == 'done':
+            # You can customize "closed by manager" or use the actual remarks
+            status_note = f" (Done: {t.get('remarks', 'closed by manager')})"
+        
+        section += (f"{i}. {t['task']} (to {assignee})    task id: {t['task_id']}\n"
+                    f"   Due: {time_str}{status_note}\n")
+    return section
 
 def handle_close_task(data, sender_phone):
     tasks = load_tasks()
@@ -653,32 +722,39 @@ def handle_add_employee(data, sender_phone):
 
 def add_employee(data, sender_phone):
     team = load_team()
-   
+    
     # Get the phone number and remove any extra spaces
     phone = data.get("phone", "").strip()
-   
+    
     # Normalize phone: Add 91 if it is a 10-digit number missing the country code
     if len(phone) == 10 and not phone.startswith('91'):
         phone = f"91{phone}"
-   
+    
+    # --- NEW DUPLICATE CHECK ---
+    # Check if this phone number is already assigned to someone in the team list
+    existing_member = next((e for e in team if e.get("phone") == phone), None)
+    
+    if existing_member:
+        return (f"❌ Error: A user with the phone number {phone} already exists "
+                f"({existing_member['name'].title()}). Duplicate entries are not allowed."), data
+
     email = data.get("email", "").strip()
-   
+    
     new_member = {
         "name": data["name"].lower(),
         "email": email,
         "phone": phone,
         "manager_phone": sender_phone # Ensuring manager is tracked for callback notifications
     }
-   
+    
     team.append(new_member)
     save_team(team)
-   
+    
     reply = f" New employee added: {data['name'].title()}\n"
-   
+    
     # 1. Generate the authorization link
-    # Note: We still use phone as the 'state' to identify them in the callback
     auth_link = get_authorization_url(phone) if phone else None
-   
+    
     if auth_link:
         welcome_msg = (f"Hello {data['name'].title()}! 🚀\n\n"
                        f"You've been added to the Task Manager. To sync tasks to your Google Calendar, "
@@ -703,11 +779,11 @@ def add_employee(data, sender_phone):
                     userId="me",
                     body={'raw': base64.urlsafe_b64encode(msg.as_bytes()).decode()}
                 ).execute()
-                reply += f"📧 Authorization link sent via Email to {email}."
+                reply += f" Authorization link sent via Email to {email}."
             except Exception as e:
                 print(f"Email Auth Send Failed: {e}")
-                reply += "\n⚠️ Email sending failed. Check your Gmail connection."
-   
+                reply += "\n Email sending failed. Check your Gmail connection."
+    
     return reply, data
 
 def handle_assign_task(data, sender_phone, message):
@@ -907,7 +983,6 @@ def handle_message(user_command, sender_phone, phone_number_id, message=None, fu
 
         # --- CRITICAL FIX START ---
         # Reload state from disk to catch changes made inside process_task 
-        # (like moving to a disambiguation state) before we do any final saving.
         state = load_state() 
         # --- CRITICAL FIX END ---
 
