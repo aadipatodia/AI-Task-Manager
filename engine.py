@@ -426,19 +426,19 @@ Possible actions:
   "message": "short error"
 }}
 - get_team_performance 
-{
+{{
   "action": "get_team_performance"
-}
+}}
 - get_employee_performance
-{
+{{
   "action": "get_employee_performance",
   "name": "person name lowercase"
-}
+}}
 - delete_employee
-{
+{{
   "action": "delete_employee",
   "name": "person name lowercase"
-}
+}}
 Only JSON. No markdown.
 """
     try:
