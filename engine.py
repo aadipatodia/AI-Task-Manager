@@ -2,7 +2,6 @@ import os
 import json
 import datetime
 import base64
-import requests # Added for download_document fix
 from google import genai
 from email.message import EmailMessage
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -10,10 +9,11 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from dotenv import load_dotenv
-from send_message import send_whatsapp_message, send_whatsapp_document
+from send_message import send_whatsapp_message, send_whatsapp_document, send_registration_template
 from google_auth_oauthlib.flow import Flow 
 from pymongo import MongoClient
 import certifi
+import uuid
 
 load_dotenv()
 
@@ -58,14 +58,6 @@ if os.path.exists('token.json'):
     if MANAGER_CREDS.expired and MANAGER_CREDS.refresh_token:
         MANAGER_CREDS.refresh(Request())
 
-def load_users():
-    users = {}
-    for user in users_col.find():
-        phone = user.pop("phone_id", None)
-        if phone:
-            user.pop("_id", None)
-            users[phone] = user
-    return users
 
 def save_user(phone_number, name, email, role="Employee", supervisor_id=None):
     clean_phone = str(phone_number).replace("+", "").strip()
@@ -83,39 +75,56 @@ def save_user(phone_number, name, email, role="Employee", supervisor_id=None):
     status = "updated" if result.matched_count > 0 else "added"
     return f"User {name} successfully {status}."
 
-def load_team():
-    """Priority: 1. MongoDB, 2. Seed from Env Var."""
-    team_list = list(team_col.find({}, {"_id": 0}))
-    if not team_list:
-        team_env = os.getenv("TEAM_JSON")
-        if team_env:
-            try:
-                team_list = json.loads(team_env)
-                if team_list:
-                    team_col.insert_many(team_list)
-                    print("🌱 Seeded team from environment.")
-            except: pass
-    return team_list
+# --- Updated engine.py functions ---
 
-def save_team(team_list):
+def load_team(company_id):
+    """Fetch only team members belonging to this specific company."""
+    return list(team_col.find({"company_id": company_id}, {"_id": 0}))
+
+def save_team(team_list, company_id):
+    """Only update the team list for this specific company."""
     if not team_list: return
-    team_col.delete_many({})
+    # CRITICAL: Only delete documents for THIS company
+    team_col.delete_many({"company_id": company_id})
+    for member in team_list:
+        member["company_id"] = company_id
     team_col.insert_many(team_list)
 
-def load_tasks():
-    return list(tasks_col.find({}, {"_id": 0}).sort("deadline", 1))
+def load_users(company_id):
+    """Fetch users filtered by company_id."""
+    users = {}
+    for user in users_col.find({"company_id": company_id}):
+        phone = user.pop("phone_id", None)
+        if phone:
+            user.pop("_id", None)
+            users[phone] = user
+    return users
 
-def save_tasks(tasks_list):
-    tasks_col.delete_many({})
+def load_tasks(company_id):
+    """Load tasks for a specific company, sorted by deadline."""
+    return list(tasks_col.find({"company_id": company_id}, {"_id": 0}).sort("deadline", 1))
+
+def save_tasks(tasks_list, company_id):
+    """Save tasks while preserving the company partition."""
+    # CRITICAL: Only delete tasks for THIS company
+    tasks_col.delete_many({"company_id": company_id})
     if tasks_list:
+        for task in tasks_list:
+            task["company_id"] = company_id
         tasks_col.insert_many(tasks_list)
 
-def load_state():
-    doc = state_col.find_one({"id": "global_state"})
+def load_state(company_id):
+    """Load the conversational state specific to this company."""
+    doc = state_col.find_one({"id": "global_state", "company_id": company_id})
     return doc.get("data", {}) if doc else {}
 
-def save_state(state_dict):
-    state_col.update_one({"id": "global_state"}, {"$set": {"data": state_dict}}, upsert=True)
+def save_state(state_dict, company_id):
+    """Save state with a company_id to prevent conversational overlap."""
+    state_col.update_one(
+        {"id": "global_state", "company_id": company_id}, 
+        {"$set": {"data": state_dict, "company_id": company_id}}, 
+        upsert=True
+    )
 
 def load_processed_messages():
     return {d["msg_id"] for d in processed_col.find({}, {"msg_id": 1})}
@@ -124,15 +133,17 @@ def save_processed_messages(processed_set):
     for msg_id in processed_set:
         processed_col.update_one({"msg_id": msg_id}, {"$set": {"msg_id": msg_id}}, upsert=True)
 
-def get_creds_for_user(phone_number):
-    user_data = tokens_col.find_one({"phone": phone_number})
+def get_creds_for_user(phone_number, company_id):
+    # Partition the query by company_id to prevent unauthorized token access
+    user_data = tokens_col.find_one({"phone": phone_number, "company_id": company_id})
     if user_data and "google_credentials" in user_data:
         creds_data = user_data["google_credentials"]
         creds = Credentials.from_authorized_user_info(creds_data, SCOPES)
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
+            # Ensure the refreshed token is saved back to the correct company partition
             tokens_col.update_one(
-                {"phone": phone_number}, 
+                {"phone": phone_number, "company_id": company_id}, 
                 {"$set": {"google_credentials": json.loads(creds.to_json())}}
             )
         return creds
@@ -226,10 +237,10 @@ def format_task_list(task_list, title, is_assigned=False):
 
     return report
 
-def get_pending_tasks(phone, limit=5, today_only=False):
-    tasks = load_tasks()
-    my_tasks = [t for t in tasks if t['assignee_phone'] == phone and t['status'] == 'pending']
-    
+def get_pending_tasks(phone, company_id, limit=5, today_only=False):
+    tasks = load_tasks(company_id)
+    my_tasks = [t for t in tasks if t['assignee_phone'] == phone and t['status'] == 'pending']   
+     
     if today_only:
         today_str = datetime.datetime.now().strftime("%Y-%m-%d")
         my_tasks = [t for t in my_tasks if t['deadline'].startswith(today_str)]
@@ -238,11 +249,12 @@ def get_pending_tasks(phone, limit=5, today_only=False):
     limited_tasks = my_tasks[:limit]
     
     # Remove 'limit=limit' from the function call
-    return format_task_list(limited_tasks, "Your Pending Tasks", is_assigned=False)
+    return format_task_list(my_tasks[:limit], "Your Pending Tasks", is_assigned=False)
 
-def get_all_pending_counts(phone):
-    tasks = load_tasks()
-    team = load_team()
+def get_all_pending_counts(phone, company_id):
+    # FIXED: Pass company_id to load functions
+    tasks = load_tasks(company_id)
+    team = load_team(company_id)
     subs = [e for e in team if e.get('manager_phone') == phone]
     if not subs:
         return "You don't have any direct reports."
@@ -258,17 +270,19 @@ def get_all_pending_counts(phone):
         report += f"{name}: {count} pending\n"
     return report
 
-def get_user_pending_tasks(target_name, phone, limit=10):
-    team = load_team()
+def get_user_pending_tasks(target_name, phone, company_id, limit=10):
+    # Pass company_id to load the correct team
+    team = load_team(company_id)
     employee = next((e for e in team if e.get("name").lower() == target_name.lower() and e.get("manager_phone") == phone), None)
     if not employee:
         return f"Could not find employee '{target_name}' in your team.", None
-    return get_pending_tasks(employee['phone'], limit=limit, today_only=False)
+    # Pass company_id to load tasks
+    return get_pending_tasks(employee['phone'], company_id, limit=limit, today_only=False)
 
 
-def get_performance_stats(target_phone=None):
-    tasks = load_tasks() # Fetch from MongoDB tasks_col
-    team = load_team()   # Fetch from MongoDB team_col
+def get_performance_stats(company_id, target_phone=None):
+    tasks = load_tasks(company_id) 
+    team = load_team(company_id)
     now = datetime.datetime.now()
     
     # Logic for Requirement 2 (Specific) vs Requirement 1 (All)
@@ -320,36 +334,63 @@ def get_performance_stats(target_phone=None):
     return report
 
 
-def delete_employee(target_name, manager_phone):
+def register_company(company_name, chairman_name, chairman_phone, chairman_email):
     """
-    Deletes an employee from the 'team' collection.
-    Only allows deletion if the requester is a manager.
+    The entry point for a new company.
+    Generates a unique company_id and sets the first Chairman.
     """
-    team = load_team()
+    new_company_id = str(uuid.uuid4())[:8] # Unique 8-character ID
     
-    # 1. Find the employee by name (matching lowercase)
+    chairman_data = {
+        "name": chairman_name.lower(),
+        "email": chairman_email,
+        "phone": chairman_phone,
+        "role": "chairman",
+        "company_id": new_company_id,
+        "company_name": company_name
+    }
+    
+    team_col.insert_one(chairman_data)
+    
+    # Send welcome message ONLY to the Chairman
+    welcome = (f"Hello {chairman_name.title()}! \n\n"
+               f"Your company '{company_name}' is now registered.\n"
+               f"Company ID: {new_company_id}\n\n"
+               "You can now add Managers by typing: 'Add manager [Name], [Email], [Phone]'")
+    
+    send_registration_template(chairman_phone, chairman_name, PHONE_NUMBER_ID)
+    return new_company_id
+
+def delete_employee(target_name, manager_phone, company_id):
+    """
+    Deletes an employee from the company's team collection.
+    """
+    # Load company team only
+    team = load_team(company_id)
+    
+    # 1. Find the employee within the specific company partition
     employee = next((e for e in team if target_name in e.get("name", "").lower()), None)
     
     if not employee:
-        return f"❌ Could not find an employee named '{target_name.title()}' in your team."
+        return f"❌ Could not find an employee named '{target_name.title()}' in your company team."
 
-    # 2. CRITICAL CHECK: Prevent the manager from deleting themselves
-    # We do this BEFORE the deletion happens.
+    # 2. Prevent self-deletion
     if employee['phone'] == manager_phone:
         return "❌ Error: You cannot delete your own profile. Access denied."
 
-    # 3. Perform the deletion in MongoDB
-    result = team_col.delete_one({"phone": employee['phone']})
+    # 3. Perform the deletion in MongoDB using company_id filter for safety
+    result = team_col.delete_one({"phone": employee['phone'], "company_id": company_id})
     
-    # 4. Return the result based on whether the DB actually removed a document
+    # 4. Return result
     if result.deleted_count > 0:
-        return f"✅ Successfully removed {employee['name'].title()} from the database."
+        return f"✅ Successfully removed {employee['name'].title()} from the company database."
     else:
         return f"⚠️ Error: Found {employee['name'].title()} but failed to remove from MongoDB."
-
-def process_task(user_command, sender_phone, message=None, role="manager"):
-    # Always load fresh state to ensure we are acting on the most recent data
-    state = load_state()
+    
+    
+def process_task(user_command, sender_phone, company_id, message=None, role="manager"):
+    # Always load fresh state for the specific company
+    state = load_state(company_id)
     user_state = state.get(sender_phone, {})
     pending = user_state.get("pending", {})
     
@@ -364,14 +405,14 @@ def process_task(user_command, sender_phone, message=None, role="manager"):
             selected = matches[choice]
             data = pending["data"]
             
-            # Proceed with the assignment
-            reply, _ = assign_task(data, selected, message, sender_phone)
+            # FIXED: Added company_id to the call
+            reply, _ = assign_task(data, selected, message, sender_phone, company_id)
             
-            # Clear state immediately to finalize the action
-            state = load_state()
+            # FIXED: Added company_id to state loading/saving
+            state = load_state(company_id)
             if sender_phone in state:
                 state[sender_phone].pop("pending", None)
-                save_state(state)
+                save_state(state, company_id)
             return reply, data
         else:
             return f"Invalid choice. Please reply with a number between 1 and {len(matches)}.", None
@@ -379,36 +420,45 @@ def process_task(user_command, sender_phone, message=None, role="manager"):
     # Handle Yes/No Confirmations
     if pending and user_command.strip().lower() in ["yes", "no"] and pending.get("action") == "confirm_update":
         if user_command.strip().lower() == "yes":
-            team = load_team()
+            # FIXED: Added company_id to team loading/saving
+            team = load_team(company_id)
             existing_index = pending["context"]["existing_index"]
             new_data = pending["data"]
+            
+            # Update profile within the company partition
             team[existing_index]["email"] = new_data.get("email") or team[existing_index]["email"]
             team[existing_index]["phone"] = new_data.get("phone") or team[existing_index]["phone"]
-            save_team(team)
+            save_team(team, company_id)
             reply = f" Updated {team[existing_index]['name'].title()}'s profile."
             
-            state = load_state()
+            # FIXED: Added company_id to state loading/saving
+            state = load_state(company_id)
             if sender_phone in state:
                 state[sender_phone].pop("pending", None)
-                save_state(state)
+                save_state(state, company_id)
             return reply, None
         else:
-            # If "no", clear pending state and proceed to add as a new employee
-            state = load_state()
+            # FIXED: Added company_id to state loading/saving
+            state = load_state(company_id)
             if sender_phone in state:
                 state[sender_phone].pop("pending", None)
-                save_state(state)
-            return add_employee(pending["data"], sender_phone)
+                save_state(state, company_id)
+            # FIXED: Added company_id to add_employee call
+            return add_employee(pending["data"], sender_phone, company_id)
 
     # 2. Main AI processing with Gemini (Prompt remains exactly as requested)
     today = datetime.datetime.now()
     
     prompt = f"""
 Today's date is {today.strftime('%A, %b %d, %Y')}.
-User Role: {role.title()}
-User Command: "{user_command}"
+Current Company ID: {company_id}
+Your Role: {role.upper()}
 
-You are a smart task & team manager bot. Analyze the command and decide the best action. Return ONLY valid JSON.
+You are a multi-tenant Task Manager Bot. 
+Follow these HIERARCHY RULES strictly:
+1. CHAIRMAN: Only the Chairman can 'add_employee' with role='manager' or 'employee'. They can delete anyone.
+2. MANAGER: Managers can 'add_employee' with role='employee' only. They can assign tasks to employees.
+3. EMPLOYEE: Can only use 'get_my_pending_tasks' and 'close_task'. They CANNOT add employees or see team reports.
 
 Key Guidelines:
 - There is a heirarchal system, so if a person A assigns task to B and C, so A will be called manager of B and C, if B assigns task to D and E, then B will be manager of D and E but still an junior/employee of A 
@@ -501,93 +551,120 @@ Only JSON. No markdown.
     action = data.get("action")
 
     # 3. Action Handling
+    # 3. Action Handling
     if action == "get_my_pending_tasks":
         limit = data.get("limit", 5)
         today_only = data.get("today_only", False)
-        return get_pending_tasks(sender_phone, limit=limit, today_only=today_only), data
+        # Pass company_id to ensure the user only sees their tasks within their specific company partition
+        return get_pending_tasks(sender_phone, company_id, limit=limit, today_only=today_only), data
 
-    # Change get_all_pending_counts to use the new categorized view
+    # Requirement: Chairman sees all, Manager sees their team
     elif action == "get_all_pending_counts":
-        if role != "manager": return "Managers only.", data
-        tasks = load_tasks()
-        # Filter for all tasks assigned by this manager
-        my_assigned = [t for t in tasks if t.get('manager_phone') == sender_phone]
-        return format_task_list(my_assigned, "Team Pending Tasks", is_assigned=True), data
+        if role not in ["manager", "chairman"]: 
+            return "Access Denied: Managers or the Chairman only.", data
+        
+        # Load all tasks for this specific company partition
+        all_company_tasks = load_tasks(company_id)
+        
+        if role == "chairman":
+            report_data = all_company_tasks
+            report_title = "Company-Wide Pending Tasks"
+        else: # manager
+            report_data = [t for t in all_company_tasks if t.get('manager_phone') == sender_phone]
+            report_title = "Team Pending Tasks"
+            
+        return format_task_list(report_data, report_title, is_assigned=True), data
 
-    # Change get_assigned_by_me_tasks to use the same view
+    # Logic: Shows tasks personally assigned by the sender within the company
     elif action == "get_assigned_by_me_tasks":
-        tasks = load_tasks()
+        tasks = load_tasks(company_id)
         my_assigned = [t for t in tasks if t.get('manager_phone') == sender_phone]
         return format_task_list(my_assigned, "Tasks Assigned by Me", is_assigned=True), data
 
-    # Change get_user_pending_tasks
+    # Logic: Search for a specific person's tasks within the company
     elif action == "get_user_pending_tasks":
-        if role != "manager": return "Managers only.", data
+        if role not in ["manager", "chairman"]: 
+            return "Access Denied: Managers or the Chairman only.", data
+            
         target_name = data.get("name", "").lower()
-        team = load_team()
+        team = load_team(company_id)
+        
+        # Isolation: Search only within the company's team list
         employee = next((e for e in team if target_name in e.get("name", "").lower()), None)
-        if not employee: return f"Could not find {target_name}.", data
+        
+        if not employee: 
+            return f"Could not find {target_name} in your company team.", data
 
-        tasks = load_tasks()
+        tasks = load_tasks(company_id)
         user_tasks = [t for t in tasks if t.get('assignee_phone') == employee['phone']]
         return format_task_list(user_tasks, f"Pending Tasks for {target_name.title()}", is_assigned=True), data
     
     elif action == "add_employee":
-        return handle_add_employee(data, sender_phone)
+        # Restricted Hierarchy: Employees cannot add new members
+        if role == "employee": 
+            return "Access Denied: Only Managers or the Chairman can add members.", data
+        # Pass company_id and role to ensure handler can restrict Manager-level creation to the Chairman
+        return handle_add_employee(data, sender_phone, company_id, role)
 
     elif action == "assign_task":
+        # Restricted Hierarchy: Employees cannot assign tasks
+        if role == "employee": 
+            return "Access Denied: Only Managers or the Chairman can assign tasks.", data
+            
         names = [n.strip() for n in data.get('name', '').split(',')]
         all_replies = []
         for individual_name in names:
             temp_data = data.copy()
             temp_data['name'] = individual_name
-            reply, _ = handle_assign_task(temp_data, sender_phone, message)
+            # Pass company_id to the assignment helper for isolation
+            reply, _ = handle_assign_task(temp_data, sender_phone, company_id, message)
             all_replies.append(reply)
         return "\n\n".join(all_replies), data
 
     elif action == "close_task":
-        return handle_close_task(data, sender_phone)
+        # Pass company_id to verify the task belongs to the user's company partition
+        return handle_close_task(data, sender_phone, company_id)
     
-    # REQUIREMENT 1: Team-wide stats
+    # REQUIREMENT 1: Team-wide stats (Partitioned by company)
     elif action == "get_team_performance":
-        if role != "manager": 
-            return "This feature is for managers only.", data
-        # No target_phone passed -> Returns stats for everyone
-        return get_performance_stats(), data
+        if role not in ["manager", "chairman"]: 
+            return "Access Denied: This feature is for management only.", data
+        return get_performance_stats(company_id=company_id), data
 
-    # REQUIREMENT 2: Specific employee stats
+    # REQUIREMENT 2: Specific employee stats (Partitioned by company)
     elif action == "get_employee_performance":
-        if role != "manager": 
-            return "This feature is for managers only.", data
+        if role not in ["manager", "chairman"]: 
+            return "Access Denied: This feature is for management only.", data
         
         target_name = data.get("name", "").lower()
-        team = load_team() #
+        team = load_team(company_id)
         
-        # Search for the specific employee by name
         employee = next((e for e in team if target_name in e.get("name", "").lower()), None)
-        
         if not employee:
-            return f"Could not find employee '{target_name}' in your team.", data
+            return f"Could not find employee '{target_name}' in your company team.", data
             
-        # Specific phone passed -> Returns stats ONLY for that person
-        return get_performance_stats(target_phone=employee['phone']), data
+        return get_performance_stats(company_id=company_id, target_phone=employee['phone']), data
     
     elif action == "delete_employee":
-        if role != "manager": # Restrict to Managers only
-            return "Unauthorized. Only managers can delete users.", data
+        # CRITICAL SECURITY: Only the Chairman can delete profiles
+        if role != "chairman":
+            return "Unauthorized. Only the company Chairman can delete members.", data
             
         target_name = data.get("name", "").lower()
         if not target_name:
             return "Please specify the name of the person you want to delete.", data
             
-        return delete_employee(target_name, sender_phone)
+        return delete_employee(target_name, sender_phone, company_id)
 
     else:
+        # Save the conversational state specifically for this company partition
+        save_state(state, company_id)
         return data.get("message", "I didn't understand that command."), data
 
 # --- Helper function for the new action ---
-def get_assigned_by_me_tasks(phone):
-    tasks = load_tasks() # Already sorts by deadline
+def get_assigned_by_me_tasks(phone, company_id):
+    # FIXED: Pass company_id to load only relevant tasks
+    tasks = load_tasks(company_id) 
     my_tasks = [t for t in tasks if t.get('manager_phone') == phone]
     
     if not my_tasks:
@@ -662,24 +739,28 @@ def format_report_section(title, task_list, now):
                     f"   Due: {time_str}{status_note}\n")
     return section
 
-def handle_close_task(data, sender_phone):
-    tasks = load_tasks()
+def handle_close_task(data, sender_phone, company_id):
+    # Load only the company's tasks
+    tasks = load_tasks(company_id)
     task_id = str(data.get("task_id"))
     remarks = data.get("remarks", "No remarks provided.")
    
-    # Find the task assigned to this specific sender with this ID
+    # Find the task assigned to this sender with this ID within their specific company
     task_index = next((i for i, t in enumerate(tasks) if str(t.get("task_id")) == task_id and t.get("assignee_phone") == sender_phone), None)
    
     if task_index is None:
         return f"Could not find a pending task with ID #{task_id} assigned to you.", None
+        
     # Update Task Status
     tasks[task_index]["status"] = "done"
     tasks[task_index]["remarks"] = remarks
-    save_tasks(tasks)
+    # Save tasks back to the company partition
+    save_tasks(tasks, company_id)
    
     task_name = tasks[task_index]["task"]
     manager_phone = tasks[task_index].get("manager_phone")
     assignee_name = tasks[task_index].get("assignee_name", "Employee").title()
+    
     # Notify Manager of the closure
     if manager_phone:
         manager_msg = f" *Task Completed*\n\nEmployee: {assignee_name}\nTask: {task_name}\nRemarks: {remarks}"
@@ -687,34 +768,40 @@ def handle_close_task(data, sender_phone):
             send_whatsapp_message(manager_phone, manager_msg, PHONE_NUMBER_ID)
         except Exception as e:
             print(f"Failed to notify manager: {e}")
+            
     return f" Task #{task_id} marked as completed. Your manager has been notified.", data
 
-def handle_get_specific_user_tasks(data, sender_phone):
+def handle_get_specific_user_tasks(data, sender_phone, company_id):
     target_name = data.get("name", "").lower()
-    team = load_team()
+    # Pass company_id
+    team = load_team(company_id)
    
-    # Find the employee record
+    # Find the employee record within the company
     employee = next((e for e in team if e.get("name") == target_name and e.get("manager_phone") == sender_phone), None)
    
     if not employee:
         return f"Could not find employee '{target_name}' in your team.", None
    
-    # Use the existing function we wrote earlier but for a specific phone
-    return get_pending_tasks(employee['phone'], limit=10), None
+    # Pass company_id
+    return get_pending_tasks(employee['phone'], company_id, limit=10), None
    
-def handle_add_employee(data, sender_phone):
+def handle_add_employee(data, sender_phone, company_id, requester_role):
     name_key = data.get("name", "").lower().strip()
     email = data.get("email", "").strip()
     phone = data.get("phone", "").strip()
+    
     if not name_key:
         return "Please provide a name.", data
     if not email and not phone:
         return "Please provide at least email or phone.", data
-    team = load_team()
+    
+    # Load company team for duplicate/update checks
+    team = load_team(company_id)
     name_lower = name_key.lower()
     matches = [m for m in team if name_lower in m["name"].lower()]
+    
     if matches:
-        state = load_state()
+        state = load_state(company_id)
         state[sender_phone] = {
             "pending": {
                 "action": "confirm_update",
@@ -722,14 +809,22 @@ def handle_add_employee(data, sender_phone):
                 "context": {"existing_index": team.index(matches[0])}
             }
         }
-        save_state(state)
+        # Save state with company_id
+        save_state(state, company_id)
         existing = matches[0]
         return (f"Found existing {name_key.title()} (Email: {existing.get('email','none')}, "
                 f"Phone: {existing.get('phone','none')}).\nUpdate this profile? Reply yes/no"), data
-    return add_employee(data, sender_phone)
+    
+    # ENFORCE HIERARCHY: Determine the role being assigned
+    target_role = data.get("role", "employee").lower()
+    if requester_role == "manager" and target_role == "manager":
+        return "❌ Error: Managers cannot add other Managers. Only the company Chairman has this authority.", data
+    
+    # Proceed to add the new member to this company
+    return add_employee(data, sender_phone, company_id)
 
-def add_employee(data, sender_phone):
-    team = load_team()
+def add_employee(data, sender_phone, company_id):
+    team = load_team(company_id)
     
     # Get the phone number and remove any extra spaces
     phone = data.get("phone", "").strip()
@@ -752,11 +847,13 @@ def add_employee(data, sender_phone):
         "name": data["name"].lower(),
         "email": email,
         "phone": phone,
-        "manager_phone": sender_phone # Ensuring manager is tracked for callback notifications
+        "role": data.get("role", "employee"), # AI determines if Manager or Employee
+        "company_id": company_id, 
+        "manager_phone": sender_phone
     }
     
     team.append(new_member)
-    save_team(team)
+    save_team(team, company_id)
     
     reply = f" New employee added: {data['name'].title()}\n"
     
@@ -794,26 +891,32 @@ def add_employee(data, sender_phone):
     
     return reply, data
 
-def handle_assign_task(data, sender_phone, message):
-    team = load_team()
+def handle_assign_task(data, sender_phone, company_id, message):
+    # Pass company_id to load only the company's team
+    team = load_team(company_id)
     name_key = data.get("name", "").strip()
     if not name_key:
         return "Please specify a person's name in the task.", data
     name_lower = name_key.lower()
-    # Partial match: anyone whose full name contains the keyword (case-insensitive)
+    
+    # Partial match within the company-specific team
     matches = [
         member for member in team
         if name_lower in member["name"].lower()
     ]
-    # No one found
+    
+    # No one found in this specific company
     if not matches:
         return f"No one found with name containing '{name_key}'. Add them first with 'Add employee...'", data
+    
     # Exactly one match → assign directly
     if len(matches) == 1:
         selected = matches[0]
-        return assign_task(data, selected, message, sender_phone)
-    # Multiple matches → disambiguate
-    state = load_state()
+        # Pass company_id to final assignment function
+        return assign_task(data, selected, message, sender_phone, company_id)
+    
+    # Multiple matches → disambiguate within the company context
+    state = load_state(company_id)
     state[sender_phone] = {
         "pending": {
             "action": "disambiguate_task",
@@ -821,8 +924,10 @@ def handle_assign_task(data, sender_phone, message):
             "context": {"matches": matches}
         }
     }
-    save_state(state)
-    # Build user-friendly list
+    # Save partitioned state
+    save_state(state, company_id)
+    
+    # Build user-friendly list from company matches
     options = "\n".join([
         f"{i+1}. {m['name'].title()} — Email: {m.get('email', 'none')}, Phone: {m.get('phone', 'none')}"
         for i, m in enumerate(matches)
@@ -832,7 +937,7 @@ def handle_assign_task(data, sender_phone, message):
         f"Which one do you mean? Reply with the number (1, 2, ...)"
     ), data
 
-def assign_task(data, selected, message, sender_phone):
+def assign_task(data, selected, message, sender_phone, company_id):
     today = datetime.datetime.now()
     deadline = data.get('deadline')
     if not deadline:
@@ -851,7 +956,8 @@ def assign_task(data, selected, message, sender_phone):
     if not assignee_email:
         return f"Task assigned to {assignee_name}, but no email found in team — email not sent.", data
     # 1. Calendar: Only in employee's calendar if they connected
-    assignee_creds = get_creds_for_user(assignee_phone) if assignee_phone else None
+    # Updated: Passed company_id to ensure correct token retrieval for multi-tenancy
+    assignee_creds = get_creds_for_user(assignee_phone, company_id) if assignee_phone else None
     calendar_created = False
     calendar_note = ""
     if assignee_creds:
@@ -918,21 +1024,23 @@ def assign_task(data, selected, message, sender_phone):
             whatsapp_sent = True
         except Exception as e:
             print("WhatsApp send failed:", e)
-         
-    tasks = load_tasks()
+          
+    tasks = load_tasks(company_id)
+    # Fix: Correctly define max_id by finding the highest ID within the company's task list
     max_id = max([t.get('task_id', 0) for t in tasks] or [0])
     new_task = {
         "task_id": max_id + 1,
         "task": data['task'],
+        "company_id": company_id, # CRITICAL for partitioning data
         "assignee_name": selected.get('name'),
         "assignee_phone": selected.get('phone'),
         "manager_phone": sender_phone,
-        "deadline": deadline,  # This is already in IST format now
+        "deadline": deadline,
         "status": "pending",
         "remarks": ""
     }
     tasks.append(new_task)
-    save_tasks(tasks)
+    save_tasks(tasks, company_id)
     reply = f" Task assigned to {assignee_name} (Due: {data.get('deadline', 'ASAP')})"
     reply += "\n Event created in their calendar" if calendar_created else f"\n {calendar_note}"
     reply += "\n Email sent from your account" if email_sent else "\n Email not sent"
@@ -940,35 +1048,33 @@ def assign_task(data, selected, message, sender_phone):
     return reply, data
 
 def handle_message(user_command, sender_phone, phone_number_id, message=None, full_message=None):
-    state = load_state()
-    processed = load_processed_messages()
-    team = load_team()
-    tasks = load_tasks()
-  
     # 1. Standardize sender_phone
     if len(sender_phone) == 10 and not sender_phone.startswith('91'):
         sender_phone = f"91{sender_phone}"
     
+    user = team_col.find_one({"phone": sender_phone})
+    if not user:
+        send_whatsapp_message(sender_phone, "Unauthorized. Please contact your company Chairman.", phone_number_id)
+        return
+
+    company_id = user.get("company_id")
+    role = user.get("role", "employee") 
+    # ------------------------------------------
+
+    state = load_state(company_id) # Updated to pass company_id
+    processed = load_processed_messages()
+    team = load_team(company_id)   # Updated to pass company_id
+    tasks = load_tasks(company_id) # Updated to pass company_id
+  
     # 2. De-duplication check
     msg_id = full_message.get("id") if full_message else (message["document"].get("id") if message and "document" in message else None)
     if msg_id and msg_id in processed:
         return
 
-    has_subordinates = any(m.get("manager_phone") == sender_phone for m in team)
-    has_assigned_tasks = any(t.get("manager_phone") == sender_phone for t in tasks)
-    is_listed_as_employee = any(m.get("phone") == sender_phone for m in team)
-
-    # Logic: If you have people under you, you are a manager. 
-    # If you are not in the team file at all, you are likely the "Super Admin" (Manager).
-    if has_subordinates or has_assigned_tasks or not is_listed_as_employee:
-        role = "manager"
-    else:
-        role = "employee"
-
     # 4. Handle Incoming Documents (Assignment Flow)
     if not user_command and message and "document" in message:
         state[sender_phone] = {"pending_document": message["document"]}
-        save_state(state)
+        save_state(state, company_id) # Updated to pass company_id
         
         doc_reply = " Document received! Who should I assign this to? (e.g., 'Assign this to Adi by Friday')"
         send_whatsapp_message(sender_phone, doc_reply, phone_number_id)
@@ -980,8 +1086,8 @@ def handle_message(user_command, sender_phone, phone_number_id, message=None, fu
 
     # 5. Process Commands via Gemini
     if user_command:
-        # We pass the dynamic role to process_task so Gemini knows what the user is allowed to do
-        status, _ = process_task(user_command.strip(), sender_phone, message, role=role)
+        # We pass the company_id and the explicit role from the database
+        status, _ = process_task(user_command.strip(), sender_phone, company_id, message, role=role)
         
         # Send the final response back to WhatsApp
         try:
@@ -990,14 +1096,14 @@ def handle_message(user_command, sender_phone, phone_number_id, message=None, fu
             print(f"Critical WhatsApp Send Failure: {e}")
 
         # --- CRITICAL FIX START ---
-        # Reload state from disk to catch changes made inside process_task 
-        state = load_state() 
+        # Reload state from disk using company_id
+        state = load_state(company_id) 
         # --- CRITICAL FIX END ---
 
         # Cleanup state if they were in the middle of a document assignment
         if sender_phone in state:
             state[sender_phone].pop("pending_document", None)
-            save_state(state)
+            save_state(state, company_id) # Updated to pass company_id
 
     # 6. Save message ID to prevent double-processing
     if msg_id:
