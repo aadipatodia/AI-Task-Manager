@@ -13,6 +13,7 @@ load_dotenv()
 app = FastAPI()
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
+MANAGER_PHONE = "91XXXXXXXXXX" # Replace with your actual WhatsApp number
 
 @app.get("/")
 async def home():
@@ -75,33 +76,31 @@ async def handle_webhook(request: Request):
 
     return {"status": "EVENT_RECEIVED"}
 
-# Inside webhook.py
-
 @app.get("/oauth2callback")
 async def oauth2callback(request: Request):
     from google_auth_oauthlib.flow import Flow
-    from engine import team_col, tokens_col, SCOPES, REDIRECT_URI
     
     code = request.query_params.get("code")
-    phone = request.query_params.get("state") # This is the sender's phone
+    phone = request.query_params.get("state")
     error = request.query_params.get("error")
 
+    # --- START OF NECESSARY CHANGE: PHONE NORMALIZATION ---
     if phone:
         phone = phone.strip()
+        # Add 91 if it's a 10-digit number to ensure it matches team.json keys
         if len(phone) == 10 and not phone.startswith('91'):
             phone = f"91{phone}"
+    # --- END OF NECESSARY CHANGE ---
 
-    # FIXED: Find the user in the database to get their company_id and manager
-    user_record = team_col.find_one({"phone": phone})
-    if not user_record:
-        return HTMLResponse("User not found. Please contact your Chairman.")
-    
-    company_id = user_record.get("company_id")
-    target_manager = user_record.get("manager_phone")
+    # Dynamically find the manager
+    from engine import load_team, SCOPES, REDIRECT_URI
+    team = load_team()
+    employee_record = next((m for m in team if m.get("phone") == phone), None)
+    target_manager = employee_record.get("manager_phone") if employee_record else None
 
     if error:
         if target_manager:
-            send_whatsapp_message(target_manager, f" Employee ({phone}) denied access.", PHONE_NUMBER_ID)
+            send_whatsapp_message(target_manager, f"⚠️ Employee ({phone}) denied access.", PHONE_NUMBER_ID)
         return HTMLResponse("Access Denied.")
 
     if code and phone:
@@ -109,18 +108,17 @@ async def oauth2callback(request: Request):
         flow.fetch_token(code=code)
         creds = flow.credentials
 
-        # FIXED: Save token with company_id to prevent data overlap
+        # --- PROTECTED JSON LOADING ---
+        # --- MONGODB TOKEN SAVING ---
+        from engine import tokens_col
         tokens_col.update_one(
-            {"phone": phone, "company_id": company_id}, 
-            {"$set": {
-                "google_credentials": json.loads(creds.to_json()),
-                "company_id": company_id
-            }}, 
+            {"phone": phone}, 
+            {"$set": {"google_credentials": json.loads(creds.to_json())}}, 
             upsert=True
         )
 
         if target_manager:
-            send_whatsapp_message(target_manager, f" Employee connected!", PHONE_NUMBER_ID)
+            send_whatsapp_message(target_manager, f"✅ Employee ({phone}) connected!", PHONE_NUMBER_ID)
         
         return HTMLResponse("<h1>Success!</h1><p>Calendar connected. You can close this.</p>")
 
