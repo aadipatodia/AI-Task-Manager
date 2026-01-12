@@ -23,8 +23,8 @@ load_dotenv()
 SCOPES = ['https://www.googleapis.com/auth/gmail.send']
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-38w7.onrender.com/oauth2callback")
 
-# --- API CONFIGURATION (5 APIs Included) ---
-# 100% Dependency on Appsavy for data
+# --- API CONFIGURATION (5 APIs - 100% Dependency) ---
+# Absolute reliance on Appsavy for data
 APPSAVY_BASE_URL = "https://configapps.appsavy.com/api/AppsavyRestService"
 
 API_CONFIGS = {
@@ -60,7 +60,7 @@ API_CONFIGS = {
             "TokenKey": "e5b4e098-f8b9-47bf-83f1-751582bfe147"
         }
     },
-    [cite_start]"GET_COUNT": { # New Count API from YAML [cite: 1, 6]
+    "GET_COUNT": {
         "url": f"{APPSAVY_BASE_URL}/GetDataJSONClient",
         "headers": {
             "sid": "616", "pid": "309", "fid": "10408", "cid": "64",
@@ -79,7 +79,7 @@ tokens_col = db['user_tokens']
 processed_col = db['processed_messages']
 
 # --- PYDANTIC AI AGENT INITIALIZATION ---
-# ai_model uses Gemini 2.0 Flash
+# ai_model uses Gemini 2.0 Flash; api_key is read from environment
 ai_model = GeminiModel('gemini-2.0-flash')
 
 class ManagerContext(BaseModel):
@@ -87,32 +87,51 @@ class ManagerContext(BaseModel):
     role: str
     message_data: Optional[Dict[str, Any]] = None
 
-# --- DETAILED SYSTEM PROMPT ---
+# --- FULL DETAILED SYSTEM PROMPT ---
+# Incorporating every requirement without simplification
 SYSTEM_PROMPT = """
 You are the Official AI Task Manager Bot for 'mdpvvnl'. 
-Identity: TM_API (Manager). 
-You must use AppSavy API tools for every action. No internal memory.
+Identity: TM_API (Manager). You are a precise, professional assistant.
+You have NO internal database of tasks or users. You MUST use the provided API tools for every action.
 
-ROLE STATUS RULES:
-- Employees: Set 'Partially Closed' or 'Reported Closed'.
-- Managers: Only they set 'Closed' or 'Reopened'.
-- New Tasks: Default status is 'Open'.
+### 1. ROLE-BASED STATUS PROTOCOL
+Strictly enforce role-based permissions for all status updates:
+- **Default State:** All new tasks created via 'assign_new_task_tool' are 'Open'.
+- **Assignee (Employee) Permissions:** Can only update tasks to 'Partially Closed' or 'Reported Closed'.
+- **Assignor (Manager) Permissions:** Only users with the role 'manager' can update tasks to 'Closed' (Approval) or 'Reopened' (Rejection).
+- **Validation:** If an employee attempts to 'Close' or 'Reopen' a task, refuse and state that only managers have this authority.
 
-REPORTING FORMAT:
-Name- [Name]
-Task Assigned- Count of Task [Assigned] Nos
-Task Completed- Count of task [Closed] Nos
-Task Pending - 
-Within time: [Count]
-Beyond time: [Count]
+### 2. OPERATIONAL DIRECTIVES
+#### Performance Reporting:
+- Use 'get_performance_report_tool'. 
+- Calculate 'Within time' vs 'Beyond time' by comparing the task deadline (EXPECTED_END_DATE) against the current system time.
+- You MUST format the output exactly as follows (no variations):
+  Name- [Name]
+  Task Assigned- Count of Task [Total] Nos
+  Task Completed- Count of task [Closed Status Only] Nos
+  Task Pending - 
+  Within time: [Count]
+  Beyond time: [Count]
 
-LISTING:
-- Sort descending by due date (Older first).
+#### Task Listing:
+- Use 'get_task_list_tool'.
+- Always sort the list in DESCENDING order based on the 'Due Date' (Older tasks appear first).
+- Include Task ID, Name, Due Date, and current Status in the list.
 
-CONSTRAINTS:
-- No emojis.
-- Resolve names to Login IDs using the team directory.
-- Identify as TM_API.
+#### Task Assignment:
+- Use 'assign_new_task_tool'.
+- You must resolve names provided by the user (e.g., "Assign to Vikrant") to the correct Login ID from the authorized team mapping.
+
+#### Document Handling:
+- If a document or image is received, acknowledge it immediately. 
+- Inform the user: "File received and saved. Please provide the task name and assignee details to complete the assignment." 
+- The file will be automatically attached to the next 'assign_new_task_tool' call.
+
+### 3. COMMUNICATION CONSTRAINTS
+- DO NOT use emojis.
+- Be concise and professional.
+- Do not mention requirement numbers or internal tool names to the user.
+- If a user is not found in the authorized list, inform them clearly.
 """
 
 task_agent = Agent(ai_model, deps_type=ManagerContext, system_prompt=SYSTEM_PROMPT)
@@ -168,7 +187,7 @@ class UpdateTaskRequest(BaseModel):
     STATUS: str
     COMMENTS: str = "STATUS_UPDATE"
 
-[cite_start]class GetCountRequest(BaseModel): # Schema for the new Count API [cite: 9, 10]
+class GetCountRequest(BaseModel):
     Event: str = "107567"
     Child: List[Dict]
 
@@ -187,7 +206,7 @@ async def fetch_api_tasks():
     return res if isinstance(res, list) else []
 
 async def fetch_task_counts_api(login_code: str):
-    [cite_start]"""Fetches assigned/closed counts via SID 616 [cite: 1, 19, 20]"""
+    """Fetches assigned/closed counts via SID 616"""
     req = GetCountRequest(Child=[{
         "Control_Id": "108118", "AC_ID": "113229",
         "Parent": [
@@ -223,7 +242,7 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
     results = []
     for member in display_team:
         login = member['login_code']
-        counts = await fetch_task_counts_api(login) # Fetch Assigned/Closed from API
+        counts = await fetch_task_counts_api(login) # From SID 616
         
         m_tasks = [t for t in tasks_data if t.get('LOGIN') == login]
         within, beyond = 0, 0
@@ -244,14 +263,14 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
 
 @task_agent.tool
 async def get_task_list_tool(ctx: RunContext[ManagerContext], target_name: Optional[str] = None) -> str:
-    """Requirement 3 & 7: Descending task list via API"""
+    """Requirement 3 & 7: Sorted task list via API"""
     tasks_data = await fetch_api_tasks()
     team = load_team()
     user = next((u for u in team if (target_name and target_name.lower() in u['name'].lower()) or u['phone'] == ctx.deps.sender_phone), None)
     if not user: return "Identification failed."
     
     filtered = [t for t in tasks_data if t.get('LOGIN') == user['login_code']]
-    filtered.sort(key=lambda x: x.get('EXPECTED_END_DATE', ''), reverse=True) # Descending sort
+    filtered.sort(key=lambda x: x.get('EXPECTED_END_DATE', ''), reverse=True) # Sort descending
     
     output = "Task List:\n"
     for t in filtered:
@@ -260,7 +279,7 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext], target_name: Optio
 
 @task_agent.tool
 async def assign_new_task_tool(ctx: RunContext[ManagerContext], name: str, task_name: str, deadline: str) -> str:
-    """Requirement 4: Create task via API with potential document attachment"""
+    """Requirement 4: Create task via API with document support"""
     team = load_team()
     user = next((u for u in team if name.lower() in u['name'].lower()), None)
     if not user: return f"User {name} not found."
@@ -298,7 +317,7 @@ async def assign_new_task_tool(ctx: RunContext[ManagerContext], name: str, task_
 
 @task_agent.tool
 async def update_task_status_tool(ctx: RunContext[ManagerContext], task_id: str, action: str) -> str:
-    """Requirement 5: Manager Approval process via API"""
+    """Requirement 5: Manager status approval/rejection via API"""
     status_map = {"partial": "Partially Closed", "reported": "Reported Closed", "close": "Closed", "reopen": "Reopened"}
     new_status = status_map.get(action.lower())
     if not new_status: return "Invalid status action."
@@ -311,18 +330,17 @@ async def update_task_status_tool(ctx: RunContext[ManagerContext], task_id: str,
         return f"Task {task_id} status updated to {new_status}."
     return "API status update failed."
 
-# --- ASYNC MESSAGE HANDLER (FIXED DOC PROBLEM) ---
+# --- ASYNC MESSAGE HANDLER (FIXED FOR DOCUMENT LOGIC) ---
 async def handle_message(command, sender, pid, message=None, full_message=None):
-    """Processes incoming messages, ensuring text commands aren't treated as media"""
+    """Ensures text commands aren't falsely flagged as media"""
     if full_message and processed_col.find_one({"msg_id": full_message.get("id")}): return
-    
     if len(sender) == 10 and not sender.startswith('91'): sender = f"91{sender}"
     
-    # FIX: Check message type explicitly from the Meta webhook payload
+    # Check Meta message type specifically
     msg_type = message.get("type", "text") if message else "text"
     is_media = msg_type in ["document", "image", "video", "audio"]
     
-    # Only store media if there is NO text command accompanying it
+    # Store media only if there is NO text command accompanying it
     if is_media and not command: 
         state_doc = state_col.find_one({"id": "global_state"}) or {"data": {}}
         state = state_doc.get("data", {})
@@ -333,8 +351,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
     manager_phone = os.getenv("MANAGER_PHONE")
     team = load_team()
-    
-    # Strict role validation
     role = "manager" if sender == manager_phone else "employee" if any(u['phone'] == sender for u in team) else None
     
     if not role:
@@ -343,7 +359,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
     if command:
         try:
-            # FIXED: await result for async run to prevent event loop error
+            # FIXED: await for asynchronous execution
             result = await task_agent.run(command, deps=ManagerContext(sender_phone=sender, role=role))
             send_whatsapp_message(sender, result.data, pid)
         except Exception as e:
