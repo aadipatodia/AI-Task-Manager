@@ -18,8 +18,11 @@ import certifi
 
 load_dotenv()
 
+# --- MISSING OAUTH CONSTANTS (Fixed for webhook.py) ---
+SCOPES = ['https://www.googleapis.com/auth/gmail.send']
+REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager.onrender.com/oauth2callback")
+
 # --- API CONFIGURATION (TM_API Fixed Manager) ---
-# Every operation is performed through these 4 AppSavy API endpoints.
 APPSAVY_BASE_URL = "https://configapps.appsavy.com/api/AppsavyRestService"
 
 API_CONFIGS = {
@@ -67,7 +70,7 @@ tokens_col = db['user_tokens']
 processed_col = db['processed_messages']
 
 # --- PYDANTIC AI AGENT INITIALIZATION ---
-# Fixed: api_key removed from init to resolve Render TypeError. Model reads from env.
+# GeminiModel reads key from Environment Variables to avoid TypeError
 ai_model = GeminiModel('gemini-2.0-flash')
 
 class ManagerContext(BaseModel):
@@ -115,14 +118,8 @@ task_agent = Agent(
 
 # --- AUTHORIZED TEAM MAPPING (Fixed Users) ---
 def load_team():
-    """Fixed directory for testing phase."""
     return [
-        {
-            "name": "mdpvvnl", 
-            "phone": "919650523477", 
-            "email": "test-email@example.com", 
-            "login_code": "mdpvvnl"
-        },
+        {"name": "mdpvvnl", "phone": "919650523477", "email": "test-email@example.com", "login_code": "mdpvvnl"},
         {"name": "chairman", "phone": "91XXXXXXXXXX", "email": "chairman@example.com", "login_code": "chairman"},
         {"name": "mddvvnl", "phone": "91XXXXXXXXXX", "email": "mddvvnl@example.com", "login_code": "mddvvnl"},
         {"name": "ce_ghaziabad", "phone": "91XXXXXXXXXX", "email": "ce@example.com", "login_code": "ce_ghaziabad"}
@@ -175,7 +172,7 @@ def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
     try:
         res = requests.post(config["url"], headers=config["headers"], json=payload.model_dump(), timeout=15)
         return res.json() if res.status_code == 200 else None
-    except Exception:
+    except:
         return None
 
 def download_and_encode_document(document_data: Dict):
@@ -198,7 +195,6 @@ def fetch_live_tasks():
 # --- AGENT TOOLS ---
 @task_agent.tool
 def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Optional[str] = None) -> str:
-    """100% Dependent on GET_TASKS API."""
     tasks_data, team, now = fetch_live_tasks(), load_team(), datetime.datetime.now()
     display_team = [e for e in team if name and name.lower() in e['name'].lower()] if name else team
     if not display_team: return f"Employee {name} not found."
@@ -226,7 +222,6 @@ def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Optional[
 
 @task_agent.tool
 def get_task_list_tool(ctx: RunContext[ManagerContext], target_name: Optional[str] = None) -> str:
-    """Task listing via API with descending sort."""
     tasks_data, team = fetch_live_tasks(), load_team()
     login_id = None
     if target_name:
@@ -242,7 +237,7 @@ def get_task_list_tool(ctx: RunContext[ManagerContext], target_name: Optional[st
         filtered.sort(key=lambda x: x.get('EXPECTED_END_DATE', ''), reverse=True)
     except: pass
     
-    if not filtered: return "No pending tasks listed."
+    if not filtered: return "No pending tasks."
     output = "Task List:\n"
     for t in filtered:
         output += f"- ID: {t.get('TASK_ID')} | {t.get('TASK_NAME')} | Due: {t.get('EXPECTED_END_DATE')} | Status: {t.get('STATUS')}\n"
@@ -250,7 +245,6 @@ def get_task_list_tool(ctx: RunContext[ManagerContext], target_name: Optional[st
 
 @task_agent.tool
 def assign_new_task_tool(ctx: RunContext[ManagerContext], name: str, task_name: str, deadline: str) -> str:
-    """Task assignment via CREATE_TASK API."""
     team = load_team()
     user = next((u for u in team if name.lower() in u['name'].lower()), None)
     if not user: return f"User {name} not found."
@@ -283,12 +277,11 @@ def assign_new_task_tool(ctx: RunContext[ManagerContext], name: str, task_name: 
         if pending_doc:
             state[ctx.deps.sender_phone].pop("pending_document", None)
             state_col.update_one({"id": "global_state"}, {"$set": {"data": state}})
-        return f"Task assigned to {user['name']} (ID: {login_code}). Notification sent to {user['phone']}."
-    return "API Error creating task."
+        return f"Task assigned to {user['name']} (ID: {login_code}). Notification sent."
+    return "API Error."
 
 @task_agent.tool
 def update_task_status_tool(ctx: RunContext[ManagerContext], task_id: str, action: str) -> str:
-    """Approval/Rejection via UPDATE_STATUS API."""
     status_map = {"partial": "Partially Closed", "reported": "Reported Closed", "close": "Closed", "reopen": "Reopened"}
     new_status = status_map.get(action.lower())
     if not new_status: return "Invalid status."
@@ -299,7 +292,7 @@ def update_task_status_tool(ctx: RunContext[ManagerContext], task_id: str, actio
     req = UpdateTaskRequest(TASK_ID=task_id, STATUS=new_status)
     if call_appsavy_api("UPDATE_STATUS", req):
         return f"Task {task_id} status updated to {new_status}."
-    return "API status update failed."
+    return "API update failed."
 
 # --- MESSAGE HANDLER ---
 def handle_message(command, sender, pid, message=None, full_message=None):
@@ -317,7 +310,6 @@ def handle_message(command, sender, pid, message=None, full_message=None):
         send_whatsapp_message(sender, "File received. Provide details to assign.", pid)
         return
 
-    # Strict Manager Check for Testing
     manager_phone = os.getenv("MANAGER_PHONE")
     team = load_team()
     
@@ -326,7 +318,7 @@ def handle_message(command, sender, pid, message=None, full_message=None):
     elif any(u['phone'] == sender for u in team):
         role = "employee"
     else:
-        send_whatsapp_message(sender, "Access Denied: You are not authorized to use this bot.", pid)
+        send_whatsapp_message(sender, "Access Denied.", pid)
         return
     
     if command:
