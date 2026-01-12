@@ -18,11 +18,11 @@ import certifi
 
 load_dotenv()
 
-# --- MISSING OAUTH CONSTANTS (Fixed for webhook.py) ---
+# --- GMAIL & OAUTH CONSTANTS (Required by webhook.py) ---
 SCOPES = ['https://www.googleapis.com/auth/gmail.send']
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager.onrender.com/oauth2callback")
 
-# --- API CONFIGURATION (TM_API Fixed Manager) ---
+# --- API CONFIGURATION (All 4 AppSavy Endpoints) ---
 APPSAVY_BASE_URL = "https://configapps.appsavy.com/api/AppsavyRestService"
 
 API_CONFIGS = {
@@ -70,7 +70,7 @@ tokens_col = db['user_tokens']
 processed_col = db['processed_messages']
 
 # --- PYDANTIC AI AGENT INITIALIZATION ---
-# GeminiModel reads key from Environment Variables to avoid TypeError
+# api_key is read from environment automatically to fix Pydantic-AI v1.41.0 TypeError
 ai_model = GeminiModel('gemini-2.0-flash')
 
 class ManagerContext(BaseModel):
@@ -116,10 +116,10 @@ task_agent = Agent(
     system_prompt=SYSTEM_PROMPT
 )
 
-# --- AUTHORIZED TEAM MAPPING (Fixed Users) ---
+# --- AUTHORIZED TEAM MAPPING (Fixed Test Users) ---
 def load_team():
     return [
-        {"name": "mdpvvnl", "phone": "919650523477", "email": "varun.verma@mobineers.com", "login_code": "mdpvvnl"},
+        {"name": "mdpvvnl", "phone": "919650523477", "email": "test-email@example.com", "login_code": "mdpvvnl"},
         {"name": "chairman", "phone": "91XXXXXXXXXX", "email": "chairman@example.com", "login_code": "chairman"},
         {"name": "mddvvnl", "phone": "91XXXXXXXXXX", "email": "mddvvnl@example.com", "login_code": "mddvvnl"},
         {"name": "ce_ghaziabad", "phone": "91XXXXXXXXXX", "email": "ce@example.com", "login_code": "ce_ghaziabad"}
