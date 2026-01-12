@@ -8,7 +8,7 @@ from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.gemini import GeminiModel
-from pydantic_ai.messages import ModelResponse, ModelRequest, TextPart
+from pydantic_ai.messages import ModelResponse, ModelRequest, TextPart, UserPromptPart
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -764,13 +764,18 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             return
         
         # Retrieve conversation history (last 5 turns)
+        # --- REVISED HISTORY LOGIC ---
         history_records = list(history_col.find({"sender": sender}).sort("timestamp", -1).limit(5))
         history_records.reverse()
-        
+
         formatted_history = []
         for h in history_records:
-            formatted_history.append(ModelRequest(parts=[TextPart(content=h['user_msg'])]))
-            formatted_history.append(ModelResponse(parts=[TextPart(content=h['bot_res'])]))
+            formatted_history.append(
+             ModelRequest(parts=[UserPromptPart(content=h['user_msg'])])
+            )
+            formatted_history.append(
+                ModelResponse(parts=[TextPart(content=h['bot_res'])])
+            )
         
         # Determine user role
         manager_phone = os.getenv("MANAGER_PHONE", "919650523477")
