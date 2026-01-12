@@ -14,9 +14,11 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from dotenv import load_dotenv
 from send_message import send_whatsapp_message, send_whatsapp_document
-from google_auth_oauthlib.flow import Flow 
+from google_auth_oauthlib.flow import Flow
 from pymongo import MongoClient
 import certifi
+import smtplib
+from email.mime.text import MIMEText
 
 # Load environment variables from .env file
 load_dotenv()
@@ -33,7 +35,6 @@ REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-38w7.onrender.
 # --- API CONFIGURATION (5 APIs - 100% Dependency) ---
 # Absolute reliance on Appsavy for all system state changes and reads.
 APPSAVY_BASE_URL = "https://configapps.appsavy.com/api/AppsavyRestService"
-
 API_CONFIGS = {
     "CREATE_TASK": {
         "url": f"{APPSAVY_BASE_URL}/PushdataJSONClient",
@@ -81,7 +82,6 @@ API_CONFIGS = {
 MONGO_URI = os.getenv("MONGO_URI")
 db_client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
 db = db_client['ai_task_manager']
-
 state_col = db['state']
 tokens_col = db['user_tokens']
 processed_col = db['processed_messages']
@@ -97,50 +97,53 @@ class ManagerContext(BaseModel):
     current_time: datetime.datetime = Field(default_factory=datetime.datetime.now)
 
 # --- FULL DETAILED SYSTEM PROMPT ---
-SYSTEM_PROMPT = """
-You are the Official AI Task Manager Bot for 'mdpvvnl'. 
-Identity: TM_API (Manager). You are a precise, professional assistant.
-Current System Date: 2026-01-12.
+SYSTEM_PROMPT = """ 
+You are the Official AI Task Manager Bot for 'mdpvvnl'. Identity: TM_API (Manager). You are a precise, professional assistant. Current System Date: 2026-01-12.
 
 ### 1. INTELLIGENT TIME & ASSIGNMENT INFERENCE
-- When a user says "[Name] has to [Task] by [Time]", immediately use 'assign_new_task_tool'.
-- **Deadline Logic:**
+* Understand natural language requests to assign tasks. For example, if the user mentions assigning a task to someone, like "Assign [Task] to [Name or Phone] by [Time]", or similar intents, use 'assign_new_task_tool'. Resolve names or phone numbers to team members.
+* **Deadline Logic:** 
   * If the mentioned time (e.g., 5pm) is LATER than the current system time, assume the date is TODAY (2026-01-12).
   * If the mentioned time has already passed today (e.g., it's now 5:52pm, and the user says 5pm), assume the date is TOMORROW (2026-01-13).
-- **Name Resolution:** Resolve terms like 'mdpvvnl' or common names to the Login IDs in your team directory.
+* **Resolution:** Resolve names, common terms like 'mdpvvnl', or phone numbers to Login IDs in the team directory. If a phone number is provided, use it for assignment.
 
 ### 2. CONVERSATIONAL MEMORY & DOUBT
-- You have access to a short history (last 5 turns). Use it to identify context (who is "he", which task are we discussing).
-- **Confirmation Protocol:** IF IN DOUBT or if information is ambiguous, ALWAYS ASK THE USER FOR CONFIRMATION before calling any tool.
+* You have access to a short history (last 5 turns). Use it to maintain context (e.g., who is "he", which task are we discussing) for effective communication.
+* **Confirmation Protocol:** IF IN DOUBT or if information is ambiguous, ALWAYS ASK THE USER FOR CONFIRMATION before calling any tool.
 
 ### 3. ROLE-BASED STATUS PROTOCOL
-- **Assignees (Employees):** Can only set tasks to 'Partially Closed' or 'Reported Closed'.
-- **Assignors (Managers):** Only users with the 'manager' role can set tasks to 'Closed' (Approval) or 'Reopened' (Rejection).
-- **Validation:** If an employee attempts a 'Closed' or 'Reopened' update, state that only managers have that authority.
+* **Assignees (Employees):** Can only set tasks to 'Partially Closed' (work done) or 'Reported Closed' (pending approval).
+* **Assignors (Managers):** Only users with the 'manager' role can set tasks to 'Closed' (approval) or 'Reopened' (rejection).
+* **Validation:** If an employee attempts a 'Closed' or 'Reopened' update, state that only managers have that authority.
+* Task statuses include: Pending (Open/Reopened), Work Done (Partially Closed), Pending Approval (Reported Closed), Closed.
 
 ### 4. OPERATIONAL DIRECTIVES
 #### Performance Reporting (SID 616):
-- Use 'get_performance_report_tool'. 
-- You MUST format the output exactly as follows:
+* Use 'get_performance_report_tool' for requests about performance, task counts, or pending tasks overview.
+* If no specific employee is mentioned, provide for all team members.
+* If a specific employee is mentioned, provide only for that one.
+* You MUST format the output exactly as follows:
   Name- [Name]
   Task Assigned- Count of Task [Total] Nos
   Task Completed- Count of task [Closed Status Only] Nos
-  Task Pending - 
+  Task Pending -
   Within time: [Count]
   Beyond time: [Count]
 
 #### Task Listing (SID 610):
-- Use 'get_task_list_tool'.
-- Sort descending by due date (Older tasks appear at the top).
+* Use 'get_task_list_tool' for requests about listing tasks, especially pending ones.
+* If requesting pending tasks, filter to non-closed statuses.
+* Sort ascending by due date (older tasks at the top).
+* Employees can request their own task list without specifying a name.
 
 #### Document Handling:
-- If a user sends a file/image, acknowledge it: "File received and saved. Provide details to complete assignment."
+* If a user sends a file/image, acknowledge it: "File received and saved. Provide details to complete assignment."
 
 ### 5. COMMUNICATION CONSTRAINTS
-- NO emojis. Be concise and professional.
-- Do not mention internal tool names (e.g., "Calling get_task_list_tool").
+* NO emojis. Be concise and professional.
+* Do not mention internal tool names (e.g., "Calling get_task_list_tool").
+* Understand user intents in natural language without requiring specific keywords.
 """
-
 task_agent = Agent(ai_model, deps_type=ManagerContext, system_prompt=SYSTEM_PROMPT)
 
 # --- AUTHORIZED TEAM CONFIGURATION ---
@@ -242,28 +245,46 @@ def download_and_encode_document(document_data: Dict):
     dr = requests.get(download_url, headers=headers)
     return base64.b64encode(dr.content).decode("utf-8") if dr.status_code == 200 else None
 
+def send_email(to_email: str, subject: str, body: str):
+    """Sends an email notification."""
+    from_email = os.getenv("FROM_EMAIL")
+    password = os.getenv("EMAIL_PASSWORD")
+    if not from_email or not password:
+        logger.error("Email credentials not configured.")
+        return
+    msg = MIMEText(body)
+    msg['Subject'] = subject
+    msg['From'] = from_email
+    msg['To'] = to_email
+    try:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(from_email, password)
+            server.sendmail(from_email, to_email, msg.as_string())
+        logger.info(f"Email sent to {to_email}")
+    except Exception as e:
+        logger.error(f"Failed to send email: {str(e)}")
+
 # --- AGENT TOOLS ---
 @task_agent.tool
 async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Optional[str] = None) -> str:
     """Uses specialized GET_COUNT API for aggregate numbers."""
     tasks_data = await fetch_api_tasks()
     team, now = load_team(), ctx.deps.current_time
-    display_team = [e for e in team if name and name.lower() in e['name'].lower()] if name else team
+    display_team = [e for e in team if name and (name.lower() in e['name'].lower() or name in e['phone'])] if name else team
     if not display_team: return f"User {name} not found in directory."
     
     results = []
     for member in display_team:
         login = member['login_code']
         counts = await fetch_task_counts_api(login)
-        m_tasks = [t for t in tasks_data if t.get('LOGIN') == login]
+        m_tasks = [t for t in tasks_data if t.get('LOGIN') == login and t.get('STATUS') != 'Closed']
         within, beyond = 0, 0
         for t in m_tasks:
-            if t.get('STATUS') != 'Closed':
-                try:
-                    dt = datetime.datetime.fromisoformat(t['EXPECTED_END_DATE'].replace("Z", ""))
-                    if dt > now: within += 1
-                    else: beyond += 1
-                except: within += 1
+            try:
+                dt = datetime.datetime.fromisoformat(t['EXPECTED_END_DATE'].replace("Z", ""))
+                if dt > now: within += 1
+                else: beyond += 1
+            except: within += 1
         results.append(
             f"Name- {member['name'].title()}\n"
             f"Task Assigned- Count of Task {counts.get('ASSIGNED_TASK', '0')} Nos\n"
@@ -277,11 +298,11 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext], target_name: Optio
     """Retrieves list of tasks for the identified user profile."""
     tasks_data = await fetch_api_tasks()
     team = load_team()
-    user = next((u for u in team if (target_name and target_name.lower() in u['name'].lower()) or u['phone'] == ctx.deps.sender_phone), None)
+    user = next((u for u in team if (target_name and (target_name.lower() in u['name'].lower() or target_name in u['phone'])) or u['phone'] == ctx.deps.sender_phone), None)
     if not user: return "Identification failed: Profile not found."
     
-    filtered = [t for t in tasks_data if t.get('LOGIN') == user['login_code']]
-    filtered.sort(key=lambda x: x.get('EXPECTED_END_DATE', ''), reverse=True)
+    filtered = [t for t in tasks_data if t.get('LOGIN') == user['login_code'] and t.get('STATUS') != 'Closed']
+    filtered.sort(key=lambda x: x.get('EXPECTED_END_DATE', ''))
     
     if not filtered: return f"No pending tasks found for {user['name']}."
     output = "Task List:\n"
@@ -293,9 +314,8 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext], target_name: Optio
 async def assign_new_task_tool(ctx: RunContext[ManagerContext], name: str, task_name: str, deadline: str) -> str:
     """Assigns new task via SID 604 and handles pending document attachments."""
     team = load_team()
-    user = next((u for u in team if name.lower() in u['name'].lower() or name.lower() == u['login_code'].lower()), None)
+    user = next((u for u in team if name.lower() in u['name'].lower() or name.lower() == u['login_code'].lower() or name in u['phone']), None)
     if not user: return f"Error: User '{name}' not found in directory."
-
     login_code = user['login_code']
     state_doc = state_col.find_one({"id": "global_state"}) or {"data": {}}
     state = state_doc.get("data", {})
@@ -309,15 +329,14 @@ async def assign_new_task_tool(ctx: RunContext[ManagerContext], name: str, task_
                 DOCUMENT=DocumentInfo(VALUE=pending_doc.get("filename", "file.png"), BASE64=b64),
                 DOCUMENT_NAME="ATTACHMENT"
             ))
-
     req = CreateTaskRequest(
         ASSIGNEE=login_code, DESCRIPTION=task_name, EXPECTED_END_DATE=deadline,
         TASK_NAME=task_name, DETAILS=Details(CHILD=[DetailChild(LOGIN=login_code, PARTICIPANTS=user['name'].upper())]),
         DOCUMENTS=doc_payload
     )
-
     if await call_appsavy_api("CREATE_TASK", req):
         send_whatsapp_message(user['phone'], f"New Task Assigned: {task_name}. Due: {deadline}", os.getenv("PHONE_NUMBER_ID"))
+        send_email("patodiaaadi@gmail.com", "New Task Assigned", f"Task {task_name} assigned to {user['name']}. Due: {deadline}")
         if pending_doc:
             state[ctx.deps.sender_phone].pop("pending_document", None)
             state_col.update_one({"id": "global_state"}, {"$set": {"data": state}})
@@ -333,7 +352,6 @@ async def update_task_status_tool(ctx: RunContext[ManagerContext], task_id: str,
     
     if action.lower() in ["close", "reopen"] and ctx.deps.role != "manager":
         return "Permission Denied: Only authorized managers can Close or Reopen tasks."
-
     req = UpdateTaskRequest(TASK_ID=task_id, STATUS=new_status)
     if await call_appsavy_api("UPDATE_STATUS", req):
         return f"Success: Task {task_id} status updated to {new_status}."
@@ -349,14 +367,14 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
     is_media = msg_type in ["document", "image", "video", "audio"]
     
     # Logic for storing files before task assignment
-    if is_media and not command: 
+    if is_media and not command:
         state_doc = state_col.find_one({"id": "global_state"}) or {"data": {}}
         state = state_doc.get("data", {})
         state[sender] = {"pending_document": message.get("document") or message.get("image")}
         state_col.update_one({"id": "global_state"}, {"$set": {"data": state}}, upsert=True)
-        send_whatsapp_message(sender, "File received. Provide Name, Task, and Deadline to assign it.", pid)
+        send_whatsapp_message(sender, "File received. Provide details to complete assignment.", pid)
         return
-
+    
     # Chat History Retrieval using MongoDB with strict TextPart formatting
     history_records = list(history_col.find({"sender": sender}).sort("timestamp", -1).limit(5))
     history_records.reverse()
@@ -364,7 +382,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
     for h in history_records:
         formatted_history.append(ModelRequest(parts=[TextPart(content=h['user_msg'])]))
         formatted_history.append(ModelResponse(parts=[TextPart(content=h['bot_res'])]))
-
+    
     manager_phone = os.getenv("MANAGER_PHONE")
     team = load_team()
     role = "manager" if sender == manager_phone else "employee" if any(u['phone'] == sender for u in team) else None
@@ -372,11 +390,11 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
     if not role:
         send_whatsapp_message(sender, "Access Denied: Number not authorized.", pid)
         return
-
+    
     if command:
         try:
             result = await task_agent.run(
-                command, 
+                command,
                 deps=ManagerContext(sender_phone=sender, role=role),
                 message_history=formatted_history
             )
@@ -389,5 +407,5 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             logger.error(f"Agent execution failed: {str(e)}")
             send_whatsapp_message(sender, f"Internal System Error: {str(e)}", pid)
     
-    if full_message: 
+    if full_message:
         processed_col.insert_one({"msg_id": full_message.get("id")})
