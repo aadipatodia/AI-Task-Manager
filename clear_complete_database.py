@@ -29,9 +29,9 @@ def clear_entire_database():
         try:
             # This drops the entire database, including all collections
             client.drop_database(db_name)
-            print(f"✅ Success: Database '{db_name}' has been cleared.")
+            print(f" Success: Database '{db_name}' has been cleared.")
         except Exception as e:
-            print(f"❌ Error occurred: {e}")
+            print(f"Error occurred: {e}")
     else:
         print("Operation cancelled.")
 

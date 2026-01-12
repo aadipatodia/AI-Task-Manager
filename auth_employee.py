@@ -29,7 +29,7 @@ def register_employee(phone_number):
     with open('user_tokens.json', 'w') as f:
         json.dump(tokens, f, indent=4)
     
-    print(f"✅ Successfully authorized and saved credentials for: {phone_number}")
+    print(f" Successfully authorized and saved credentials for: {phone_number}")
 
 if __name__ == "__main__":
     phone = input("Enter employee phone number (with country code, e.g., 919818006468): ")

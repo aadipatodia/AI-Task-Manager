@@ -6,14 +6,14 @@ from dotenv import load_dotenv
 from engine import tokens_col
 
 # Import functions from your other files
-from engine import handle_message, SCOPES, REDIRECT_URI 
+from engine import handle_message, SCOPES, REDIRECT_URI
 from send_message import send_whatsapp_message 
 
 load_dotenv()
 app = FastAPI()
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
-MANAGER_PHONE = "91XXXXXXXXXX" # Replace with your actual WhatsApp number
+MANAGER_PHONE = "91XXXXXXXXXX" 
 
 @app.get("/")
 async def home():
@@ -118,7 +118,7 @@ async def oauth2callback(request: Request):
         )
 
         if target_manager:
-            send_whatsapp_message(target_manager, f"✅ Employee ({phone}) connected!", PHONE_NUMBER_ID)
+            send_whatsapp_message(target_manager, f" Employee ({phone}) connected!", PHONE_NUMBER_ID)
         
         return HTMLResponse("<h1>Success!</h1><p>Calendar connected. You can close this.</p>")
 
