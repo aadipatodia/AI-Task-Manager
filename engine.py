@@ -353,7 +353,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
             send_whatsapp_message(sender, result.output, pid)
             # Save history
-            history_col.insert_one({"sender": sender, "user_msg": command, "bot_res": result.data, "timestamp": datetime.datetime.now()})
+            history_col.insert_one({"sender": sender, "user_msg": command, "bot_res": result.output, "timestamp": datetime.datetime.now()})
         except Exception as e:
             send_whatsapp_message(sender, f"Internal Error: {str(e)}", pid)
     

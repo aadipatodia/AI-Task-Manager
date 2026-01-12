@@ -6,7 +6,7 @@ load_dotenv()
 
 ACCESS_TOKEN = os.getenv('ACCESS_TOKEN')
 PHONE_NUMBER_ID = os.getenv('PHONE_NUMBER_ID') 
-VERSION = os.getenv('VERSION', 'v21.0')
+VERSION = os.getenv('VERSION', 'v22.0')
 
 def send_whatsapp_message(recipient_number, customer_name):
     """
