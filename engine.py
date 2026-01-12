@@ -16,11 +16,10 @@ from google_auth_oauthlib.flow import Flow
 from pymongo import MongoClient
 import certifi
 
-# Load environment variables
 load_dotenv()
 
-# --- API CONFIGURATION (Complete 4-API Suite) ---
-# The system is entirely dependent on these endpoints for all task operations.
+# --- API CONFIGURATION (TM_API Fixed Manager) ---
+# Every operation is performed through these 4 AppSavy API endpoints.
 APPSAVY_BASE_URL = "https://configapps.appsavy.com/api/AppsavyRestService"
 
 API_CONFIGS = {
@@ -68,7 +67,7 @@ tokens_col = db['user_tokens']
 processed_col = db['processed_messages']
 
 # --- PYDANTIC AI AGENT INITIALIZATION ---
-# api_key is omitted here to fix the Render TypeError; it is read from Environment Variables.
+# Fixed: api_key removed from init to resolve Render TypeError. Model reads from env.
 ai_model = GeminiModel('gemini-2.0-flash')
 
 class ManagerContext(BaseModel):
@@ -76,42 +75,36 @@ class ManagerContext(BaseModel):
     role: str
     message_data: Optional[Dict[str, Any]] = None
 
-# --- DETAILED SYSTEM PROMPT (API-DEPENDENT) ---
+# --- DETAILED SYSTEM PROMPT ---
 SYSTEM_PROMPT = """
-You are the Official AI Task Manager Bot for 'mdpvvnl'. 
-You act strictly as the 'TM_API' manager. 
-You have NO internal memory of tasks. You MUST use the provided API tools for every single query or action.
+You are the Official AI Task Manager Bot for login mdpvvnl. 
+You act as the TM_API manager. You have no internal task memory; every query must be handled via API tools.
 
-### ROLE-BASED PERMISSIONS
-- **Managers:** Only they can set status to 'Closed' or 'Reopened'.
-- **Employees:** Can only set status to 'Partially Closed' or 'Reported Closed'.
-- **New Tasks:** Always created with the status 'Open'.
+TASK STATUS PROTOCOLS:
+- Initial state: 'Open'.
+- For Employees (Assignees): Only 'Partially Closed' and 'Reported Closed' are allowed.
+- For Managers (Assignors): Only they can set 'Closed' (Approval) or 'Reopened' (Rejection).
+- Validation: If an employee tries to set 'Closed' or 'Reopened', state that only managers have this authority.
 
-### PERFORMANCE REPORTING (API-DRIVEN)
-When a report is requested, call 'get_performance_report_tool'. 
-Compare the 'EXPECTED_END_DATE' from the API against the current time to determine if a task is 'Within time' or 'Beyond time'.
-Output format MUST be exactly:
-Name- [Name]
-Task Assigned- Count of Task [Total] Nos
-Task Completed- Count of task [Closed Status Only] Nos
-Task Pending - 
-Within time: [Count]
-Beyond time: [Count]
+OPERATIONAL DIRECTIVES:
+1. PERFORMANCE REPORTING: Use 'get_performance_report_tool'. Compare 'EXPECTED_END_DATE' against current time for 'Within time' vs 'Beyond time'.
+   Format exactly:
+   Name- [Name]
+   Task Assigned- Count of Task [Total] Nos
+   Task Completed- Count of task [Closed Status Only] Nos
+   Task Pending - 
+   Within time: [Count]
+   Beyond time: [Count]
 
-### TASK LISTING (API-DRIVEN)
-When a list is requested, call 'get_task_list_tool'.
-Tasks must be sorted in DESCENDING order (oldest due date first).
-Format each entry: ID | Task Name | Due Date | [Status].
+2. TASK LISTING: Use 'get_task_list_tool'. Sort results in descending order (older to newer) based on due date.
 
-### ASSIGNMENTS & DOCUMENTS
-- Use 'assign_new_task_tool' to create tasks in the Appsavy system. 
-- Resolve user names to the authorized Login ID from your internal mapping.
-- If a document/image is received, acknowledge it immediately. Inform the user: "File saved. Provide the task name and assignee to complete the assignment."
+3. ASSIGNMENTS: Use 'assign_new_task_tool'. Resolve names to the Login ID/Mobile from the authorized directory.
 
-### CONSTRAINTS
-- NO emojis.
-- NO mentions of requirement numbers.
-- If an unauthorized role attempts a 'Closed' or 'Reopened' status, refuse the request.
+4. DOCUMENTS: If a file/image is received, acknowledge it and state: "File saved. Provide the task name and assignee details to complete the assignment."
+
+STRICT CONSTRAINTS:
+- No emojis.
+- No requirement numbers or meta-talk.
 """
 
 task_agent = Agent(
@@ -120,11 +113,16 @@ task_agent = Agent(
     system_prompt=SYSTEM_PROMPT
 )
 
-# --- AUTHORIZED TEAM MAPPING (Fixed as requested) ---
+# --- AUTHORIZED TEAM MAPPING (Fixed Users) ---
 def load_team():
-    """Mapping names to the real Login IDs and test phone numbers."""
+    """Fixed directory for testing phase."""
     return [
-        {"name": "mdpvvnl", "phone": "919650523477", "email": "test-email@example.com", "login_code": "mdpvvnl"},
+        {
+            "name": "mdpvvnl", 
+            "phone": "919650523477", 
+            "email": "test-email@example.com", 
+            "login_code": "mdpvvnl"
+        },
         {"name": "chairman", "phone": "91XXXXXXXXXX", "email": "chairman@example.com", "login_code": "chairman"},
         {"name": "mddvvnl", "phone": "91XXXXXXXXXX", "email": "mddvvnl@example.com", "login_code": "mddvvnl"},
         {"name": "ce_ghaziabad", "phone": "91XXXXXXXXXX", "email": "ce@example.com", "login_code": "ce_ghaziabad"}
@@ -171,15 +169,14 @@ class UpdateTaskRequest(BaseModel):
     STATUS: str
     COMMENTS: str = "STATUS_UPDATE"
 
-# --- API CORE HELPERS ---
-def fetch_tasks_from_appsavy():
-    """Calls GET_TASKS API to get real-time data."""
-    req = GetTasksRequest(Child=[{"Control_Id": "106831", "AC_ID": "110803", "Parent": [{"Control_Id": "106825", "Value": "Open,Closed,Partially Closed,Reported Closed,Reopened", "Data_Form_Id": ""}]}])
+# --- REST API HELPERS ---
+def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
+    config = API_CONFIGS[key]
     try:
-        res = requests.post(API_CONFIGS["GET_TASKS"]["url"], headers=API_CONFIGS["GET_TASKS"]["headers"], json=req.model_dump())
-        return res.json() if res.status_code == 200 else []
-    except:
-        return []
+        res = requests.post(config["url"], headers=config["headers"], json=payload.model_dump(), timeout=15)
+        return res.json() if res.status_code == 200 else None
+    except Exception:
+        return None
 
 def download_and_encode_document(document_data: Dict):
     access_token = os.getenv("ACCESS_TOKEN")
@@ -193,18 +190,22 @@ def download_and_encode_document(document_data: Dict):
         return base64.b64encode(dr.content).decode("utf-8")
     return None
 
+def fetch_live_tasks():
+    req = GetTasksRequest(Child=[{"Control_Id": "106831", "AC_ID": "110803", "Parent": [{"Control_Id": "106825", "Value": "Open,Closed,Partially Closed,Reported Closed,Reopened", "Data_Form_Id": ""}]}])
+    res = call_appsavy_api("GET_TASKS", req)
+    return res if isinstance(res, list) else []
+
 # --- AGENT TOOLS ---
 @task_agent.tool
 def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Optional[str] = None) -> str:
-    """Requirement 1 & 2: Reports based entirely on Live API Data."""
-    tasks_data, team, now = fetch_tasks_from_appsavy(), load_team(), datetime.datetime.now()
+    """100% Dependent on GET_TASKS API."""
+    tasks_data, team, now = fetch_live_tasks(), load_team(), datetime.datetime.now()
     display_team = [e for e in team if name and name.lower() in e['name'].lower()] if name else team
-    if not display_team: return f"User {name} not found."
+    if not display_team: return f"Employee {name} not found."
     
     results = []
     for member in display_team:
         login = member['login_code']
-        # Filter API data for this user
         m_tasks = [t for t in tasks_data if t.get('LOGIN') == login]
         comp = len([t for t in m_tasks if t.get('STATUS') == 'Closed'])
         within, beyond = 0, 0
@@ -225,8 +226,8 @@ def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Optional[
 
 @task_agent.tool
 def get_task_list_tool(ctx: RunContext[ManagerContext], target_name: Optional[str] = None) -> str:
-    """Requirement 3 & 7: Sorted task list via API."""
-    tasks_data, team = fetch_tasks_from_appsavy(), load_team()
+    """Task listing via API with descending sort."""
+    tasks_data, team = fetch_live_tasks(), load_team()
     login_id = None
     if target_name:
         user = next((u for u in team if target_name.lower() in u['name'].lower()), None)
@@ -235,26 +236,24 @@ def get_task_list_tool(ctx: RunContext[ManagerContext], target_name: Optional[st
         user = next((u for u in team if u['phone'] == ctx.deps.sender_phone), None)
         if user: login_id = user['login_code']
 
-    if not login_id: return "User identification failed."
+    if not login_id: return "No tasks found."
     filtered = [t for t in tasks_data if t.get('LOGIN') == login_id]
-    
     try:
-        # Descending Sort: Older (smaller date) to Newer
         filtered.sort(key=lambda x: x.get('EXPECTED_END_DATE', ''), reverse=True)
     except: pass
     
-    if not filtered: return "No tasks found for this account."
+    if not filtered: return "No pending tasks listed."
     output = "Task List:\n"
     for t in filtered:
-        output += f"- ID: {t.get('TASK_ID')} | {t.get('TASK_NAME')} | Due: {t.get('EXPECTED_END_DATE')} | [{t.get('STATUS')}]\n"
+        output += f"- ID: {t.get('TASK_ID')} | {t.get('TASK_NAME')} | Due: {t.get('EXPECTED_END_DATE')} | Status: {t.get('STATUS')}\n"
     return output
 
 @task_agent.tool
 def assign_new_task_tool(ctx: RunContext[ManagerContext], name: str, task_name: str, deadline: str) -> str:
-    """Requirement 4: Assign task through API using resolved Login ID."""
+    """Task assignment via CREATE_TASK API."""
     team = load_team()
     user = next((u for u in team if name.lower() in u['name'].lower()), None)
-    if not user: return f"User {name} not found in directory."
+    if not user: return f"User {name} not found."
 
     login_code = user['login_code']
     state_doc = state_col.find_one({"id": "global_state"}) or {"data": {}}
@@ -279,8 +278,7 @@ def assign_new_task_tool(ctx: RunContext[ManagerContext], name: str, task_name: 
         DOCUMENTS=doc_payload
     )
 
-    res = requests.post(API_CONFIGS["CREATE_TASK"]["url"], headers=API_CONFIGS["CREATE_TASK"]["headers"], json=req.model_dump())
-    if res.status_code == 200:
+    if call_appsavy_api("CREATE_TASK", req):
         send_whatsapp_message(user['phone'], f"New Task: {task_name}. Due: {deadline}", os.getenv("PHONE_NUMBER_ID"))
         if pending_doc:
             state[ctx.deps.sender_phone].pop("pending_document", None)
@@ -290,17 +288,18 @@ def assign_new_task_tool(ctx: RunContext[ManagerContext], name: str, task_name: 
 
 @task_agent.tool
 def update_task_status_tool(ctx: RunContext[ManagerContext], task_id: str, action: str) -> str:
-    """Requirement 5: Manager Approval/Rejection via UPDATE_STATUS API."""
+    """Approval/Rejection via UPDATE_STATUS API."""
     status_map = {"partial": "Partially Closed", "reported": "Reported Closed", "close": "Closed", "reopen": "Reopened"}
     new_status = status_map.get(action.lower())
-    if not new_status: return "Invalid action."
+    if not new_status: return "Invalid status."
     
     if action.lower() in ["close", "reopen"] and ctx.deps.role != "manager":
-        return "Unauthorized: Only managers can Close or Reopen tasks."
+        return "Permission Denied: Only managers can Close or Reopen tasks."
 
     req = UpdateTaskRequest(TASK_ID=task_id, STATUS=new_status)
-    res = requests.post(API_CONFIGS["UPDATE_STATUS"]["url"], headers=API_CONFIGS["UPDATE_STATUS"]["headers"], json=req.model_dump())
-    return f"Status updated to {new_status} via API." if res.status_code == 200 else "API status update failed."
+    if call_appsavy_api("UPDATE_STATUS", req):
+        return f"Task {task_id} status updated to {new_status}."
+    return "API status update failed."
 
 # --- MESSAGE HANDLER ---
 def handle_message(command, sender, pid, message=None, full_message=None):
@@ -318,8 +317,17 @@ def handle_message(command, sender, pid, message=None, full_message=None):
         send_whatsapp_message(sender, "File received. Provide details to assign.", pid)
         return
 
+    # Strict Manager Check for Testing
+    manager_phone = os.getenv("MANAGER_PHONE")
     team = load_team()
-    role = "manager" if not any(u['phone'] == sender for u in team) else "employee"
+    
+    if sender == manager_phone:
+        role = "manager"
+    elif any(u['phone'] == sender for u in team):
+        role = "employee"
+    else:
+        send_whatsapp_message(sender, "Access Denied: You are not authorized to use this bot.", pid)
+        return
     
     if command:
         try:
