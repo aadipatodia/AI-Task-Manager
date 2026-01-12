@@ -327,7 +327,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         try:
             # FIXED: Await the async run call
             result = await task_agent.run(command, deps=ManagerContext(sender_phone=sender, role=role))
-            send_whatsapp_message(sender, result.data, pid)
+            send_whatsapp_message(sender, result.output, pid)
         except Exception as e:
             send_whatsapp_message(sender, f"Error: {str(e)}", pid)
     
