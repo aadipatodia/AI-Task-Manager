@@ -331,16 +331,17 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
         return None
 
 async def fetch_api_tasks():
-    """Retrieves full task list via SID 610 - API dependent."""
     req = GetTasksRequest(Child=[{
         "Control_Id": "106831",
         "AC_ID": "110803",
         "Parent": [{
             "Control_Id": "106825",
-            "Value": "Open,Closed,Partially Closed,Reported Closed,Reopened",
+            # Ensure "Pending" is included to catch newly created but unacknowledged tasks
+            "Value": "Pending,Open,Closed,Partially Closed,Reported Closed,Reopened",
             "Data_Form_Id": ""
         }]
     }])
+    
     res = await call_appsavy_api("GET_TASKS", req)
     
     # Enhanced validation
@@ -533,7 +534,7 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext], target_name: Optio
                 return "Unable to identify your profile."
         
         # Filter tasks
-        filtered = [t for t in tasks_data if t.get('LOGIN') == user['login_code']]
+        filtered = [t for t in tasks_data if t.get('LOGIN', '').lower() == user['login_code'].lower()]
         
         # Sort by due date (oldest first - descending order by date value)
         filtered.sort(key=lambda x: x.get('EXPECTED_END_DATE', ''), reverse=True)
