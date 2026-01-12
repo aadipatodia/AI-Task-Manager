@@ -380,10 +380,10 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 deps=ManagerContext(sender_phone=sender, role=role),
                 message_history=formatted_history
             )
-            send_whatsapp_message(sender, result.data, pid)
+            send_whatsapp_message(sender, result.output, pid)
             # Store turn in history for memory
             history_col.insert_one({
-                "sender": sender, "user_msg": command, "bot_res": result.data, "timestamp": datetime.datetime.now()
+                "sender": sender, "user_msg": command, "bot_res": result.output, "timestamp": datetime.datetime.now()
             })
         except Exception as e:
             logger.error(f"Agent execution failed: {str(e)}")
