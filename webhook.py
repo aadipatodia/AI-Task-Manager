@@ -72,7 +72,7 @@ async def handle_webhook(request: Request):
                         message_data = {"image": doc}
 
                 if user_command or message_data:
-                    handle_message(user_command, sender_phone, phone_number_id, message=message_data, full_message=message)
+                    await handle_message(user_command, sender_phone, phone_number_id, message=message_data, full_message=message)
 
     return {"status": "EVENT_RECEIVED"}
 
