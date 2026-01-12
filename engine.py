@@ -18,11 +18,13 @@ import certifi
 
 load_dotenv()
 
-# --- GMAIL & OAUTH CONSTANTS (Required for webhook.py imports) ---
+# --- GMAIL & OAUTH CONSTANTS ---
+# Required for integration with webhook.py
 SCOPES = ['https://www.googleapis.com/auth/gmail.send']
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-38w7.onrender.com/oauth2callback")
 
-# --- API CONFIGURATION (100% API Dependency) ---
+# --- API CONFIGURATION (5 APIs Included) ---
+# 100% Dependency on Appsavy for data
 APPSAVY_BASE_URL = "https://configapps.appsavy.com/api/AppsavyRestService"
 
 API_CONFIGS = {
@@ -57,6 +59,14 @@ API_CONFIGS = {
             "uid": "TM_API", "roleid": "1627",
             "TokenKey": "e5b4e098-f8b9-47bf-83f1-751582bfe147"
         }
+    },
+    [cite_start]"GET_COUNT": { # New Count API from YAML [cite: 1, 6]
+        "url": f"{APPSAVY_BASE_URL}/GetDataJSONClient",
+        "headers": {
+            "sid": "616", "pid": "309", "fid": "10408", "cid": "64",
+            "uid": "TM_API", "roleid": "1627",
+            "TokenKey": "75c6ec2e-9f9c-48fa-be24-d8eb612f4c03"
+        }
     }
 }
 
@@ -64,13 +74,12 @@ API_CONFIGS = {
 MONGO_URI = os.getenv("MONGO_URI")
 db_client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
 db = db_client['ai_task_manager']
-
 state_col = db['state']
 tokens_col = db['user_tokens']
 processed_col = db['processed_messages']
 
 # --- PYDANTIC AI AGENT INITIALIZATION ---
-# Fixed: Model automatically uses GEMINI_API_KEY from environment
+# ai_model uses Gemini 2.0 Flash
 ai_model = GeminiModel('gemini-2.0-flash')
 
 class ManagerContext(BaseModel):
@@ -80,51 +89,37 @@ class ManagerContext(BaseModel):
 
 # --- DETAILED SYSTEM PROMPT ---
 SYSTEM_PROMPT = """
-YYou are the Official AI Task Manager Bot for 'mdpvvnl'. 
-You act strictly as the 'TM_API' manager. 
-You have NO internal memory of tasks. You MUST use the provided API tools for every single query or action.
+You are the Official AI Task Manager Bot for 'mdpvvnl'. 
+Identity: TM_API (Manager). 
+You must use AppSavy API tools for every action. No internal memory.
 
-### ROLE-BASED PERMISSIONS
-- **Managers:** Only they can set status to 'Closed' or 'Reopened'.
-- **Employees:** Can only set status to 'Partially Closed' or 'Reported Closed'.
-- **New Tasks:** Always created with the status 'Open'.
+ROLE STATUS RULES:
+- Employees: Set 'Partially Closed' or 'Reported Closed'.
+- Managers: Only they set 'Closed' or 'Reopened'.
+- New Tasks: Default status is 'Open'.
 
-### PERFORMANCE REPORTING (API-DRIVEN)
-When a report is requested, call 'get_performance_report_tool'. 
-Compare the 'EXPECTED_END_DATE' from the API against the current time to determine if a task is 'Within time' or 'Beyond time'.
-Output format MUST be exactly:
+REPORTING FORMAT:
 Name- [Name]
-Task Assigned- Count of Task [Total] Nos
-Task Completed- Count of task [Closed Status Only] Nos
+Task Assigned- Count of Task [Assigned] Nos
+Task Completed- Count of task [Closed] Nos
 Task Pending - 
 Within time: [Count]
 Beyond time: [Count]
 
-### TASK LISTING (API-DRIVEN)
-When a list is requested, call 'get_task_list_tool'.
-Tasks must be sorted in DESCENDING order (oldest due date first).
-Format each entry: ID | Task Name | Due Date | [Status].
+LISTING:
+- Sort descending by due date (Older first).
 
-### ASSIGNMENTS & DOCUMENTS
-- Use 'assign_new_task_tool' to create tasks in the Appsavy system. 
-- Resolve user names to the authorized Login ID from your internal mapping.
-- If a document/image is received, acknowledge it immediately. Inform the user: "File saved. Provide the task name and assignee to complete the assignment."
-
-### CONSTRAINTS
-- NO emojis.
-- NO mentions of requirement numbers.
-- If an unauthorized role attempts a 'Closed' or 'Reopened' status, refuse the request.
+CONSTRAINTS:
+- No emojis.
+- Resolve names to Login IDs using the team directory.
+- Identify as TM_API.
 """
 
-task_agent = Agent(
-    ai_model,
-    deps_type=ManagerContext,
-    system_prompt=SYSTEM_PROMPT
-)
+task_agent = Agent(ai_model, deps_type=ManagerContext, system_prompt=SYSTEM_PROMPT)
 
-# --- AUTHORIZED TEAM MAPPING ---
+# --- AUTHORIZED TEAM ---
 def load_team():
-    """Fixed users for testing phase as per your rules."""
+    """Fixed users directory for testing"""
     return [
         {"name": "mdpvvnl", "phone": "919650523477", "email": "varun.verma@mobineers.com", "login_code": "mdpvvnl"},
         {"name": "chairman", "phone": "91XXXXXXXXXX", "email": "chairman@example.com", "login_code": "chairman"},
@@ -173,12 +168,36 @@ class UpdateTaskRequest(BaseModel):
     STATUS: str
     COMMENTS: str = "STATUS_UPDATE"
 
-# --- ASYNC API HELPERS ---
+[cite_start]class GetCountRequest(BaseModel): # Schema for the new Count API [cite: 9, 10]
+    Event: str = "107567"
+    Child: List[Dict]
+
+# --- REST API HELPERS ---
+async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
+    config = API_CONFIGS[key]
+    try:
+        res = requests.post(config["url"], headers=config["headers"], json=payload.model_dump(), timeout=15)
+        return res.json() if res.status_code == 200 else None
+    except Exception:
+        return None
+
 async def fetch_api_tasks():
     req = GetTasksRequest(Child=[{"Control_Id": "106831", "AC_ID": "110803", "Parent": [{"Control_Id": "106825", "Value": "Open,Closed,Partially Closed,Reported Closed,Reopened", "Data_Form_Id": ""}]}])
-    # Using requests inside async for now, but following the flow
-    res = requests.post(API_CONFIGS["GET_TASKS"]["url"], headers=API_CONFIGS["GET_TASKS"]["headers"], json=req.model_dump())
-    return res.json() if res.status_code == 200 else []
+    res = await call_appsavy_api("GET_TASKS", req)
+    return res if isinstance(res, list) else []
+
+async def fetch_task_counts_api(login_code: str):
+    [cite_start]"""Fetches assigned/closed counts via SID 616 [cite: 1, 19, 20]"""
+    req = GetCountRequest(Child=[{
+        "Control_Id": "108118", "AC_ID": "113229",
+        "Parent": [
+            {"Control_Id": "111548", "Value": "1", "Data_Form_Id": ""},
+            {"Control_Id": "107566", "Value": login_code, "Data_Form_Id": ""},
+            {"Control_Id": "107599", "Value": "Assigned By Me", "Data_Form_Id": ""}
+        ]
+    }])
+    res = await call_appsavy_api("GET_COUNT", req)
+    return res[0] if res and isinstance(res, list) else {}
 
 def download_and_encode_document(document_data: Dict):
     access_token = os.getenv("ACCESS_TOKEN")
@@ -195,6 +214,7 @@ def download_and_encode_document(document_data: Dict):
 # --- AGENT TOOLS ---
 @task_agent.tool
 async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Optional[str] = None) -> str:
+    """Requirement 1 & 2: Reports using GET_COUNT and GET_TASKS APIs"""
     tasks_data = await fetch_api_tasks()
     team, now = load_team(), datetime.datetime.now()
     display_team = [e for e in team if name and name.lower() in e['name'].lower()] if name else team
@@ -203,8 +223,9 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
     results = []
     for member in display_team:
         login = member['login_code']
+        counts = await fetch_task_counts_api(login) # Fetch Assigned/Closed from API
+        
         m_tasks = [t for t in tasks_data if t.get('LOGIN') == login]
-        comp = len([t for t in m_tasks if t.get('STATUS') == 'Closed'])
         within, beyond = 0, 0
         for t in m_tasks:
             if t.get('STATUS') != 'Closed':
@@ -215,38 +236,31 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
                 except: within += 1
         results.append(
             f"Name- {member['name'].title()}\n"
-            f"Task Assigned- Count of Task {len(m_tasks)} Nos\n"
-            f"Task Completed- Count of task {comp} Nos\n"
+            f"Task Assigned- Count of Task {counts.get('ASSIGNED_TASK', '0')} Nos\n"
+            f"Task Completed- Count of task {counts.get('CLOSED_TASK', '0')} Nos\n"
             f"Task Pending -\nWithin time: {within}\nBeyond time: {beyond}"
         )
     return "\n\n".join(results)
 
 @task_agent.tool
 async def get_task_list_tool(ctx: RunContext[ManagerContext], target_name: Optional[str] = None) -> str:
+    """Requirement 3 & 7: Descending task list via API"""
     tasks_data = await fetch_api_tasks()
     team = load_team()
-    login_id = None
-    if target_name:
-        user = next((u for u in team if target_name.lower() in u['name'].lower()), None)
-        if user: login_id = user['login_code']
-    else:
-        user = next((u for u in team if u['phone'] == ctx.deps.sender_phone), None)
-        if user: login_id = user['login_code']
-
-    if not login_id: return "Identification failed."
-    filtered = [t for t in tasks_data if t.get('LOGIN') == login_id]
-    try:
-        filtered.sort(key=lambda x: x.get('EXPECTED_END_DATE', ''), reverse=True)
-    except: pass
+    user = next((u for u in team if (target_name and target_name.lower() in u['name'].lower()) or u['phone'] == ctx.deps.sender_phone), None)
+    if not user: return "Identification failed."
     
-    if not filtered: return "No tasks listed."
+    filtered = [t for t in tasks_data if t.get('LOGIN') == user['login_code']]
+    filtered.sort(key=lambda x: x.get('EXPECTED_END_DATE', ''), reverse=True) # Descending sort
+    
     output = "Task List:\n"
     for t in filtered:
         output += f"- ID: {t.get('TASK_ID')} | {t.get('TASK_NAME')} | Due: {t.get('EXPECTED_END_DATE')} | [{t.get('STATUS')}]\n"
-    return output
+    return output if filtered else "No pending tasks listed."
 
 @task_agent.tool
 async def assign_new_task_tool(ctx: RunContext[ManagerContext], name: str, task_name: str, deadline: str) -> str:
+    """Requirement 4: Create task via API with potential document attachment"""
     team = load_team()
     user = next((u for u in team if name.lower() in u['name'].lower()), None)
     if not user: return f"User {name} not found."
@@ -274,61 +288,65 @@ async def assign_new_task_tool(ctx: RunContext[ManagerContext], name: str, task_
         DOCUMENTS=doc_payload
     )
 
-    res = requests.post(API_CONFIGS["CREATE_TASK"]["url"], headers=API_CONFIGS["CREATE_TASK"]["headers"], json=req.model_dump())
-    if res.status_code == 200:
-        send_whatsapp_message(user['phone'], f"New Task: {task_name}", os.getenv("PHONE_NUMBER_ID"))
+    if await call_appsavy_api("CREATE_TASK", req):
+        send_whatsapp_message(user['phone'], f"New Task Assigned: {task_name}. Due: {deadline}", os.getenv("PHONE_NUMBER_ID"))
         if pending_doc:
             state[ctx.deps.sender_phone].pop("pending_document", None)
             state_col.update_one({"id": "global_state"}, {"$set": {"data": state}})
         return f"Task assigned to {user['name']} (ID: {login_code}). Notification sent."
-    return "API Error."
+    return "API failure during task creation."
 
 @task_agent.tool
 async def update_task_status_tool(ctx: RunContext[ManagerContext], task_id: str, action: str) -> str:
+    """Requirement 5: Manager Approval process via API"""
     status_map = {"partial": "Partially Closed", "reported": "Reported Closed", "close": "Closed", "reopen": "Reopened"}
     new_status = status_map.get(action.lower())
-    if not new_status: return "Invalid action."
+    if not new_status: return "Invalid status action."
     
     if action.lower() in ["close", "reopen"] and ctx.deps.role != "manager":
         return "Permission Denied: Only managers can Close or Reopen tasks."
 
     req = UpdateTaskRequest(TASK_ID=task_id, STATUS=new_status)
-    res = requests.post(API_CONFIGS["UPDATE_STATUS"]["url"], headers=API_CONFIGS["UPDATE_STATUS"]["headers"], json=req.model_dump())
-    return f"Status updated to {new_status}." if res.status_code == 200 else "API failure."
+    if await call_appsavy_api("UPDATE_STATUS", req):
+        return f"Task {task_id} status updated to {new_status}."
+    return "API status update failed."
 
-# --- ASYNC MESSAGE HANDLER ---
+# --- ASYNC MESSAGE HANDLER (FIXED DOC PROBLEM) ---
 async def handle_message(command, sender, pid, message=None, full_message=None):
-    mid = full_message.get("id") if full_message else None
-    processed = {d["msg_id"] for d in processed_col.find({}, {"msg_id": 1})}
-    if mid and mid in processed: return
+    """Processes incoming messages, ensuring text commands aren't treated as media"""
+    if full_message and processed_col.find_one({"msg_id": full_message.get("id")}): return
     
     if len(sender) == 10 and not sender.startswith('91'): sender = f"91{sender}"
-    state_doc = state_col.find_one({"id": "global_state"}) or {"data": {}}
-    state = state_doc.get("data", {})
     
-    if not command and message and "document" in message:
-        state[sender] = {"pending_document": message["document"]}
+    # FIX: Check message type explicitly from the Meta webhook payload
+    msg_type = message.get("type", "text") if message else "text"
+    is_media = msg_type in ["document", "image", "video", "audio"]
+    
+    # Only store media if there is NO text command accompanying it
+    if is_media and not command: 
+        state_doc = state_col.find_one({"id": "global_state"}) or {"data": {}}
+        state = state_doc.get("data", {})
+        state[sender] = {"pending_document": message.get("document") or message.get("image")}
         state_col.update_one({"id": "global_state"}, {"$set": {"data": state}}, upsert=True)
-        send_whatsapp_message(sender, "File received. Provide details to assign.", pid)
+        send_whatsapp_message(sender, "File received. Provide details (Name, Task, Deadline) to assign it.", pid)
         return
 
     manager_phone = os.getenv("MANAGER_PHONE")
     team = load_team()
     
-    if sender == manager_phone:
-        role = "manager"
-    elif any(u['phone'] == sender for u in team):
-        role = "employee"
-    else:
-        send_whatsapp_message(sender, "Access Denied.", pid)
-        return
+    # Strict role validation
+    role = "manager" if sender == manager_phone else "employee" if any(u['phone'] == sender for u in team) else None
     
+    if not role:
+        send_whatsapp_message(sender, "Access Denied: Number not authorized.", pid)
+        return
+
     if command:
         try:
-            # FIXED: Await the async run call
+            # FIXED: await result for async run to prevent event loop error
             result = await task_agent.run(command, deps=ManagerContext(sender_phone=sender, role=role))
-            send_whatsapp_message(sender, result.output, pid)
+            send_whatsapp_message(sender, result.data, pid)
         except Exception as e:
-            send_whatsapp_message(sender, f"Error: {str(e)}", pid)
+            send_whatsapp_message(sender, f"Internal Error: {str(e)}", pid)
     
-    if mid: processed_col.insert_one({"msg_id": mid})
+    if full_message: processed_col.insert_one({"msg_id": full_message.get("id")})
