@@ -67,7 +67,7 @@ processed_col = db['processed_messages']
 
 # --- PYDANTIC AI AGENT INITIALIZATION ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-ai_model = GeminiModel('gemini-2.0-flash', api_key=GEMINI_API_KEY)
+ai_model = GeminiModel('gemini-2.0-flash')
 
 class ManagerContext(BaseModel):
     sender_phone: str
