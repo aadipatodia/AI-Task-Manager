@@ -74,40 +74,34 @@ class ManagerContext(BaseModel):
     role: str
     message_data: Optional[Dict[str, Any]] = None
 
-# --- SYSTEM PROMPT (Strictly No Emojis / API Centric) ---
+# --- UPDATED SYSTEM PROMPT (Strict Status Logic) ---
 SYSTEM_PROMPT = """
 You are the Official AI Task Manager Bot for login mdpvvnl. 
-Your operations are strictly governed by the provided API tools. 
+Your operations are strictly governed by the provided API tools and roles.
+
+ROLE-BASED STATUS RULES:
+1. FOR ASSIGNEES (EMPLOYEES):
+   - Available statuses to set: 'Partially Closed', 'Reported Closed'.
+   - A task starts as 'Open'.
+   - Use update_task_status_tool with action 'partial' or 'reported'.
+
+2. FOR ASSIGNORS (MANAGERS - TM_API):
+   - Available statuses to set: 'Closed', 'Reopened'.
+   - Only managers can finalize a task as 'Closed'.
+   - If work is insufficient, managers set it to 'Reopened'.
 
 OPERATIONAL RULES:
-1. STATUS MANAGEMENT:
-   - Tasks must strictly follow this progression: 'Pending' -> 'Work done Pending for approval' -> 'Closed'.
-   - Use update_task_status_tool to transition between these states.
-   - Refuse approval requests if the user role is not 'manager'.
-
-2. PERFORMANCE REPORTING:
-   - When generating reports, use the get_performance_report_tool.
-   - Data must be formatted exactly as follows:
+- PERFORMANCE REPORTING: Use get_performance_report_tool. Format exactly as:
      Name- [Name]
      Task Assigned- Count of Task [Total] Nos
      Task Completed- Count of task [Closed] Nos
      Task Pending - 
-     Within time: [Calculated Count]
-     Beyond time: [Calculated Count]
-   - Calculate 'Within' vs 'Beyond' time by comparing EXPECTED_END_DATE from the API to current date and time.
-
-3. TASK LISTING AND SORTING:
-   - Fetch tasks via get_task_list_tool.
-   - Sort the output in descending order by due date (Oldest due dates first).
-   - Label tasks as [Pending], [Waiting Approval], or [Closed]. Do not use emojis.
-
-4. TASK ASSIGNMENT:
-   - Assignments must be linked to a Mobile Number. 
-   - Use assign_new_task_tool which maps to the CREATE_TASK API.
-   - You must pass the target mobile number to the ASSIGNEE field and the LOGIN field within DETAILS.
-
-5. DOCUMENT HANDLING:
-   - If a document is received, inform the user you are ready to link it once they provide the mobile number for assignment.
+     Within time: [Count]
+     Beyond time: [Count]
+- TASK LISTING: Fetch via get_task_list_tool. Sort descending by due date (Oldest first).
+- ASSIGNMENT: Use assign_new_task_tool. Pass mobile number to ASSIGNEE and LOGIN fields.
+- DOCUMENTS: If a file is received, acknowledge it and wait for assignment details.
+- EMOJIS: Do not use any emojis in any response.
 """
 
 task_agent = Agent(
@@ -146,11 +140,6 @@ class CreateTaskRequest(BaseModel):
     DOCUMENTS: Documents
     TYPE: str = "TYPE"
     PRIORTY_TASK: str = "N"
-    NATURE_OF_COMPLAINT: str = "1"
-    NOTICE_BEFORE: str = "4"
-    MANUAL_DIARY_NUMBER: str = "er3"
-    ORIGINAL_LETTER_NUMBER: str = "32"
-    REFERENCE_LETTER_NUMBER: str = "334"
 
 class GetAssigneeRequest(BaseModel):
     Event: str = "0"
@@ -164,7 +153,7 @@ class UpdateTaskRequest(BaseModel):
     SID: str = "607"
     TASK_ID: str
     STATUS: str
-    COMMENTS: str = "TASK ACKNOWLEDGE"
+    COMMENTS: str = "STATUS_UPDATE"
 
 # --- REST API HELPERS ---
 def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
@@ -181,7 +170,8 @@ def load_team():
     return [{"name": i.get("PARTICIPANTS", "").lower(), "phone": i.get("LOGIN", ""), "email": ""} for i in res]
 
 def load_tasks():
-    req = GetTasksRequest(Child=[{"Control_Id": "106831", "AC_ID": "110803", "Parent": [{"Control_Id": "106825", "Value": "Open,Closed,Work done Pending for approval", "Data_Form_Id": ""}]}])
+    # Fetching tasks with all potential status values
+    req = GetTasksRequest(Child=[{"Control_Id": "106831", "AC_ID": "110803", "Parent": [{"Control_Id": "106825", "Value": "Open,Closed,Partially Closed,Reported Closed,Reopened", "Data_Form_Id": ""}]}])
     res = call_appsavy_api("GET_TASKS", req)
     if not res or not isinstance(res, list): return []
     tasks = []
@@ -191,8 +181,7 @@ def load_tasks():
             "task": i.get("TASK_NAME", ""),
             "assignee_name": i.get("USER_NAME", ""), 
             "deadline": i.get("EXPECTED_END_DATE", ""),
-            "status": i.get("STATUS", "Pending"), 
-            "remarks": i.get("COMMENTS", ""),
+            "status": i.get("STATUS", "Open"), 
             "assignee_phone": i.get("LOGIN", ""), 
             "manager_phone": i.get("MANAGER_PHONE", "")
         })
@@ -213,6 +202,7 @@ def download_and_encode_document(document_data: Dict):
 # --- AGENT TOOLS ---
 @task_agent.tool
 def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Optional[str] = None) -> str:
+    """Requirement 1 & 2: Performance report using Closed status as completion."""
     tasks, team, now = load_tasks(), load_team(), datetime.datetime.now()
     display_team = [e for e in team if name and name.lower() in e['name'].lower()] if name else team
     if not display_team: return f"Employee {name} not found."
@@ -220,6 +210,7 @@ def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Optional[
     for member in display_team:
         phone = member['phone']
         m_tasks = [t for t in tasks if t['assignee_phone'] == phone]
+        # Completed counts only those marked 'Closed'
         comp = len([t for t in m_tasks if t['status'] == 'Closed'])
         pend_list = [t for t in m_tasks if t['status'] != 'Closed']
         within, beyond = 0, 0
@@ -239,6 +230,7 @@ def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Optional[
 
 @task_agent.tool
 def get_task_list_tool(ctx: RunContext[ManagerContext], filter_self: bool = True) -> str:
+    """Requirement 3 & 7: Task list sorted descending."""
     tasks = load_tasks()
     if filter_self:
         tasks = [t for t in tasks if t['assignee_phone'] == ctx.deps.sender_phone]
@@ -253,6 +245,7 @@ def get_task_list_tool(ctx: RunContext[ManagerContext], filter_self: bool = True
 
 @task_agent.tool
 def assign_new_task_tool(ctx: RunContext[ManagerContext], mobile: str, task_name: str, deadline: str) -> str:
+    """Requirement 4: Assign task via Mobile/Login ID."""
     team = load_team()
     emp = next((e for e in team if mobile in e['phone']), None)
     participant_name = emp['name'].upper() if emp else "EXTERNAL USER"
@@ -280,19 +273,30 @@ def assign_new_task_tool(ctx: RunContext[ManagerContext], mobile: str, task_name
             state[ctx.deps.sender_phone].pop("pending_document", None)
             state_col.update_one({"id": "global_state"}, {"$set": {"data": state}})
         return f"Task successfully assigned to mobile {mobile}."
-    return "Failed to assign task through API."
+    return "Failed to assign task."
 
 @task_agent.tool
 def update_task_status_tool(ctx: RunContext[ManagerContext], task_id: str, action: str) -> str:
-    status_map = {"finish": "Work done Pending for approval", "approve": "Closed"}
+    """Requirement 5 & 6: Handles new status flow.
+    Actions: 'partial', 'reported', 'close', 'reopen'.
+    """
+    status_map = {
+        "partial": "Partially Closed",
+        "reported": "Reported Closed",
+        "close": "Closed",
+        "reopen": "Reopened"
+    }
     new_status = status_map.get(action.lower())
-    if not new_status: return "Invalid action. Use 'finish' or 'approve'."
-    if action.lower() == "approve" and ctx.deps.role != "manager":
-        return "Permission Denied: Only managers can approve tasks."
+    if not new_status: return "Invalid action."
+    
+    # Manager-only statuses
+    if action.lower() in ["close", "reopen"] and ctx.deps.role != "manager":
+        return "Permission Denied: Only managers can Close or Reopen tasks."
+
     req = UpdateTaskRequest(TASK_ID=task_id, STATUS=new_status)
     if call_appsavy_api("UPDATE_STATUS", req):
         return f"Task {task_id} status updated to {new_status}."
-    return "API error updating task status."
+    return "API error updating status."
 
 # --- MESSAGE HANDLER ---
 def handle_message(command, sender, pid, message=None, full_message=None):
@@ -305,9 +309,10 @@ def handle_message(command, sender, pid, message=None, full_message=None):
     if not command and message and "document" in message:
         state[sender] = {"pending_document": message["document"]}
         state_col.update_one({"id": "global_state"}, {"$set": {"data": state}}, upsert=True)
-        send_whatsapp_message(sender, "Document received. Provide the mobile number and details to assign it.", pid)
+        send_whatsapp_message(sender, "Document received. Provide mobile number and details to assign.", pid)
         return
     team = load_team()
+    # If number not in team, treat as manager (Assignor)
     role = "manager" if not any(e.get("phone") == sender for e in team) else "employee"
     if command:
         try:
