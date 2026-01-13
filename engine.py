@@ -218,16 +218,28 @@ class DocumentItem(BaseModel):
 class Documents(BaseModel):
     CHILD: List[DocumentItem]
 
+from pydantic import BaseModel
+
+# Assuming Details and Documents are defined elsewhere
+# class Details(BaseModel): ...
+# class Documents(BaseModel): ...
+
 class CreateTaskRequest(BaseModel):
     SID: str = "604"
-    ASSIGNEE: str
     DESCRIPTION: str
     EXPECTED_END_DATE: str
     TASK_NAME: str
     DETAILS: Details
     DOCUMENTS: Documents
-    TYPE: str = "TYPE"
-    PRIORTY_TASK: str = "N"
+    
+    MANUAL_DIARY_NUMBER: str = "er3"
+    NATURE_OF_COMPLAINT: str = "1"  
+    NOTICE_BEFORE: str = "4"        
+    NOTIFICATION: str = ""           
+    ORIGINAL_LETTER_NUMBER: str = "32" 
+    REFERENCE_LETTER_NUMBER: str = "334" 
+    TYPE: str = "TYPE"              
+    PRIORTY_TASK: str = "N"          
 
 class GetTasksRequest(BaseModel):
     Event: str = "106830"
@@ -564,16 +576,18 @@ async def assign_new_task_tool(
         doc_payload = Documents(CHILD=[])
         
         # Create task via API
+        # Create task via API
         req = CreateTaskRequest(
-            ASSIGNEE=login_code,
             DESCRIPTION=task_name,
             EXPECTED_END_DATE=deadline,
             TASK_NAME=task_name,
             DETAILS=Details(CHILD=[DetailChild(
-                LOGIN=login_code,
+                LOGIN=login_code, # This is where the assignee code goes [cite: 24]
                 PARTICIPANTS=user['name'].upper()
             )]),
-            DOCUMENTS=doc_payload
+            DOCUMENTS=doc_payload,
+            NATURE_OF_COMPLAINT="1", 
+            PRIORTY_TASK="N"
         )
         
         api_response = await call_appsavy_api("CREATE_TASK", req)
