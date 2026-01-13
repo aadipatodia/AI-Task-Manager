@@ -325,7 +325,7 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
             logger.info(f"API {key} success")
             return res.json()
         logger.error(f"API {key} failed with status {res.status_code}: {res.text}")
-        return None
+        return {"error": res.text}  # Return error details instead of None
     except Exception as e:
         logger.error(f"Exception calling API {key}: {str(e)}")
         return None
@@ -336,17 +336,21 @@ async def fetch_api_tasks():
         "AC_ID": "110803",
         "Parent": [{
             "Control_Id": "106825",
-            # Ensure "Pending" is included to catch newly created but unacknowledged tasks
-            "Value": "Pending,Open,Closed,Partially Closed,Reported Closed,Reopened",
+            # Shortened to fit <50 chars limit; adjust based on common statuses
+            "Value": "Open,Closed,Pending",
             "Data_Form_Id": ""
         }]
     }])
     
     res = await call_appsavy_api("GET_TASKS", req)
     
-    # Enhanced validation
+    # Enhanced validation with error handling
     if not res:
         logger.error("GET_TASKS returned None")
+        return []
+    
+    if isinstance(res, dict) and "error" in res:
+        logger.error(f"GET_TASKS API error: {res['error']}")
         return []
     
     if isinstance(res, list):
@@ -377,6 +381,10 @@ async def fetch_task_counts_api(login_code: str):
         # Handle different response formats
         if not res:
             logger.warning(f"GET_COUNT returned None for {login_code}")
+            return {"ASSIGNED_TASK": "0", "CLOSED_TASK": "0"}
+        
+        if isinstance(res, dict) and "error" in res:
+            logger.error(f"GET_COUNT API error for {login_code}: {res['error']}")
             return {"ASSIGNED_TASK": "0", "CLOSED_TASK": "0"}
         
         if isinstance(res, list) and len(res) > 0:
@@ -612,7 +620,7 @@ async def assign_new_task_tool(
         
         api_response = await call_appsavy_api("CREATE_TASK", req)
         
-        if not api_response:
+        if not api_response or isinstance(api_response, dict) and "error" in api_response:
             return "API failure: Task creation was not successful."
         
         # Send WhatsApp notification to employee
@@ -723,7 +731,7 @@ async def update_task_status_tool(
         req = UpdateTaskRequest(TASK_ID=task_id, STATUS=new_status)
         api_response = await call_appsavy_api("UPDATE_STATUS", req)
         
-        if not api_response:
+        if not api_response or isinstance(api_response, dict) and "error" in api_response:
             return "API failure: Status update could not be completed."
         
         return f"Success: Task {task_id} status updated to '{new_status}'."
