@@ -233,23 +233,21 @@ class GetCountRequest(BaseModel):
     Event: str = "107567"
     Child: List[Dict]
 
-# --- GMAIL HELPER FUNCTIONS ---
 def get_gmail_service():
     """Initialize Gmail API service with OAuth2 credentials from environment variables."""
     try:
-        # Load the JSON string from the environment variable
-        token_json_str = os.getenv("TOKEN_JSON")
+        # Load the JSON string from your env variable
+        token_json_str = os.getenv("TOKEN_JSON") 
         if not token_json_str:
             logger.error("TOKEN_JSON environment variable not found.")
             return None
             
         token_data = json.loads(token_json_str)
-        # Initialize credentials from info dictionary
         creds = Credentials.from_authorized_user_info(token_data, SCOPES)
         
-        # Check if token needs refreshing
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())            
+            creds.refresh(Request())
+            
         return build('gmail', 'v1', credentials=creds)
     except Exception as e:
         logger.error(f"Gmail service initialization failed: {str(e)}")
