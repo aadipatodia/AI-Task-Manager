@@ -226,6 +226,7 @@ class UpdateTaskRequest(BaseModel):
     SID: str = "607"
     TASK_ID: str
     STATUS: str
+    ASSIGNEE: str
     COMMENTS: str = "STATUS_UPDATE"
 
 class GetCountRequest(BaseModel):
@@ -234,11 +235,21 @@ class GetCountRequest(BaseModel):
 
 # --- GMAIL HELPER FUNCTIONS ---
 def get_gmail_service():
-    """Initialize Gmail API service with OAuth2 credentials."""
+    """Initialize Gmail API service with OAuth2 credentials from environment variables."""
     try:
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+        # Load the JSON string from the environment variable
+        token_json_str = os.getenv("TOKEN_JSON_ENV")
+        if not token_json_str:
+            logger.error("TOKEN_JSON_ENV environment variable not found.")
+            return None
+            
+        token_data = json.loads(token_json_str)
+        # Initialize credentials from info dictionary
+        creds = Credentials.from_authorized_user_info(token_data, SCOPES)
+        
+        # Check if token needs refreshing
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            creds.refresh(Request())            
         return build('gmail', 'v1', credentials=creds)
     except Exception as e:
         logger.error(f"Gmail service initialization failed: {str(e)}")
@@ -651,11 +662,17 @@ async def update_task_status_tool(
     """
     try:
         status_map = {
+            "open": "Open", # Added for employees
             "partial": "Partially Closed",
             "reported": "Reported Closed",
             "close": "Closed",
             "reopen": "Reopened"
         }
+
+        if action.lower() in ["close", "reopen"] and ctx.deps.role != "manager":
+            return "Permission Denied: Only managers can Closed or Reopened tasks."
+        if action.lower() in ["open", "partial", "reported"] and ctx.deps.role != "employee":
+            return "Note: These statuses are typically for assigned users."
         
         new_status = status_map.get(action.lower())
         if not new_status:
@@ -683,9 +700,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
     """Main logic entry point for processing WhatsApp messages."""
     
     try:
-        # No duplicate check without MongoDB
-        
-        # Normalize phone number
         if len(sender) == 10 and not sender.startswith('91'):
             sender = f"91{sender}"
         
