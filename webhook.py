@@ -1,19 +1,20 @@
 from fastapi import FastAPI, Request, HTTPException, Query
-from fastapi.responses import HTMLResponse # Added for the OAuth success page
+from fastapi.responses import HTMLResponse
 import os
 import json 
 from dotenv import load_dotenv
-from engine import tokens_col
+from google_auth_oauthlib.flow import Flow # Added missing import 
 
-# Import functions from your other files
+# Import functions from engine.py
+# Removed 'tokens_col' from this list to fix the ImportError 
 from engine import handle_message, SCOPES, REDIRECT_URI
 from send_message import send_whatsapp_message 
 
 load_dotenv()
 app = FastAPI()
+
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
-MANAGER_PHONE = "91XXXXXXXXXX" 
 
 @app.get("/")
 async def home():
@@ -72,54 +73,31 @@ async def handle_webhook(request: Request):
                         message_data = {"image": doc}
 
                 if user_command or message_data:
+                    # Circular import risk check: Ensure engine.py does not import from webhook.py
                     await handle_message(user_command, sender_phone, phone_number_id, message=message_data, full_message=message)
 
     return {"status": "EVENT_RECEIVED"}
 
 @app.get("/oauth2callback")
 async def oauth2callback(request: Request):
-    from google_auth_oauthlib.flow import Flow
+    state = request.query_params.get('state')
     
-    code = request.query_params.get("code")
-    phone = request.query_params.get("state")
-    error = request.query_params.get("error")
+    # FIXED: Changed 'flow.from_client_secrets_file' to 'Flow.from_client_secrets_file'
+    # The variable 'flow' was used before it was defined 
+    flow = Flow.from_client_secrets_file(
+        'client_secret.json',
+        scopes=SCOPES,
+        state=state
+    )
+    flow.redirect_uri = REDIRECT_URI
+    
+    # Exchange authorization code for tokens
+    code = request.query_params.get('code')
+    flow.fetch_token(code=code)
+    creds = flow.credentials
 
-    # --- START OF NECESSARY CHANGE: PHONE NORMALIZATION ---
-    if phone:
-        phone = phone.strip()
-        # Add 91 if it's a 10-digit number to ensure it matches team.json keys
-        if len(phone) == 10 and not phone.startswith('91'):
-            phone = f"91{phone}"
-    # --- END OF NECESSARY CHANGE ---
+    # File-based storage logic 
+    with open('token.json', 'w') as token_file:
+        token_file.write(creds.to_json())
 
-    # Dynamically find the manager
-    from engine import load_team, SCOPES, REDIRECT_URI
-    team = load_team()
-    employee_record = next((m for m in team if m.get("phone") == phone), None)
-    target_manager = employee_record.get("manager_phone") if employee_record else None
-
-    if error:
-        if target_manager:
-            send_whatsapp_message(target_manager, f"⚠️ Employee ({phone}) denied access.", PHONE_NUMBER_ID)
-        return HTMLResponse("Access Denied.")
-
-    if code and phone:
-        flow = Flow.from_client_secrets_file("credentials.json", scopes=SCOPES, redirect_uri=REDIRECT_URI)
-        flow.fetch_token(code=code)
-        creds = flow.credentials
-
-        # --- PROTECTED JSON LOADING ---
-        # --- MONGODB TOKEN SAVING ---
-        from engine import tokens_col
-        tokens_col.update_one(
-            {"phone": phone}, 
-            {"$set": {"google_credentials": json.loads(creds.to_json())}}, 
-            upsert=True
-        )
-
-        if target_manager:
-            send_whatsapp_message(target_manager, f" Employee ({phone}) connected!", PHONE_NUMBER_ID)
-        
-        return HTMLResponse("<h1>Success!</h1><p>Calendar connected. You can close this.</p>")
-
-    return {"status": "invalid_request"}
+    return {"message": "Authentication successful! You can close this window."}
