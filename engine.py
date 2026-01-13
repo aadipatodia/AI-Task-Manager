@@ -122,10 +122,9 @@ Current Time: {current_time_str}
 3. **Completed** - Manager uses 'close' action to approve
 
 **Status Actions:**
+- 'open' → "Open" (employee marks task as acknowledged/started)
 - 'partial' → "Partially Closed" (work in progress)
 - 'reported' → "Reported Closed" (employee marks as done, awaits approval)
-- 'close' → "Closed" (MANAGER ONLY - final approval)
-- 'reopen' → "Reopened" (MANAGER ONLY - rejection)
 
 **Role Permissions:**
 - Employees: Can mark tasks as 'partial' or 'reported' only
