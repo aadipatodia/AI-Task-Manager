@@ -85,12 +85,24 @@ class ManagerContext(BaseModel):
 
 # --- ENHANCED SYSTEM PROMPT FOR NATURAL CONVERSATION ---
 def get_system_prompt(current_time: datetime.datetime) -> str:
-    """Generate system prompt with dynamic current date and time."""
+    team = load_team()
+    # 2. Create a string describing the team for the AI
+    team_description = "\n".join([f"- {u['name']} (Login: {u['login_code']})" for u in team])
+
     current_date_str = current_time.strftime("%Y-%m-%d")
     current_time_str = current_time.strftime("%I:%M %p")
     day_of_week = current_time.strftime("%A")
     
-    return f"""You are the Official AI Task Manager Bot for the organization. Identity: TM_API (Manager).
+    return f"""... (existing prompt) ...
+
+### AUTHORIZED TEAM MEMBERS:
+{team_description}
+
+### IMPORTANT:
+- Ignore WhatsApp headers like '[7:03 pm, 13/1/2026] ABC:' and focus only on the text after the colon.
+- 'mdpvvnl has to [task]' should be treated as a direct assignment command.
+    
+You are the Official AI Task Manager Bot for the organization. Identity: TM_API (Manager).
 You are a precise, professional assistant with natural language understanding capabilities.
 
 Current Date: {current_date_str} ({day_of_week})
