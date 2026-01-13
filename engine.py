@@ -322,21 +322,16 @@ async def fetch_api_tasks():
     
     res = await call_appsavy_api("GET_TASKS", req)
     
-    # Enhanced validation
     if not res:
-        logger.error("GET_TASKS returned None")
         return []
     
-    if isinstance(res, dict) and "error" in res:
-        logger.error(f"GET_TASKS API error: {res['error']}")
-        return []
-    
-    if isinstance(res, list):
-        logger.info(f"GET_TASKS returned {len(res)} tasks")
-        return res
-    
-    logger.warning(f"GET_TASKS returned unexpected format: {type(res)}")
-    return []
+    # Handle dictionary response from API
+    if isinstance(res, dict):
+        if "error" in res: return []
+        # Extract list from dictionary (adjust "data" key to match your API)
+        return res.get("data", []) 
+        
+    return res if isinstance(res, list) else []
 
 async def fetch_task_counts_api(login_code: str):
     """Retrieves aggregate counts via SID 616 - API dependent with robust error handling."""
@@ -655,13 +650,8 @@ async def assign_task_by_phone_tool(
         logger.error(f"assign_task_by_phone_tool error: {str(e)}", exc_info=True)
         return f"Error assigning task by phone: {str(e)}"
 
-async def update_task_status_tool(
-    ctx: RunContext[ManagerContext],
-    task_id: str,
-    action: str
-) -> str:
+async def update_task_status_tool(ctx: RunContext[ManagerContext], task_id: str, action: str) -> str:
     try:
-        # 1. Updated Map to include 'Open'
         status_map = {
             "open": "Open",
             "partial": "Partially Closed",
@@ -674,35 +664,31 @@ async def update_task_status_tool(
         if not new_status:
             return f"Error: Invalid action. Use: open, partial, reported, close, reopen"
         
-        # 2. Strict Role Validation
-        if action.lower() in ["close", "reopen"]:
-            if ctx.deps.role != "manager":
-                return "Permission Denied: Only managers can Closed or Reopened tasks."
-        elif action.lower() in ["open", "partial", "reported"]:
-            if ctx.deps.role != "employee":
-                return "Note: These statuses are restricted to assigned employees."
+        # Role Validation
+        if action.lower() in ["close", "reopen"] and ctx.deps.role != "manager":
+            return "Permission Denied: Only managers can Close or Reopen tasks."
+        elif action.lower() in ["open", "partial", "reported"] and ctx.deps.role != "employee":
+            return "Note: These statuses are restricted to assigned employees."
 
-        # 3. Fetch current user's login_code to pass as ASSIGNEE
         team = load_team()
         user = next((u for u in team if u['phone'] == ctx.deps.sender_phone), None)
         if not user:
-            return "Error: Could not identify your user profile for this update."
+            return "Error: Could not identify your user profile."
         
-        # 4. API Request with ASSIGNEE column
+        # API Request including ASSIGNEE
         req = UpdateTaskRequest(
             TASK_ID=task_id, 
             STATUS=new_status, 
-            ASSIGNEE=user['login_code'] # Passing the login code here
+            ASSIGNEE=user['login_code']
         )
         api_response = await call_appsavy_api("UPDATE_STATUS", req)
         
         if not api_response or (isinstance(api_response, dict) and "error" in api_response):
             return "API failure: Status update could not be completed."
         
-        return f"Success: Task {task_id} status updated to '{new_status}'."
-        
+        return f"Success: Task {task_id} updated to '{new_status}'."
     except Exception as e:
-        logger.error(f"update_task_status_tool error: {str(e)}", exc_info=True)
+        logger.error(f"update_task_status_tool error: {str(e)}")
         return f"Error updating task status: {str(e)}"
 
 # --- ASYNC MESSAGE HANDLER ---
