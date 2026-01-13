@@ -649,42 +649,43 @@ async def update_task_status_tool(
     task_id: str,
     action: str
 ) -> str:
-    """
-    Updates task status via API (SID 607) with role-based validation.
-    
-    Actions:
-    - 'partial': Partially Closed (anyone)
-    - 'reported': Reported Closed (employee marks as done)
-    - 'close': Closed (MANAGER ONLY - approval)
-    - 'reopen': Reopened (MANAGER ONLY - rejection)
-    """
     try:
+        # 1. Updated Map to include 'Open'
         status_map = {
-            "open": "Open", # Added for employees
+            "open": "Open",
             "partial": "Partially Closed",
             "reported": "Reported Closed",
             "close": "Closed",
             "reopen": "Reopened"
         }
-
-        if action.lower() in ["close", "reopen"] and ctx.deps.role != "manager":
-            return "Permission Denied: Only managers can Closed or Reopened tasks."
-        if action.lower() in ["open", "partial", "reported"] and ctx.deps.role != "employee":
-            return "Note: These statuses are typically for assigned users."
         
         new_status = status_map.get(action.lower())
         if not new_status:
-            return f"Error: Invalid action '{action}'. Valid actions: partial, reported, close, reopen"
+            return f"Error: Invalid action. Use: open, partial, reported, close, reopen"
         
-        # Role-based validation
-        if action.lower() in ["close", "reopen"] and ctx.deps.role != "manager":
-            return "Permission Denied: Only managers can approve (close) or reject (reopen) tasks."
+        # 2. Strict Role Validation
+        if action.lower() in ["close", "reopen"]:
+            if ctx.deps.role != "manager":
+                return "Permission Denied: Only managers can Closed or Reopened tasks."
+        elif action.lower() in ["open", "partial", "reported"]:
+            if ctx.deps.role != "employee":
+                return "Note: These statuses are restricted to assigned employees."
+
+        # 3. Fetch current user's login_code to pass as ASSIGNEE
+        team = load_team()
+        user = next((u for u in team if u['phone'] == ctx.deps.sender_phone), None)
+        if not user:
+            return "Error: Could not identify your user profile for this update."
         
-        # Update via API
-        req = UpdateTaskRequest(TASK_ID=task_id, STATUS=new_status)
+        # 4. API Request with ASSIGNEE column
+        req = UpdateTaskRequest(
+            TASK_ID=task_id, 
+            STATUS=new_status, 
+            ASSIGNEE=user['login_code'] # Passing the login code here
+        )
         api_response = await call_appsavy_api("UPDATE_STATUS", req)
         
-        if not api_response or isinstance(api_response, dict) and "error" in api_response:
+        if not api_response or (isinstance(api_response, dict) and "error" in api_response):
             return "API failure: Status update could not be completed."
         
         return f"Success: Task {task_id} status updated to '{new_status}'."
