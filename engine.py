@@ -20,19 +20,19 @@ from google_auth_oauthlib.flow import Flow
 from pymongo import MongoClient
 import certifi
 
-# Load environment variables from .env file
+# Load environment variables
 load_dotenv()
 
-# --- LOGGING CONFIGURATION ---
+# Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- GMAIL & OAUTH CONSTANTS ---
+# Gmail & OAuth constants
 SCOPES = ['https://www.googleapis.com/auth/gmail.send']
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-38w7.onrender.com/oauth2callback")
 MANAGER_EMAIL = "patodiaaadi@gmail.com"
 
-# --- API CONFIGURATION (100% Dependency) ---
+# Appsavy API Configuration
 APPSAVY_BASE_URL = "https://configapps.appsavy.com/api/AppsavyRestService"
 API_CONFIGS = {
     "CREATE_TASK": {
@@ -77,7 +77,7 @@ API_CONFIGS = {
     }
 }
 
-# --- DATABASE INITIALIZATION ---
+# MongoDB setup
 MONGO_URI = os.getenv("MONGO_URI")
 db_client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
 db = db_client['ai_task_manager']
@@ -86,7 +86,7 @@ tokens_col = db['user_tokens']
 processed_col = db['processed_messages']
 history_col = db['chat_history']
 
-# --- PYDANTIC AI AGENT INITIALIZATION ---
+# AI Model
 ai_model = GeminiModel('gemini-2.0-flash-exp')
 
 class ManagerContext(BaseModel):
@@ -94,9 +94,8 @@ class ManagerContext(BaseModel):
     role: str
     current_time: datetime.datetime = Field(default_factory=datetime.datetime.now)
 
-# --- ENHANCED SYSTEM PROMPT FOR NATURAL CONVERSATION ---
+# Dynamic system prompt
 def get_system_prompt(current_time: datetime.datetime) -> str:
-    """Generate system prompt with dynamic current date and time."""
     current_date_str = current_time.strftime("%Y-%m-%d")
     current_time_str = current_time.strftime("%I:%M %p")
     day_of_week = current_time.strftime("%A")
@@ -108,94 +107,31 @@ Current Date: {current_date_str} ({day_of_week})
 Current Time: {current_time_str}
 
 ### CORE PRINCIPLES:
-1. **Natural Language Understanding**: Understand user intent from conversational language
-2. **Context Awareness**: Use conversation history to understand references
-3. **Proactive Clarification**: Ask for missing information naturally
-4. **Professional Communication**: Clear, concise, no emojis
+1. Natural Language Understanding
+2. Context Awareness
+3. Proactive Clarification
+4. Professional Communication: Clear, concise, no emojis
+
+### TASK STATUSES (IMPORTANT):
+Newly created tasks usually start as "Open"
+Assignee visible statuses: Open, Partially Closed, Reported Closed
+Manager visible/usable statuses: Closed, Reopened
 
 ### TASK ASSIGNMENT:
-* When user wants to assign a task, extract: assignee name, task description, deadline
-* Use 'assign_new_task_tool'
-  
-* **Deadline Logic:**
-  - If time mentioned is later than current time → Use today's date
-  - If time has already passed today → Use tomorrow's date
-  - "tomorrow" → Next day
-  - "next week" → 7 days from now
-  - No time specified → default to end of current day (23:59)
-  - Always format as ISO: YYYY-MM-DDTHH:MM:SS
+Extract assignee, description, deadline → use assign_new_task_tool
 
-* **Name Resolution**: Map names to login IDs from team directory
+### PERFORMANCE & LISTING:
+Use get_performance_report_tool and get_task_list_tool
 
-### CONVERSATIONAL MEMORY:
-* Access last 5 conversation turns for context
-* Understand pronouns and references
-* Remember pending document uploads across messages
-
-### TASK STATUS WORKFLOW:
-1. **Pending** - Initial state when task is created
-2. **Work Done** - Employee uses 'reported' action
-3. **Completed** - Manager uses 'close' action to approve
-
-**Status Actions:**
-- 'partial' → "Partially Closed" (work in progress)
-- 'reported' → "Reported Closed" (employee marks as done, awaits approval)
-- 'close' → "Closed" (MANAGER ONLY - final approval)
-- 'reopen' → "Reopened" (MANAGER ONLY - rejection)
-
-**Role Permissions:**
-- Employees: Can mark tasks as 'partial' or 'reported' only
-- Managers: Can 'close' (approve) or 'reopen' (reject) tasks
-
-### PERFORMANCE REPORTING:
-When user asks about performance, pending tasks, statistics, reports, or task counts:
-- Use 'get_performance_report_tool'
-- Without name → Report for ALL employees
-- With name → Report for specific employee
-- Format strictly as:
-  Name- [Name]
-  Task Assigned- Count of Task [Total] Nos
-  Task Completed- Count of task [Closed Status Only] Nos
-  Task Pending -
-  Within time: [Count]
-  Beyond time: [Count]
-
-### TASK LISTING:
-When user asks to see tasks, list tasks, pending work:
-- Use 'get_task_list_tool'
-- Without name → Show tasks for the requesting user
-- With name (managers only) → Show tasks for specified employee
-- Sort by due date (oldest first)
-
-### TASK ASSIGNMENT BY PHONE:
-Support assignment using phone numbers:
-- Extract 10-digit number or full format
-- Use 'assign_task_by_phone_tool'
-
-### DOCUMENT HANDLING:
-- When file received without task details: Ask for assignee name, task description, and deadline
-- When file received with partial info: Ask for missing details
-- Attach stored file to next task assignment automatically
-
-### MANAGER TASK APPROVAL:
-When manager wants to approve/reject completed work:
-- Understand approval/rejection phrases
-- Use 'update_task_status_tool' with appropriate action
-
-### EMPLOYEES VIEWING TASKS:
-Employees can always view their own tasks
-
-### COMMUNICATION STYLE:
-- Professional and concise
-- No emojis or casual language
-- Don't mention internal tool names
-- Ask clarifying questions when needed
-- Confirm critical actions before executing
+### STATUS UPDATES:
+partial → Partially Closed
+reported → Reported Closed
+close → Closed (manager only)
+reopen → Reopened (manager only)
 """
 
-# --- AUTHORIZED TEAM CONFIGURATION ---
+# Team directory
 def load_team():
-    """Static team directory - source of truth for authentication and name resolution."""
     return [
         {"name": "mdpvvnl", "phone": "919650523477", "email": "varun.verma@mobineers.com", "login_code": "mdpvvnl"},
         {"name": "chairman", "phone": "91XXXXXXXXXX", "email": "chairman@example.com", "login_code": "chairman"},
@@ -203,7 +139,7 @@ def load_team():
         {"name": "ce_ghaziabad", "phone": "91XXXXXXXXXX", "email": "ce@example.com", "login_code": "ce_ghaziabad"}
     ]
 
-# --- API SCHEMAS ---
+# Pydantic Models for API payloads
 class DetailChild(BaseModel):
     SEL: str = "Y"
     LOGIN: str
@@ -248,9 +184,8 @@ class GetCountRequest(BaseModel):
     Event: str = "107567"
     Child: List[Dict]
 
-# --- GMAIL HELPER FUNCTIONS ---
+# Gmail service
 def get_gmail_service():
-    """Initialize Gmail API service with OAuth2 credentials."""
     try:
         creds = None
         token_doc = tokens_col.find_one({"user": "manager"})
@@ -277,42 +212,35 @@ def get_gmail_service():
                     upsert=True
                 )
             else:
-                logger.warning("Gmail credentials not available or invalid")
+                logger.warning("Gmail credentials not available")
                 return None
         
         return build('gmail', 'v1', credentials=creds)
     except Exception as e:
-        logger.error(f"Gmail service initialization failed: {str(e)}")
+        logger.error(f"Gmail init failed: {str(e)}")
         return None
 
 def send_email(to_email: str, subject: str, body: str) -> bool:
-    """Send email via Gmail API."""
+    service = get_gmail_service()
+    if not service:
+        return False
+    
     try:
-        service = get_gmail_service()
-        if not service:
-            logger.warning("Gmail service unavailable, skipping email")
-            return False
-        
         message = MIMEMultipart()
         message['to'] = to_email
         message['subject'] = subject
         message.attach(MIMEText(body, 'plain'))
         
-        raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
-        send_message = service.users().messages().send(
-            userId='me',
-            body={'raw': raw_message}
-        ).execute()
-        
-        logger.info(f"Email sent successfully to {to_email}")
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
+        service.users().messages().send(userId='me', body={'raw': raw}).execute()
+        logger.info(f"Email sent to {to_email}")
         return True
     except Exception as e:
-        logger.error(f"Email sending failed: {str(e)}")
+        logger.error(f"Email send failed: {str(e)}")
         return False
 
-# --- REST API HELPERS ---
+# Core API caller with improved error handling
 async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
-    """Universal wrapper for Appsavy POST requests - 100% API dependency."""
     config = API_CONFIGS[key]
     try:
         res = requests.post(
@@ -322,42 +250,57 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
             timeout=15
         )
         if res.status_code == 200:
-            logger.info(f"API {key} success")
-            return res.json()
-        logger.error(f"API {key} failed with status {res.status_code}: {res.text}")
-        return {"error": res.text}  # Return error details instead of None
+            data = res.json()
+            logger.info(f"API {key} success - response keys: {list(data.keys())[:5]}")
+            return data
+        else:
+            logger.error(f"API {key} failed {res.status_code}: {res.text[:300]}")
+            return {"error": True, "message": res.text, "status": res.status_code}
     except Exception as e:
-        logger.error(f"Exception calling API {key}: {str(e)}")
-        return None
+        logger.error(f"API {key} exception: {str(e)}")
+        return {"error": True, "message": str(e)}
 
+# Most important function - fetching tasks
 async def fetch_api_tasks():
+    # Primary attempt - most likely to show new tasks
+    primary_value = "Open"
+    
     req = GetTasksRequest(Child=[{
         "Control_Id": "106831",
         "AC_ID": "110803",
         "Parent": [{
             "Control_Id": "106825",
-            # Shortened to fit <50 chars limit; adjust based on common statuses
-            "Value": "Open,Closed,Pending",
+            "Value": primary_value,          # ← Most reliable for new tasks
             "Data_Form_Id": ""
         }]
     }])
     
     res = await call_appsavy_api("GET_TASKS", req)
     
-    # Enhanced validation with error handling
-    if not res:
-        logger.error("GET_TASKS returned None")
-        return []
+    if res and not isinstance(res, dict) or "error" not in res:
+        if isinstance(res, list):
+            logger.info(f"Primary fetch success: {len(res)} tasks")
+            return res
     
-    if isinstance(res, dict) and "error" in res:
-        logger.error(f"GET_TASKS API error: {res['error']}")
-        return []
+    # Fallback - try empty filter (sometimes shows everything)
+    logger.warning("Primary status filter failed → trying empty filter")
+    fallback_req = GetTasksRequest(Child=[{
+        "Control_Id": "106831",
+        "AC_ID": "110803",
+        "Parent": [{
+            "Control_Id": "106825",
+            "Value": "",                    # ← May show ALL statuses
+            "Data_Form_Id": ""
+        }]
+    }])
     
-    if isinstance(res, list):
-        logger.info(f"GET_TASKS returned {len(res)} tasks")
-        return res
+    fallback_res = await call_appsavy_api("GET_TASKS", fallback_req)
     
-    logger.warning(f"GET_TASKS returned unexpected format: {type(res)}")
+    if fallback_res and isinstance(fallback_res, list):
+        logger.info(f"Fallback success: {len(fallback_res)} tasks")
+        return fallback_res
+    
+    logger.error("Both primary and fallback task fetches failed")
     return []
 
 async def fetch_task_counts_api(login_code: str):
