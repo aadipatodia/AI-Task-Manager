@@ -17,8 +17,6 @@ from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
 from send_message import send_whatsapp_message, send_whatsapp_document
 from google_auth_oauthlib.flow import Flow
-from pymongo import MongoClient
-import certifi
 
 # Load environment variables from .env file
 load_dotenv()
@@ -77,15 +75,6 @@ API_CONFIGS = {
     }
 }
 
-# --- DATABASE INITIALIZATION ---
-MONGO_URI = os.getenv("MONGO_URI")
-db_client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
-db = db_client['ai_task_manager']
-state_col = db['state']
-tokens_col = db['user_tokens']
-processed_col = db['processed_messages']
-history_col = db['chat_history']
-
 # --- PYDANTIC AI AGENT INITIALIZATION ---
 ai_model = GeminiModel('gemini-2.0-flash-exp')
 
@@ -126,11 +115,6 @@ Current Time: {current_time_str}
   - Always format as ISO: YYYY-MM-DDTHH:MM:SS
 
 * **Name Resolution**: Map names to login IDs from team directory
-
-### CONVERSATIONAL MEMORY:
-* Access last 5 conversation turns for context
-* Understand pronouns and references
-* Remember pending document uploads across messages
 
 ### TASK STATUS WORKFLOW:
 1. **Pending** - Initial state when task is created
@@ -252,34 +236,9 @@ class GetCountRequest(BaseModel):
 def get_gmail_service():
     """Initialize Gmail API service with OAuth2 credentials."""
     try:
-        creds = None
-        token_doc = tokens_col.find_one({"user": "manager"})
-        
-        if token_doc:
-            creds = Credentials(
-                token=token_doc.get('access_token'),
-                refresh_token=token_doc.get('refresh_token'),
-                token_uri='https://oauth2.googleapis.com/token',
-                client_id=os.getenv('GOOGLE_CLIENT_ID'),
-                client_secret=os.getenv('GOOGLE_CLIENT_SECRET'),
-                scopes=SCOPES
-            )
-        
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-                tokens_col.update_one(
-                    {"user": "manager"},
-                    {"$set": {
-                        "access_token": creds.token,
-                        "refresh_token": creds.refresh_token
-                    }},
-                    upsert=True
-                )
-            else:
-                logger.warning("Gmail credentials not available or invalid")
-                return None
-        
+        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
         return build('gmail', 'v1', credentials=creds)
     except Exception as e:
         logger.error(f"Gmail service initialization failed: {str(e)}")
@@ -331,69 +290,32 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
         return None
 
 async def fetch_api_tasks():
-    # Primary request with "Open" status (most common for new tasks)
     req = GetTasksRequest(Child=[{
         "Control_Id": "106831",
         "AC_ID": "110803",
         "Parent": [{
             "Control_Id": "106825",
-            "Value": "Open",
+            "Value": "Pending,Open,Closed,Partially Closed,Reported Closed,Reopened",
             "Data_Form_Id": ""
         }]
     }])
     
     res = await call_appsavy_api("GET_TASKS", req)
     
-    # Enhanced extraction to handle nested responses
-    tasks = []
-    if res and isinstance(res, dict):
-        # Direct 'Result'
-        if 'Result' in res:
-            tasks = res['Result']
-        # Nested 'data.Result'
-        elif 'data' in res and isinstance(res['data'], dict) and 'Result' in res['data']:
-            tasks = res['data']['Result']
-        # 'data' is the list
-        elif 'data' in res:
-            tasks = res['data']
-        # 'status' present, check 'data'
-        elif 'status' in res and 'data' in res:
-            tasks = res['data'] if isinstance(res['data'], list) else []
+    # Enhanced validation
+    if not res:
+        logger.error("GET_TASKS returned None")
+        return []
     
-    if isinstance(tasks, list):
-        logger.info(f"Primary GET_TASKS returned {len(tasks)} tasks")
-        return tasks
+    if isinstance(res, dict) and "error" in res:
+        logger.error(f"GET_TASKS API error: {res['error']}")
+        return []
     
-    # Fallback with empty filter
-    logger.warning("Primary failed - trying empty filter")
-    fallback_req = GetTasksRequest(Child=[{
-        "Control_Id": "106831",
-        "AC_ID": "110803",
-        "Parent": [{
-            "Control_Id": "106825",
-            "Value": "",
-            "Data_Form_Id": ""
-        }]
-    }])
+    if isinstance(res, list):
+        logger.info(f"GET_TASKS returned {len(res)} tasks")
+        return res
     
-    fallback_res = await call_appsavy_api("GET_TASKS", fallback_req)
-    
-    tasks = []
-    if fallback_res and isinstance(fallback_res, dict):
-        if 'Result' in fallback_res:
-            tasks = fallback_res['Result']
-        elif 'data' in fallback_res and isinstance(fallback_res['data'], dict) and 'Result' in fallback_res['data']:
-            tasks = fallback_res['data']['Result']
-        elif 'data' in fallback_res:
-            tasks = fallback_res['data']
-        elif 'status' in fallback_res and 'data' in fallback_res:
-            tasks = fallback_res['data'] if isinstance(fallback_res['data'], list) else []
-    
-    if isinstance(tasks, list):
-        logger.info(f"Fallback GET_TASKS returned {len(tasks)} tasks")
-        return tasks
-    
-    logger.error("Both primary and fallback failed to extract task list")
+    logger.warning(f"GET_TASKS returned unexpected format: {type(res)}")
     return []
 
 async def fetch_task_counts_api(login_code: str):
@@ -423,21 +345,14 @@ async def fetch_task_counts_api(login_code: str):
             logger.error(f"GET_COUNT API error for {login_code}: {res['error']}")
             return {"ASSIGNED_TASK": "0", "CLOSED_TASK": "0"}
         
-        # Extract counts, assuming similar nesting
-        counts_data = res
-        if 'Result' in res:
-            counts_data = res['Result']
-        elif 'data' in res:
-            counts_data = res['data']
-        
-        if isinstance(counts_data, list) and len(counts_data) > 0:
-            logger.info(f"GET_COUNT returned list with {len(counts_data)} items for {login_code}")
-            return counts_data[0]
-        elif isinstance(counts_data, dict):
+        if isinstance(res, list) and len(res) > 0:
+            logger.info(f"GET_COUNT returned list with {len(res)} items for {login_code}")
+            return res[0]
+        elif isinstance(res, dict):
             logger.info(f"GET_COUNT returned dict for {login_code}")
-            return counts_data
+            return res
         else:
-            logger.warning(f"GET_COUNT returned unexpected format for {login_code}: {type(counts_data)}")
+            logger.warning(f"GET_COUNT returned unexpected format for {login_code}: {type(res)}")
             return {"ASSIGNED_TASK": "0", "CLOSED_TASK": "0"}
             
     except Exception as e:
@@ -596,10 +511,10 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext], target_name: Optio
         output = f"Task List for {user['name'].title()}:\n\n"
         for task in filtered:
             output += (
-                f"ID: {task.get('TASK_ID') or task.get('TID')}\n"
-                f"Task: {task.get('TASK_NAME') or task.get('COMMENTS')}\n"
-                f"Due: {task.get('EXPECTED_END_DATE') or task.get('ASSIGN_DATE')}\n"
-                f"Status: {task.get('STATUS') or task.get('STS')}\n\n"
+                f"ID: {task.get('TASK_ID')}\n"
+                f"Task: {task.get('TASK_NAME')}\n"
+                f"Due: {task.get('EXPECTED_END_DATE')}\n"
+                f"Status: {task.get('STATUS')}\n\n"
             )
         
         return output.strip()
@@ -630,23 +545,8 @@ async def assign_new_task_tool(
         
         login_code = user['login_code']
         
-        # Check for pending document
-        state_doc = state_col.find_one({"id": "global_state"}) or {"data": {}}
-        state = state_doc.get("data", {})
-        pending_doc = state.get(ctx.deps.sender_phone, {}).get("pending_document")
-        
-        # Prepare document payload
+        # No MongoDB, so no pending document handling - assume no document
         doc_payload = Documents(CHILD=[])
-        if pending_doc:
-            b64 = download_and_encode_document(pending_doc)
-            if b64:
-                doc_payload.CHILD.append(DocumentItem(
-                    DOCUMENT=DocumentInfo(
-                        VALUE=pending_doc.get("filename", "attachment.pdf"),
-                        BASE64=b64
-                    ),
-                    DOCUMENT_NAME="ATTACHMENT"
-                ))
         
         # Create task via API
         req = CreateTaskRequest(
@@ -699,11 +599,6 @@ The task has been successfully assigned and the employee has been notified.
 Task Management System"""
         
         send_email(MANAGER_EMAIL, manager_subject, manager_body)
-        
-        # Clear pending document
-        if pending_doc:
-            state[ctx.deps.sender_phone].pop("pending_document", None)
-            state_col.update_one({"id": "global_state"}, {"$set": {"data": state}})
         
         return f"Task successfully assigned to {user['name'].title()} (Login: {login_code}).\nNotifications sent via WhatsApp and email."
         
@@ -788,46 +683,25 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
     """Main logic entry point for processing WhatsApp messages."""
     
     try:
-        # Prevent duplicate processing
-        if full_message and processed_col.find_one({"msg_id": full_message.get("id")}):
-            logger.info(f"Message {full_message.get('id')} already processed")
-            return
+        # No duplicate check without MongoDB
         
         # Normalize phone number
         if len(sender) == 10 and not sender.startswith('91'):
             sender = f"91{sender}"
         
-        # Handle media files
+        # Handle media files - no storage, ask immediately
         msg_type = message.get("type", "text") if message else "text"
         is_media = msg_type in ["document", "image", "video", "audio"]
         
         if is_media and not command:
-            state_doc = state_col.find_one({"id": "global_state"}) or {"data": {}}
-            state = state_doc.get("data", {})
-            state[sender] = {
-                "pending_document": message.get("document") or message.get("image") or message.get("video") or message.get("audio")
-            }
-            state_col.update_one({"id": "global_state"}, {"$set": {"data": state}}, upsert=True)
             send_whatsapp_message(
                 sender,
-                "File received and saved. Please provide the assignee name, task description, and deadline to complete the assignment.",
+                "File received. Please provide the assignee name, task description, and deadline to complete the assignment.",
                 pid
             )
             return
         
-        # Retrieve conversation history (last 5 turns)
-        # --- REVISED HISTORY LOGIC ---
-        history_records = list(history_col.find({"sender": sender}).sort("timestamp", -1).limit(5))
-        history_records.reverse()
-
-        formatted_history = []
-        for h in history_records:
-            formatted_history.append(
-             ModelRequest(parts=[UserPromptPart(content=h['user_msg'])])
-            )
-            formatted_history.append(
-                ModelResponse(parts=[TextPart(content=h['bot_res'])])
-            )
+        # No history without MongoDB
         
         # Determine user role
         manager_phone = os.getenv("MANAGER_PHONE", "919650523477")
@@ -861,35 +735,19 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 current_agent.tool(assign_task_by_phone_tool)
                 current_agent.tool(update_task_status_tool)
                 
-                # Run agent
+                # Run agent (no history)
                 result = await current_agent.run(
                     command,
-                    deps=ManagerContext(sender_phone=sender, role=role, current_time=current_time),
-                    message_history=formatted_history
+                    deps=ManagerContext(sender_phone=sender, role=role, current_time=current_time)
                 )
                 
                 # Send response
                 send_whatsapp_message(sender, result.output, pid)
                 
-                # Store conversation turn
-                history_col.insert_one({
-                    "sender": sender,
-                    "user_msg": command,
-                    "bot_res": result.output,
-                    "timestamp": current_time
-                })
-                
             except Exception as e:
                 logger.error(f"Agent execution failed: {str(e)}", exc_info=True)
                 send_whatsapp_message(sender, f"System Error: Unable to process request. Please try again or contact support.", pid)
         
-        # Mark message as processed
-        if full_message:
-            processed_col.insert_one({
-                "msg_id": full_message.get("id"),
-                "processed_at": datetime.datetime.now()
-            })
-            
     except Exception as e:
         logger.error(f"handle_message error: {str(e)}", exc_info=True)
         send_whatsapp_message(sender, "An unexpected error occurred. Please try again.", pid)
