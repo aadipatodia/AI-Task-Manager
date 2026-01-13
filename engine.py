@@ -238,9 +238,9 @@ def get_gmail_service():
     """Initialize Gmail API service with OAuth2 credentials from environment variables."""
     try:
         # Load the JSON string from the environment variable
-        token_json_str = os.getenv("TOKEN_JSON_ENV")
+        token_json_str = os.getenv("TOKEN_JSON")
         if not token_json_str:
-            logger.error("TOKEN_JSON_ENV environment variable not found.")
+            logger.error("TOKEN_JSON environment variable not found.")
             return None
             
         token_data = json.loads(token_json_str)
