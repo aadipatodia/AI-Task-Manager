@@ -527,7 +527,10 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext], target_name: Optio
                 return "Unable to identify your profile."
         
         # Filter tasks
-        filtered = [t for t in tasks_data if t.get('LOGIN', '').lower() == user['login_code'].lower()]
+        filtered = [
+            t for t in tasks_data 
+            if isinstance(t, dict) and t.get('LOGIN', '').lower() == user['login_code'].lower()
+        ]
         
         # Sort by due date (oldest first - descending order by date value)
         filtered.sort(key=lambda x: x.get('EXPECTED_END_DATE', ''), reverse=True)
@@ -576,7 +579,6 @@ async def assign_new_task_tool(
         doc_payload = Documents(CHILD=[])
         
         # Create task via API
-        # Create task via API
         req = CreateTaskRequest(
             DESCRIPTION=task_name,
             EXPECTED_END_DATE=deadline,
@@ -590,8 +592,17 @@ async def assign_new_task_tool(
             PRIORTY_TASK="N"
         )
         
+        # --- INSIDE assign_new_task_tool ---
+
+        # 1. ADD THIS: Debug the payload being sent
+        print(f"DEBUG: Attempting to create task for {login_code}")
+        print(f"DEBUG: Full Payload: {req.model_dump_json(indent=2)}")
+
         api_response = await call_appsavy_api("CREATE_TASK", req)
         
+        # 2. ADD THIS: Debug the raw API response
+        print(f"DEBUG: Raw API Response: {api_response}")
+
         if not api_response or isinstance(api_response, dict) and "error" in api_response:
             return "API failure: Task creation was not successful."
         
