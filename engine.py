@@ -17,6 +17,7 @@ from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
 from send_message import send_whatsapp_message, send_whatsapp_document
 from google_auth_oauthlib.flow import Flow
+import asyncio
 
 # Load environment variables from .env file
 load_dotenv()
@@ -237,6 +238,7 @@ class Documents(BaseModel):
 
 class CreateTaskRequest(BaseModel):
     SID: str = "604"
+    ASSIGNEE: str
     DESCRIPTION: str
     EXPECTED_END_DATE: str
     MANUAL_DIARY_NUMBER: str = "er3"
@@ -286,6 +288,15 @@ def get_gmail_service():
         logger.error(f"Gmail service initialization failed: {str(e)}")
         return None
 
+def build_status_filter(role: str) -> str:
+    if role == "manager":
+        # Manager sees only managerial-relevant states
+        return "Open,Closed,Reopened"
+    else:
+        # Employee sees only employee-actionable states
+        return "Open,Partially Closed,Reported Closed"
+
+
 def send_email(to_email: str, subject: str, body: str) -> bool:
     """Send email via Gmail API."""
     try:
@@ -318,11 +329,12 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
     try:
         logger.info(f"Calling API {key} with payload: {payload.model_dump()}")
         
-        res = requests.post(
-            config["url"],
-            headers=config["headers"],
-            json=payload.model_dump(),
-            timeout=15
+        res = await asyncio.to_thread(
+            requests.post,
+        config["url"],
+        headers=config["headers"],
+        json=payload.model_dump(),
+        timeout=15
         )
         
         logger.info(f"API {key} response status: {res.status_code}")
@@ -345,7 +357,7 @@ async def fetch_task_counts_api(login_code: str):
     """Retrieves aggregate counts via SID 616 - API dependent with robust error handling."""
     req = GetCountRequest(Child=[{
         "Control_Id": "108118",
-        "AC_ID": "113229",
+        "AC_ID": "108118",
         "Parent": [
             {"Control_Id": "111548", "Value": "1", "Data_Form_Id": ""},
             {"Control_Id": "107566", "Value": login_code, "Data_Form_Id": ""},
@@ -356,6 +368,7 @@ async def fetch_task_counts_api(login_code: str):
             {"Control_Id": "108512", "Value": "", "Data_Form_Id": ""}
         ]
     }])
+
     
     try:
         res = await call_appsavy_api("GET_COUNT", req)
@@ -418,18 +431,50 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
         if not name and ctx.deps.role != "manager":
             return "Permission Denied: Only managers can view the full team report."
         
-        tasks_data = await call_appsavy_api("GET_TASKS", GetTasksRequest(Child=[{
-            "Control_Id": "106831",
-            "AC_ID": "110803",
-            "Parent": [
-                {"Control_Id": "106825", "Value": "Pending,Open,Closed,Partially Closed,Reported Closed,Reopened", "Data_Form_Id": ""},
-                {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
-                {"Control_Id": "106827", "Value": "", "Data_Form_Id": ""},
-                {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
-                {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
-                {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""}
-            ]
-        }]))
+        status_filter = build_status_filter(ctx.deps.role)
+
+        tasks_data = await call_appsavy_api(
+            "GET_TASKS",
+            GetTasksRequest(
+                Child=[{
+                    "Control_Id": "106831",
+                    "AC_ID": "110803",
+                    "Parent": [
+                        {
+                            "Control_Id": "106825",
+                            "Value": status_filter,
+                            "Data_Form_Id": ""
+                        },
+                        {
+                            "Control_Id": "106824",
+                            "Value": "",
+                            "Data_Form_Id": ""
+                        },
+                        {
+                            "Control_Id": "106827",
+                            "Value": "",
+                            "Data_Form_Id": ""
+                        },
+                        {
+                            "Control_Id": "106829",
+                            "Value": "",
+                            "Data_Form_Id": ""
+                        },
+                        {
+                            "Control_Id": "107046",
+                            "Value": "",
+                            "Data_Form_Id": ""
+                        },
+                        {
+                            "Control_Id": "107809",
+                            "Value": "0",
+                            "Data_Form_Id": ""
+                        }
+                    ]
+                }]
+            )
+        )
+
         
         if not isinstance(tasks_data, list):
             logger.error(f"Unexpected tasks_data format: {type(tasks_data)}")
@@ -517,18 +562,50 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext], target_name: Optio
     Sort by due date (oldest first).
     """
     try:
-        tasks_data = await call_appsavy_api("GET_TASKS", GetTasksRequest(Child=[{
-            "Control_Id": "106831",
-            "AC_ID": "110803",
-            "Parent": [
-                {"Control_Id": "106825", "Value": "Pending,Open,Closed,Partially Closed,Reported Closed,Reopened", "Data_Form_Id": ""},
-                {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
-                {"Control_Id": "106827", "Value": "", "Data_Form_Id": ""},
-                {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
-                {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
-                {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""}
-            ]
-        }]))
+        status_filter = build_status_filter(ctx.deps.role)
+
+        tasks_data = await call_appsavy_api(
+            "GET_TASKS",
+            GetTasksRequest(
+                Child=[{
+                    "Control_Id": "106831",
+                    "AC_ID": "110803",
+                    "Parent": [
+                        {
+                            "Control_Id": "106825",
+                            "Value": status_filter,
+                            "Data_Form_Id": ""
+                         },
+                        {
+                            "Control_Id": "106824",
+                            "Value": "",
+                            "Data_Form_Id": ""
+                        },
+                        {
+                            "Control_Id": "106827",
+                            "Value": "",
+                            "Data_Form_Id": ""
+                        },
+                        {
+                            "Control_Id": "106829",
+                            "Value": "",
+                            "Data_Form_Id": ""
+                        },
+                        {
+                            "Control_Id": "107046",
+                            "Value": "",
+                            "Data_Form_Id": ""
+                        },
+                        {
+                            "Control_Id": "107809",
+                            "Value": "0",
+                            "Data_Form_Id": ""
+                        }
+                    ]
+                }]
+            )
+        )
+
         
         if not isinstance(tasks_data, list):
             logger.error(f"Unexpected tasks_data format: {type(tasks_data)}")
@@ -553,7 +630,7 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext], target_name: Optio
             if isinstance(t, dict) and str(t.get('LOGIN', '')).lower() == user['login_code'].lower()
         ]
         
-        filtered.sort(key=lambda x: x.get('EXPECTED_END_DATE', ''), reverse=True)
+        filtered.sort(key=lambda x: x.get('EXPECTED_END_DATE', ''), reverse=False)
         
         if not filtered:
             return f"No tasks found for {user['name'].title()}."
@@ -598,6 +675,7 @@ async def assign_new_task_tool(
         doc_payload = Documents(CHILD=[])
         
         req = CreateTaskRequest(
+            ASSIGNEE=login_code,
             DESCRIPTION=task_name,
             EXPECTED_END_DATE=formatted_deadline,
             TASK_NAME=task_name,
