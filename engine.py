@@ -383,12 +383,25 @@ def download_and_encode_document(document_data: Dict):
 async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Optional[str] = None) -> str:
     """
     Generate performance report using API data (SID 616 for counts, SID 610 for task details).
-    Without name: Report for ALL employees
+    Without name: Report for ALL employees (Manager only)
     With name: Report for specific employee
     """
     try:
-        # Fetch tasks with error handling
-        tasks_data = await call_appsavy_api("GET_TASKS", GetTasksRequest(Child=[{"Control_Id": "106831", "AC_ID": "110803", "Parent": [{"Control_Id": "106825", "Value": "Pending,Open,Closed,Partially Closed,Reported Closed,Reopened", "Data_Form_Id": ""}]}]))
+        # PRIVACY CHECK: Only managers are authorized to view the full team report
+        if not name and ctx.deps.role != "manager":
+            return "Permission Denied: Only managers can view the full team report."
+
+        # Fetch tasks with error handling directly using the API helper
+        tasks_data = await call_appsavy_api("GET_TASKS", GetTasksRequest(Child=[{
+            "Control_Id": "106831", 
+            "AC_ID": "110803", 
+            "Parent": [{
+                "Control_Id": "106825", 
+                "Value": "Pending,Open,Closed,Partially Closed,Reported Closed,Reopened", 
+                "Data_Form_Id": ""
+            }]
+        }]))
+
         if not isinstance(tasks_data, list):
             logger.error(f"Unexpected tasks_data format: {type(tasks_data)}")
             tasks_data = []
@@ -396,7 +409,7 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
         team = load_team()
         now = ctx.deps.current_time
         
-        # Filter team members
+        # Filter team members based on input
         if name:
             display_team = [e for e in team if name.lower() in e['name'].lower() or name.lower() == e['login_code'].lower()]
             if not display_team:
@@ -409,11 +422,15 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
             login = member['login_code']
             
             try:
-                # Fetch counts from API (SID 616)
+                # Fetch aggregate counts from API (SID 616)
                 counts = await fetch_task_counts_api(login)
                 
                 # Calculate pending task breakdown from actual tasks
-                member_tasks = [t for t in tasks_data if t.get('LOGIN') == login]
+                # Case-insensitive filtering ensures 'mddvvnl' matches 'MDDVVNL'
+                member_tasks = [
+                    t for t in tasks_data 
+                    if isinstance(t, dict) and str(t.get('LOGIN', '')).lower() == login.lower()
+                ]
                 
                 within_time = 0
                 beyond_time = 0
@@ -426,12 +443,12 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
                     if status == 'closed':
                         closed_count += 1
                     
-                    # Count pending tasks (not closed)
+                    # Count pending tasks (all statuses that are not 'closed')
                     elif status in ['open', 'pending', 'partially closed', 'reported closed', 'reopened', '']:
                         try:
                             due_date_str = task.get('EXPECTED_END_DATE', '')
                             if due_date_str:
-                                # Handle both ISO format and other formats
+                                # Handle ISO format variations
                                 due_date_str = due_date_str.replace("Z", "").replace("+00:00", "")
                                 due_date = datetime.datetime.fromisoformat(due_date_str)
                                 
@@ -440,12 +457,12 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
                                 else:
                                     beyond_time += 1
                             else:
-                                within_time += 1  # No deadline = within time
+                                within_time += 1  # Tasks without a deadline are counted as 'within time'
                         except Exception as date_error:
                             logger.warning(f"Date parsing error for task {task.get('TASK_ID')}: {date_error}")
-                            within_time += 1  # Default to within time on error
+                            within_time += 1  # Default to within time on parsing error
                 
-                # Use API counts if available, otherwise use calculated counts
+                # Use API counts if available, otherwise fallback to local calculation
                 assigned_count = counts.get('ASSIGNED_TASK', str(len(member_tasks)))
                 closed_from_api = counts.get('CLOSED_TASK', str(closed_count))
                 
@@ -475,29 +492,24 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
         return f"Error generating performance report: {str(e)}"
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext], target_name: Optional[str] = None) -> str:
-    """
-    Retrieves task list from API (SID 610).
-    Without name: Show tasks for requesting user
-    With name: Show tasks for specified employee (managers can view others)
-    Sort by due date (oldest first - descending order)
-    """
     try:
-        tasks_data = await call_appsavy_api("GET_TASKS", GetTasksRequest(Child=[{"Control_Id": "106831", "AC_ID": "110803", "Parent": [{"Control_Id": "106825", "Value": "Pending,Open,Closed,Partially Closed,Reported Closed,Reopened", "Data_Form_Id": ""}]}]))
+        tasks_data = await call_appsavy_api()
         team = load_team()
         
         # Identify user
         if target_name:
-            # Manager viewing someone else's tasks
+            # SECURITY FIX: Only managers can view other people's tasks
+            if ctx.deps.role != "manager":
+                return "Permission Denied: Employees can only view their own tasks. Please just ask 'Show my tasks'."
+            
             user = next((u for u in team if target_name.lower() in u['name'].lower() or target_name.lower() == u['login_code'].lower()), None)
             if not user:
-                return f"User '{target_name}' not found in directory."
+                return f"User '{target_name}' not found."
         else:
             # User viewing their own tasks
             user = next((u for u in team if u['phone'] == ctx.deps.sender_phone), None)
-            if not user:
-                return "Unable to identify your profile."
-        
-        # Filter tasks
+            
+
         filtered = [
             t for t in tasks_data 
             if isinstance(t, dict) and t.get('LOGIN', '').lower() == user['login_code'].lower()
