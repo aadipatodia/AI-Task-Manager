@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 SCOPES = ['https://www.googleapis.com/auth/gmail.send']
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-38w7.onrender.com/oauth2callback")
 MANAGER_EMAIL = "patodiaaadi@gmail.com"
+conversation_history: Dict[str, List[Any]] = {}
 
 # --- API CONFIGURATION (100% Dependency) ---
 APPSAVY_BASE_URL = "https://configapps.appsavy.com/api/AppsavyRestService"
@@ -93,14 +94,10 @@ def get_system_prompt(current_time: datetime.datetime) -> str:
     current_time_str = current_time.strftime("%I:%M %p")
     day_of_week = current_time.strftime("%A")
     
-    return f"""... (existing prompt) ...
+    return f"""
 
 ### AUTHORIZED TEAM MEMBERS:
 {team_description}
-
-### IMPORTANT:
-- Ignore WhatsApp headers like '[7:03 pm, 13/1/2026] ABC:' and focus only on the text after the colon.
-- 'mdpvvnl has to [task]' should be treated as a direct assignment command.
     
 You are the Official AI Task Manager Bot for the organization. Identity: TM_API (Manager).
 You are a precise, professional assistant with natural language understanding capabilities.
@@ -186,6 +183,9 @@ Employees can always view their own tasks
 - Don't mention internal tool names
 - Ask clarifying questions when needed
 - Confirm critical actions before executing
+
+### IMPORTANT:
+- Ignore WhatsApp headers like '[7:03 pm, 13/1/2026] ABC:' and focus only on the text after the colon.
 """
 
 # --- AUTHORIZED TEAM CONFIGURATION ---
@@ -389,7 +389,7 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
     """
     try:
         # Fetch tasks with error handling
-        tasks_data = await fetch_api_tasks()
+        tasks_data = await call_appsavy_api("GET_TASKS", GetTasksRequest(Child=[{"Control_Id": "106831", "AC_ID": "110803", "Parent": [{"Control_Id": "106825", "Value": "Pending,Open,Closed,Partially Closed,Reported Closed,Reopened", "Data_Form_Id": ""}]}]))
         if not isinstance(tasks_data, list):
             logger.error(f"Unexpected tasks_data format: {type(tasks_data)}")
             tasks_data = []
@@ -483,7 +483,7 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext], target_name: Optio
     Sort by due date (oldest first - descending order)
     """
     try:
-        tasks_data = await fetch_api_tasks()
+        tasks_data = await call_appsavy_api("GET_TASKS", GetTasksRequest(Child=[{"Control_Id": "106831", "AC_ID": "110803", "Parent": [{"Control_Id": "106825", "Value": "Pending,Open,Closed,Partially Closed,Reported Closed,Reopened", "Data_Form_Id": ""}]}]))
         team = load_team()
         
         # Identify user
@@ -690,13 +690,15 @@ async def update_task_status_tool(ctx: RunContext[ManagerContext], task_id: str,
 
 # --- ASYNC MESSAGE HANDLER ---
 async def handle_message(command, sender, pid, message=None, full_message=None):
-    """Main logic entry point for processing WhatsApp messages."""
+    """Main logic entry point for processing WhatsApp messages with memory."""
+    global conversation_history
     
     try:
+        # Standardize phone format
         if len(sender) == 10 and not sender.startswith('91'):
             sender = f"91{sender}"
         
-        # Handle media files - no storage, ask immediately
+        # Handle media files
         msg_type = message.get("type", "text") if message else "text"
         is_media = msg_type in ["document", "image", "video", "audio"]
         
@@ -707,9 +709,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 pid
             )
             return
-        
-        # No history without MongoDB
-        
+
         # Determine user role
         manager_phone = os.getenv("MANAGER_PHONE", "919650523477")
         team = load_team()
@@ -724,7 +724,11 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         if not role:
             send_whatsapp_message(sender, "Access Denied: Your number is not authorized to use this system.", pid)
             return
-        
+
+        # Initialize history for new users
+        if sender not in conversation_history:
+            conversation_history[sender] = []
+
         # Process command with AI agent
         if command:
             try:
@@ -742,18 +746,28 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 current_agent.tool(assign_task_by_phone_tool)
                 current_agent.tool(update_task_status_tool)
                 
-                # Run agent (no history)
+                # RUN AGENT WITH HISTORY
+                # message_history allows the AI to remember the previous context
                 result = await current_agent.run(
                     command,
+                    message_history=conversation_history[sender],
                     deps=ManagerContext(sender_phone=sender, role=role, current_time=current_time)
                 )
                 
+                # SAVE NEW MESSAGES TO HISTORY
+                # all_messages() contains the whole conversation including the current turn
+                conversation_history[sender] = result.all_messages() 
+                
+                # Limit history to prevent token overflow (last 10 messages)
+                if len(conversation_history[sender]) > 10:
+                    conversation_history[sender] = conversation_history[sender][-10:]
+
                 # Send response
                 send_whatsapp_message(sender, result.output, pid)
                 
             except Exception as e:
                 logger.error(f"Agent execution failed: {str(e)}", exc_info=True)
-                send_whatsapp_message(sender, f"System Error: Unable to process request. Please try again or contact support.", pid)
+                send_whatsapp_message(sender, f"System Error: Unable to process request. Please try again.", pid)
         
     except Exception as e:
         logger.error(f"handle_message error: {str(e)}", exc_info=True)
