@@ -452,15 +452,17 @@ async def assign_task_by_phone_tool(phone: str, description: str, deadline: str,
         return {"error": f"No team member found with phone {phone}"}
     return await assign_new_task_tool(member["name"], description, deadline, task_name)
 
-async def handle_message(message: str, sender_phone: str) -> str:
-    """Handle incoming message using AI agent."""
+async def handle_message(user_command: str, sender_phone: str, phone_number_id: str, *, message: Optional[Dict] = None, full_message: Optional[Dict] = None) -> str:
+    """Handle incoming message using AI agent, with support for media/documents."""
+    logger.info(f"Handling message from {sender_phone}: {user_command}")
+    
     if sender_phone not in conversation_history:
         conversation_history[sender_phone] = []
 
     current_time = datetime.datetime.now()
     system_prompt = get_system_prompt(current_time)
 
-    # Define tools (assuming pydantic_ai supports dict of async functions)
+    # Define tools
     tools = {
         "assign_new_task_tool": assign_new_task_tool,
         "update_task_status_tool": update_task_status_tool,
@@ -469,22 +471,31 @@ async def handle_message(message: str, sender_phone: str) -> str:
         "assign_task_by_phone_tool": assign_task_by_phone_tool,
     }
 
-    context = ManagerContext(sender_phone=sender_phone, role="manager")  # Adjust role based on sender if needed
+    context = ManagerContext(sender_phone=sender_phone, role="manager")  # Adjust role if needed
 
     # Create agent
     agent = Agent(model=ai_model, system_prompt=system_prompt, tools=tools)
 
+    # Handle media if present (e.g., document or image)
+    if message:
+        if 'document' in message or 'image' in message:
+            # For now, log and perhaps add to prompt or store for attachment
+            logger.info(f"Media received: {message}")
+            # Example: Append to prompt for clarification if no command
+            if not user_command:
+                user_command = "Received a file. Please provide task details."
+
     # Prepare request with history
     request = ModelRequest(
-        messages=conversation_history[sender_phone] + [UserPromptPart(text=message)]
+        messages=conversation_history[sender_phone] + [UserPromptPart(text=user_command)]
     )
 
-    # Run agent (assuming async run)
+    # Run agent
     response: ModelResponse = await agent.run(request, RunContext(context=context.dict()))
 
     # Append to history
-    conversation_history[sender_phone].append(UserPromptPart(text=message))
-    conversation_history[sender_phone].append(TextPart(text=response.content, role="assistant"))  # Adjust based on lib
+    conversation_history[sender_phone].append(UserPromptPart(text=user_command))
+    conversation_history[sender_phone].append(TextPart(text=response.content, role="assistant"))
 
     # Send response via WhatsApp
     send_whatsapp_message(sender_phone, response.content)
