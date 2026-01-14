@@ -26,7 +26,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- GMAIL & OAUTH CONSTANTS ---
-SCOPES = ['https://www.googleapis.com/auth/gmail.send']
+SCOPES = ['https://www.googleapis.com/auth/gmail.send', 'https://www.googleapis.com/auth/calendar.events']
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-38w7.onrender.com/oauth2callback")
 MANAGER_EMAIL = "patodiaaadi@gmail.com"
 
@@ -193,7 +193,7 @@ def load_team():
     """Static team directory - source of truth for authentication and name resolution."""
     return [
         {"name": "mdpvvnl", "phone": "919650523477", "email": "varun.verma@mobineers.com", "login_code": "mdpvvnl"},
-        {"name": "chairman", "phone": "91XXXXXXXXXX", "email": "chairman@example.com", "login_code": "chairman"},
+        {"name": "chairman", "phone": "919310104458", "email": "abhilasha1333@gmail.com", "login_code": "chairman"},
         {"name": "mddvvnl", "phone": "91XXXXXXXXXX", "email": "mddvvnl@example.com", "login_code": "mddvvnl"},
         {"name": "ce_ghaziabad", "phone": "91XXXXXXXXXX", "email": "ce@example.com", "login_code": "ce_ghaziabad"}
     ]
@@ -219,10 +219,6 @@ class Documents(BaseModel):
     CHILD: List[DocumentItem]
 
 from pydantic import BaseModel
-
-# Assuming Details and Documents are defined elsewhere
-# class Details(BaseModel): ...
-# class Documents(BaseModel): ...
 
 class CreateTaskRequest(BaseModel):
     SID: str = "604"
@@ -320,30 +316,6 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
     except Exception as e:
         logger.error(f"Exception calling API {key}: {str(e)}")
         return None
-
-async def fetch_api_tasks():
-    req = GetTasksRequest(Child=[{
-        "Control_Id": "106831",
-        "AC_ID": "110803",
-        "Parent": [{
-            "Control_Id": "106825",
-            "Value": "Pending,Open,Closed,Partially Closed,Reported Closed,Reopened",
-            "Data_Form_Id": ""
-        }]
-    }])
-    
-    res = await call_appsavy_api("GET_TASKS", req)
-    
-    if not res:
-        return []
-    
-    # Handle dictionary response from API
-    if isinstance(res, dict):
-        if "error" in res: return []
-        # Extract list from dictionary (adjust "data" key to match your API)
-        return res.get("data", []) 
-        
-    return res if isinstance(res, list) else []
 
 async def fetch_task_counts_api(login_code: str):
     """Retrieves aggregate counts via SID 616 - API dependent with robust error handling."""
