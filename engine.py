@@ -17,7 +17,6 @@ from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
 from send_message import send_whatsapp_message, send_whatsapp_document
 from google_auth_oauthlib.flow import Flow
-import difflib
 
 # Load environment variables from .env file
 load_dotenv()
@@ -30,48 +29,70 @@ logger = logging.getLogger(__name__)
 SCOPES = ['https://www.googleapis.com/auth/gmail.send']
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-38w7.onrender.com/oauth2callback")
 MANAGER_EMAIL = "patodiaaadi@gmail.com"
+
 conversation_history: Dict[str, List[Any]] = {}
 
 # --- API CONFIGURATION (100% Dependency) ---
 APPSAVY_BASE_URL = "https://configapps.appsavy.com/api/AppsavyRestService"
+
 API_CONFIGS = {
     "CREATE_TASK": {
         "url": f"{APPSAVY_BASE_URL}/PushdataJSONClient",
         "headers": {
-            "sid": "604", "pid": "309", "fid": "10344", "cid": "64",
-            "uid": "TM_API", "roleid": "1627",
+            "sid": "604",
+            "pid": "309",
+            "fid": "10344",
+            "cid": "64",
+            "uid": "TM_API",
+            "roleid": "1627",
             "TokenKey": "17bce718-18fb-43c4-90bb-910b19ffb34b"
         }
     },
     "GET_ASSIGNEE": {
         "url": f"{APPSAVY_BASE_URL}/GetDataJSONClient",
         "headers": {
-            "sid": "606", "pid": "309", "fid": "10344", "cid": "64",
-            "uid": "TM_API", "roleid": "1627",
+            "sid": "606",
+            "pid": "309",
+            "fid": "10344",
+            "cid": "64",
+            "uid": "TM_API",
+            "roleid": "1627",
             "TokenKey": "d23e5874-ba53-4490-941f-0c70b25f6f56"
         }
     },
     "GET_TASKS": {
         "url": f"{APPSAVY_BASE_URL}/GetDataJSONClient",
         "headers": {
-            "sid": "610", "pid": "309", "fid": "10349", "cid": "64",
-            "uid": "TM_API", "roleid": "1627",
+            "sid": "610",
+            "pid": "309",
+            "fid": "10349",
+            "cid": "64",
+            "uid": "TM_API",
+            "roleid": "1627",
             "TokenKey": "e5b4e098-f8b9-47bf-83f1-751582bfe147"
         }
     },
     "UPDATE_STATUS": {
         "url": f"{APPSAVY_BASE_URL}/PushdataJSONClient",
         "headers": {
-            "sid": "607", "pid": "309", "fid": "10349", "cid": "64",
-            "uid": "TM_API", "roleid": "1627",
+            "sid": "607",
+            "pid": "309",
+            "fid": "10349",
+            "cid": "64",
+            "uid": "TM_API",
+            "roleid": "1627",
             "TokenKey": "e5b4e098-f8b9-47bf-83f1-751582bfe147"
         }
     },
     "GET_COUNT": {
         "url": f"{APPSAVY_BASE_URL}/GetDataJSONClient",
         "headers": {
-            "sid": "616", "pid": "309", "fid": "10408", "cid": "64",
-            "uid": "TM_API", "roleid": "1627",
+            "sid": "616",
+            "pid": "309",
+            "fid": "10408",
+            "cid": "64",
+            "uid": "TM_API",
+            "roleid": "1627",
             "TokenKey": "75c6ec2e-9f9c-48fa-be24-d8eb612f4c03"
         }
     }
@@ -88,19 +109,17 @@ class ManagerContext(BaseModel):
 # --- ENHANCED SYSTEM PROMPT FOR NATURAL CONVERSATION ---
 def get_system_prompt(current_time: datetime.datetime) -> str:
     team = load_team()
-    # 2. Create a string describing the team for the AI
     team_description = "\n".join([f"- {u['name']} (Login: {u['login_code']})" for u in team])
-
     current_date_str = current_time.strftime("%Y-%m-%d")
     current_time_str = current_time.strftime("%I:%M %p")
     day_of_week = current_time.strftime("%A")
     
     return f"""
-
 ### AUTHORIZED TEAM MEMBERS:
 {team_description}
-    
-You are the Official AI Task Manager Bot for the organization. Identity: TM_API (Manager).
+
+You are the Official AI Task Manager Bot for the organization.
+Identity: TM_API (Manager).
 You are a precise, professional assistant with natural language understanding capabilities.
 
 Current Date: {current_date_str} ({day_of_week})
@@ -115,7 +134,6 @@ Current Time: {current_time_str}
 ### TASK ASSIGNMENT:
 * When user wants to assign a task, extract: assignee name, task description, deadline
 * Use 'assign_new_task_tool'
-  
 * **Deadline Logic:**
   - If time mentioned is later than current time → Use today's date
   - If time has already passed today → Use tomorrow's date
@@ -123,8 +141,7 @@ Current Time: {current_time_str}
   - "next week" → 7 days from now
   - No time specified → default to end of current day (23:59)
   - Always format as ISO: YYYY-MM-DDTHH:MM:SS
-
-* **Name Resolution**: Map names to login IDs from team directory. Use fuzzy matching for typos (e.g., 'mddvnl' might match 'mddvvnl').
+* **Name Resolution**: Map names to login IDs from team directory
 
 ### TASK STATUS WORKFLOW:
 1. **Pending** - Initial state when task is created
@@ -150,8 +167,8 @@ When user asks about performance, pending tasks, statistics, reports, or task co
   Task Assigned- Count of Task [Total] Nos
   Task Completed- Count of task [Closed Status Only] Nos
   Task Pending -
-  Within time: [Count]
-  Beyond time: [Count]
+    Within time: [Count]
+    Beyond time: [Count]
 
 ### TASK LISTING:
 When user asks to see tasks, list tasks, pending work:
@@ -190,23 +207,14 @@ Employees can always view their own tasks
 """
 
 # --- AUTHORIZED TEAM CONFIGURATION ---
-def load_team() -> List[Dict[str, str]]:
-    """Load team directory with corrected login codes and participant names based on API docs."""
+def load_team():
+    """Static team directory - source of truth for authentication and name resolution."""
     return [
-        {"name": "mdpvvnl", "phone": "919650523477", "email": "varun.verma@mobineers.com", "login_code": "D-3514-1001", "participant": "MD-PVVNL"},
-        {"name": "chairman", "phone": "919310104458", "email": "abhilasha1333@gmail.com", "login_code": "D-3514-1003", "participant": "CHAIRMAN"},
-        {"name": "mddvvnl", "phone": "917428134319", "email": "patodiaaadi@gmail.com.com", "login_code": "D-3514-1002", "participant": "MD-DVVNL"},
-        {"name": "ce_ghaziabad", "phone": "91XXXXXXXXXX", "email": "ce@example.com", "login_code": "D-3514-1004", "participant": "CE-GHAZIABAD"}
+        {"name": "mdpvvnl", "phone": "919650523477", "email": "varun.verma@mobineers.com", "login_code": "D-3514-1001"},
+        {"name": "chairman", "phone": "919310104458", "email": "abhilasha1333@gmail.com", "login_code": "D-3514-1003"},
+        {"name": "mddvvnl", "phone": "917428134319", "email": "patodiaaadi@gmail.com", "login_code": "D-3514-1002"},
+        {"name": "ce_ghaziabad", "phone": "91XXXXXXXXXX", "email": "ce@example.com", "login_code": "D-3514-1004"}
     ]
-
-def get_team_member(name: str) -> Optional[Dict[str, str]]:
-    """Fuzzy match name to team member."""
-    team = load_team()
-    names = [u['name'].lower() for u in team]
-    closest = difflib.get_close_matches(name.lower(), names, n=1, cutoff=0.6)
-    if closest:
-        return next(u for u in team if u['name'].lower() == closest[0])
-    return None
 
 class DetailChild(BaseModel):
     SEL: str = "Y"
@@ -229,37 +237,35 @@ class Documents(BaseModel):
 
 class CreateTaskRequest(BaseModel):
     SID: str = "604"
-    ASSIGNEE: str
     DESCRIPTION: str
-    EXPECTED_END_DATE: str  # ISO format
-    TASK_NAME: str
-    DETAILS: Details
-    DOCUMENTS: Documents
-    
-    # Corrected default values based on docs; make dynamic if possible
-    MANUAL_DIARY_NUMBER: str = ""  # Generate or ask if needed
+    EXPECTED_END_DATE: str
+    MANUAL_DIARY_NUMBER: str = "er3"
     NATURE_OF_COMPLAINT: str = "1"
     NOTICE_BEFORE: str = "4"
     NOTIFICATION: str = ""
-    ORIGINAL_LETTER_NUMBER: str = ""
-    REFERENCE_LETTER_NUMBER: str = ""
+    ORIGINAL_LETTER_NUMBER: str = "32"
+    PRIORTY_TASK: str = "N"
+    REFERENCE_LETTER_NUMBER: str = "334"
+    TASK_NAME: str
     TYPE: str = "TYPE"
-    PRIORTY_TASK: str = "N"  # 'Y' for priority
+    DETAILS: Details
+    DOCUMENTS: Documents
 
 class GetTasksRequest(BaseModel):
     Event: str = "106830"
-    Child: List[Dict[str, Any]]
+    Child: List[Dict]
 
 class UpdateTaskRequest(BaseModel):
     SID: str = "607"
     TASK_ID: str
     STATUS: str
-    ASSIGNEE: str
     COMMENTS: str = "STATUS_UPDATE"
+    UPLOAD_DOCUMENT: str = ""
+    BASE64: str = ""
 
 class GetCountRequest(BaseModel):
     Event: str = "107567"
-    Child: List[Dict[str, Any]]
+    Child: List[Dict]
 
 def get_gmail_service():
     """Initialize Gmail API service with OAuth2 credentials from environment variables."""
@@ -268,13 +274,13 @@ def get_gmail_service():
         if not token_json_str:
             logger.error("TOKEN_JSON environment variable not found.")
             return None
-            
+        
         token_data = json.loads(token_json_str)
         creds = Credentials.from_authorized_user_info(token_data, SCOPES)
         
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
-            
+        
         return build('gmail', 'v1', credentials=creds)
     except Exception as e:
         logger.error(f"Gmail service initialization failed: {str(e)}")
@@ -306,200 +312,497 @@ def send_email(to_email: str, subject: str, body: str) -> bool:
         return False
 
 # --- REST API HELPERS ---
-async def call_appsavy_api(key: str, payload: Dict[str, Any]) -> Optional[Dict]:
+async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
     """Universal wrapper for Appsavy POST requests - 100% API dependency."""
     config = API_CONFIGS[key]
     try:
+        logger.info(f"Calling API {key} with payload: {payload.model_dump()}")
+        
         res = requests.post(
             config["url"],
             headers=config["headers"],
-            json=payload,
+            json=payload.model_dump(),
             timeout=15
         )
+        
+        logger.info(f"API {key} response status: {res.status_code}")
+        logger.info(f"API {key} response body: {res.text}")
+        
         if res.status_code == 200:
-            logger.info(f"API {key} success")
-            return res.json()
-        logger.error(f"API {key} failed with status {res.status_code}: {res.text}")
-        return {"error": res.text}
+            try:
+                return res.json()
+            except json.JSONDecodeError:
+                logger.error(f"API {key} returned non-JSON response: {res.text}")
+                return {"error": "Invalid JSON response"}
+        else:
+            logger.error(f"API {key} failed with status {res.status_code}: {res.text}")
+            return {"error": res.text}
     except Exception as e:
         logger.error(f"Exception calling API {key}: {str(e)}")
         return None
 
-async def fetch_assignees() -> List[Dict[str, str]]:
-    """Fetch assignees dynamically using GET_ASSIGNEE API."""
-    payload = {
-        "Event": "0",
-        "Child": [{"Control_Id": "106771", "AC_ID": "111057"}]
-    }
-    res = await call_appsavy_api("GET_ASSIGNEE", payload)
-    if res and "error" not in res:
-        # Assuming response format: {"data": [{"ID": "D-3514-1001", "Name": "MD-PVVNL"}, ...]}
-        # Adjust parsing based on actual response structure
-        return [{"name": item["Name"].lower(), "login_code": item["ID"], "participant": item["Name"]} for item in res.get("data", [])]
-    return []
-
-# Optionally, call fetch_assignees() in load_team() if dynamic fetch is preferred
-# For now, keeping static with corrections
-
-async def fetch_task_counts_api(login_code: str, assignment_type: str = "Assigned To Me") -> Optional[Dict]:
-    """Retrieves aggregate counts via SID 616 with dynamic filters."""
-    child = [{
+async def fetch_task_counts_api(login_code: str):
+    """Retrieves aggregate counts via SID 616 - API dependent with robust error handling."""
+    req = GetCountRequest(Child=[{
         "Control_Id": "108118",
-        "AC_ID": "113229",  # Verify this AC_ID; logs show it's incorrect - replace with correct value from your Appsavy instance if needed
+        "AC_ID": "113229",
         "Parent": [
             {"Control_Id": "111548", "Value": "1", "Data_Form_Id": ""},
-            {"Control_Id": "107566", "Value": login_code, "Data_Form_Id": ""},  # Assignee filter
-            {"Control_Id": "107568", "Value": "", "Data_Form_Id": ""},  # To Date
-            {"Control_Id": "107569", "Value": "", "Data_Form_Id": ""},  # From Date
-            {"Control_Id": "107599", "Value": assignment_type, "Data_Form_Id": ""},  # Assignment type
-            {"Control_Id": "109599", "Value": "", "Data_Form_Id": ""},  # Manual Diary
-            {"Control_Id": "108512", "Value": "", "Data_Form_Id": ""}   # System Diary
+            {"Control_Id": "107566", "Value": login_code, "Data_Form_Id": ""},
+            {"Control_Id": "107568", "Value": "", "Data_Form_Id": ""},
+            {"Control_Id": "107569", "Value": "", "Data_Form_Id": ""},
+            {"Control_Id": "107599", "Value": "Assigned By Me", "Data_Form_Id": ""},
+            {"Control_Id": "109599", "Value": "", "Data_Form_Id": ""},
+            {"Control_Id": "108512", "Value": "", "Data_Form_Id": ""}
         ]
-    }]
-    payload = {"Event": "107567", "Child": child}
-    return await call_appsavy_api("GET_COUNT", payload)
-
-async def fetch_api_tasks(login_code: str, assignment_type: str = "Assigned To Me", status_filter: str = "Open,Closed") -> Optional[Dict]:
-    """Fetch task details with dynamic filters and short status value to avoid length errors."""
-    # Use short status filter (<=50 chars) to fix "value cannot be greater than 50" error
-    parent = [
-        {"Control_Id": "106825", "Value": status_filter, "Data_Form_Id": ""},  # Status filter (shortened)
-        {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},  # From Date
-        {"Control_Id": "106827", "Value": login_code, "Data_Form_Id": ""},  # User/Assignee
-        {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},  # To Date
-        {"Control_Id": "107046", "Value": assignment_type, "Data_Form_Id": ""},  # Assignment
-        {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""}   # BTN_LBL
-    ]
-    child = [{"Control_Id": "106831", "AC_ID": "110803", "Parent": parent}]
-    payload = {"Event": "106830", "Child": child}
-    return await call_appsavy_api("GET_TASKS", payload)
-
-async def assign_new_task_tool(assignee_name: str, description: str, deadline: str, task_name: str, documents: Optional[Documents] = None) -> Dict:
-    """Tool to assign new task."""
-    member = get_team_member(assignee_name)
-    if not member:
-        return {"error": f"Assignee {assignee_name} not found. Did you mean a similar name?"}
+    }])
     
-    details = Details(CHILD=[DetailChild(LOGIN=member["login_code"], PARTICIPANTS=member["participant"])])
-    docs = documents or Documents(CHILD=[])
-    
-    req = CreateTaskRequest(
-        ASSIGNEE=member["login_code"],
-        DESCRIPTION=description,
-        EXPECTED_END_DATE=deadline,
-        TASK_NAME=task_name,
-        DETAILS=details,
-        DOCUMENTS=docs
-    )
-    res = await call_appsavy_api("CREATE_TASK", req.model_dump())
-    if res and "error" not in res:
-        # Notify via WhatsApp/Email
-        send_whatsapp_message(member["phone"], f"New task assigned: {task_name}. Deadline: {deadline}")
-        send_email(member["email"], f"New Task: {task_name}", description)
-    return res or {"error": "Assignment failed"}
+    try:
+        res = await call_appsavy_api("GET_COUNT", req)
+        logger.info(f"API Count Response for {login_code}: {res}")
+        
+        if not res:
+            logger.warning(f"GET_COUNT returned None for {login_code}")
+            return {"ASSIGNED_TASK": "0", "CLOSED_TASK": "0"}
+        
+        if isinstance(res, dict) and "error" in res:
+            logger.error(f"GET_COUNT API error for {login_code}: {res['error']}")
+            return {"ASSIGNED_TASK": "0", "CLOSED_TASK": "0"}
+        
+        if isinstance(res, list) and len(res) > 0:
+            logger.info(f"GET_COUNT returned list with {len(res)} items for {login_code}")
+            return res[0]
+        elif isinstance(res, dict):
+            logger.info(f"GET_COUNT returned dict for {login_code}")
+            return res
+        else:
+            logger.warning(f"GET_COUNT returned unexpected format for {login_code}: {type(res)}")
+            return {"ASSIGNED_TASK": "0", "CLOSED_TASK": "0"}
+            
+    except Exception as e:
+        logger.error(f"fetch_task_counts_api error for {login_code}: {str(e)}", exc_info=True)
+        return {"ASSIGNED_TASK": "0", "CLOSED_TASK": "0"}
 
-async def update_task_status_tool(task_id: str, status: str, assignee_name: str, comments: Optional[str] = "") -> Dict:
-    """Tool to update task status."""
-    member = get_team_member(assignee_name)
-    if not member:
-        return {"error": f"Assignee {assignee_name} not found."}
-    
-    req = UpdateTaskRequest(
-        TASK_ID=task_id,
-        STATUS=status,
-        ASSIGNEE=member["login_code"],
-        COMMENTS=comments or "STATUS_UPDATE"
-    )
-    return await call_appsavy_api("UPDATE_STATUS", req.model_dump())
+def download_and_encode_document(document_data: Dict):
+    """Downloads media from Meta and returns base64 string."""
+    try:
+        access_token = os.getenv("ACCESS_TOKEN")
+        media_id = document_data.get("id")
+        
+        headers = {"Authorization": f"Bearer {access_token}"}
+        r = requests.get(f"https://graph.facebook.com/v20.0/{media_id}/", headers=headers)
+        
+        if r.status_code != 200:
+            logger.error("Failed to get media URL")
+            return None
+        
+        download_url = r.json().get("url")
+        dr = requests.get(download_url, headers=headers)
+        
+        if dr.status_code == 200:
+            return base64.b64encode(dr.content).decode("utf-8")
+        
+        return None
+    except Exception as e:
+        logger.error(f"Document download failed: {str(e)}")
+        return None
 
-async def get_task_list_tool(assignee_name: Optional[str] = None, assignment_type: str = "Assigned To Me") -> Dict:
-    """Tool to get task list."""
-    if assignee_name:
-        member = get_team_member(assignee_name)
-        if not member:
-            return {"error": f"Assignee {assignee_name} not found."}
-        login_code = member["login_code"]
-    else:
-        # Default to current user; assume manager or implement
-        login_code = "TM_API"  # Placeholder; adjust based on context
-    
-    res = await fetch_api_tasks(login_code, assignment_type, status_filter="Open,Closed,Pending")  # Short filter
-    # Parse and sort by due date if needed
-    return res or {"error": "Failed to fetch tasks"}
-
-async def get_performance_report_tool(assignee_name: Optional[str] = None) -> Dict:
-    """Tool to get performance report."""
-    if assignee_name:
-        member = get_team_member(assignee_name)
-        if not member:
-            return {"error": f"Assignee {assignee_name} not found."}
-        login_code = member["login_code"]
-        res = await fetch_task_counts_api(login_code)
-    else:
-        # For all; aggregate calls
+# --- AGENT TOOLS (Will be registered dynamically) ---
+async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Optional[str] = None) -> str:
+    """
+    Generate performance report using API data (SID 616 for counts, SID 610 for task details).
+    Without name: Report for ALL employees (Manager only)
+    With name: Report for specific employee
+    """
+    try:
+        if not name and ctx.deps.role != "manager":
+            return "Permission Denied: Only managers can view the full team report."
+        
+        tasks_data = await call_appsavy_api("GET_TASKS", GetTasksRequest(Child=[{
+            "Control_Id": "106831",
+            "AC_ID": "110803",
+            "Parent": [
+                {"Control_Id": "106825", "Value": "Pending,Open,Closed,Partially Closed,Reported Closed,Reopened", "Data_Form_Id": ""},
+                {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
+                {"Control_Id": "106827", "Value": "", "Data_Form_Id": ""},
+                {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
+                {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
+                {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""}
+            ]
+        }]))
+        
+        if not isinstance(tasks_data, list):
+            logger.error(f"Unexpected tasks_data format: {type(tasks_data)}")
+            tasks_data = []
+        
         team = load_team()
-        res = {}
-        for member in team:
-            counts = await fetch_task_counts_api(member["login_code"])
-            res[member["name"]] = counts
-    return res or {"error": "Failed to fetch report"}
+        now = ctx.deps.current_time
+        
+        if name:
+            display_team = [e for e in team if name.lower() in e['name'].lower() or name.lower() == e['login_code'].lower()]
+            if not display_team:
+                return f"User '{name}' not found in directory."
+        else:
+            display_team = team
+        
+        results = []
+        for member in display_team:
+            login = member['login_code']
+            try:
+                counts = await fetch_task_counts_api(login)
+                
+                member_tasks = [
+                    t for t in tasks_data 
+                    if isinstance(t, dict) and str(t.get('LOGIN', '')).lower() == login.lower()
+                ]
+                
+                within_time = 0
+                beyond_time = 0
+                closed_count = 0
+                
+                for task in member_tasks:
+                    status = task.get('STATUS', '').lower()
+                    
+                    if status == 'closed':
+                        closed_count += 1
+                    elif status in ['open', 'pending', 'partially closed', 'reported closed', 'reopened', '']:
+                        try:
+                            due_date_str = task.get('EXPECTED_END_DATE', '')
+                            if due_date_str:
+                                due_date_str = due_date_str.replace("Z", "").replace("+00:00", "")
+                                due_date = datetime.datetime.fromisoformat(due_date_str)
+                                
+                                if due_date > now:
+                                    within_time += 1
+                                else:
+                                    beyond_time += 1
+                            else:
+                                within_time += 1
+                        except Exception as date_error:
+                            logger.warning(f"Date parsing error for task {task.get('TASK_ID')}: {date_error}")
+                            within_time += 1
+                
+                assigned_count = counts.get('ASSIGNED_TASK', str(len(member_tasks)))
+                closed_from_api = counts.get('CLOSED_TASK', str(closed_count))
+                
+                results.append(
+                    f"Name- {member['name'].title()}\n"
+                    f"Task Assigned- Count of Task {assigned_count} Nos\n"
+                    f"Task Completed- Count of task {closed_from_api} Nos\n"
+                    f"Task Pending -\n"
+                    f"Within time: {within_time}\n"
+                    f"Beyond time: {beyond_time}"
+                )
+            except Exception as member_error:
+                logger.error(f"Error processing report for {member['name']}: {str(member_error)}", exc_info=True)
+                results.append(
+                    f"Name- {member['name'].title()}\n"
+                    f"Error: Unable to fetch report data"
+                )
+        
+        if not results:
+            return "No team members found for reporting."
+        
+        return "\n\n".join(results)
+        
+    except Exception as e:
+        logger.error(f"get_performance_report_tool error: {str(e)}", exc_info=True)
+        return f"Error generating performance report: {str(e)}"
 
-async def assign_task_by_phone_tool(phone: str, description: str, deadline: str, task_name: str) -> Dict:
-    """Tool to assign task by phone."""
-    team = load_team()
-    member = next((u for u in team if u["phone"] == phone or u["phone"].endswith(phone[-10:])), None)
-    if not member:
-        return {"error": f"No team member found with phone {phone}"}
-    return await assign_new_task_tool(member["name"], description, deadline, task_name)
+async def get_task_list_tool(ctx: RunContext[ManagerContext], target_name: Optional[str] = None) -> str:
+    """
+    Retrieves task list from API (SID 610) using call_appsavy_api directly.
+    Without name: Show tasks for requesting user.
+    With name: Show tasks for specified employee (Managers only).
+    Sort by due date (oldest first).
+    """
+    try:
+        tasks_data = await call_appsavy_api("GET_TASKS", GetTasksRequest(Child=[{
+            "Control_Id": "106831",
+            "AC_ID": "110803",
+            "Parent": [
+                {"Control_Id": "106825", "Value": "Pending,Open,Closed,Partially Closed,Reported Closed,Reopened", "Data_Form_Id": ""},
+                {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
+                {"Control_Id": "106827", "Value": "", "Data_Form_Id": ""},
+                {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
+                {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
+                {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""}
+            ]
+        }]))
+        
+        if not isinstance(tasks_data, list):
+            logger.error(f"Unexpected tasks_data format: {type(tasks_data)}")
+            tasks_data = []
+        
+        team = load_team()
+        
+        if target_name:
+            if ctx.deps.role != "manager":
+                return "Permission Denied: You can only view your own tasks. Try asking 'Show my tasks'."
+            
+            user = next((u for u in team if target_name.lower() in u['name'].lower() or target_name.lower() == u['login_code'].lower()), None)
+            if not user:
+                return f"User '{target_name}' not found in directory."
+        else:
+            user = next((u for u in team if u['phone'] == ctx.deps.sender_phone), None)
+            if not user:
+                return "Unable to identify your profile. Please contact the administrator."
+        
+        filtered = [
+            t for t in tasks_data 
+            if isinstance(t, dict) and str(t.get('LOGIN', '')).lower() == user['login_code'].lower()
+        ]
+        
+        filtered.sort(key=lambda x: x.get('EXPECTED_END_DATE', ''), reverse=True)
+        
+        if not filtered:
+            return f"No tasks found for {user['name'].title()}."
+        
+        output = f"Task List for {user['name'].title()}:\n\n"
+        for task in filtered:
+            output += (
+                f"ID: {task.get('TASK_ID')}\n"
+                f"Task: {task.get('TASK_NAME')}\n"
+                f"Due: {task.get('EXPECTED_END_DATE')}\n"
+                f"Status: {task.get('STATUS')}\n\n"
+            )
+        
+        return output.strip()
+        
+    except Exception as e:
+        logger.error(f"get_task_list_tool error: {str(e)}", exc_info=True)
+        return f"Error retrieving task list: {str(e)}"
 
-async def handle_message(user_command: str, sender_phone: str, phone_number_id: str, *, message: Optional[Dict] = None, full_message: Optional[Dict] = None) -> str:
-    """Handle incoming message using AI agent, with support for media/documents."""
-    logger.info(f"Handling message from {sender_phone}: {user_command}")
+async def assign_new_task_tool(
+    ctx: RunContext[ManagerContext],
+    name: str,
+    task_name: str,
+    deadline: str
+) -> str:
+    """
+    Assigns new task via API (SID 604).
+    Sends WhatsApp notification to employee.
+    Sends email to both employee and manager.
+    """
+    try:
+        team = load_team()
+        
+        user = next((u for u in team if name.lower() in u['name'].lower() or name.lower() == u['login_code'].lower()), None)
+        if not user:
+            return f"Error: User '{name}' not found in directory."
+        
+        login_code = user['login_code']
+        
+        formatted_deadline = deadline.split('T')[0] if 'T' in deadline else deadline
+        
+        doc_payload = Documents(CHILD=[])
+        
+        req = CreateTaskRequest(
+            DESCRIPTION=task_name,
+            EXPECTED_END_DATE=formatted_deadline,
+            TASK_NAME=task_name,
+            DETAILS=Details(CHILD=[DetailChild(
+                SEL="Y",
+                LOGIN=login_code,
+                PARTICIPANTS=user['name'].upper()
+            )]),
+            DOCUMENTS=doc_payload
+        )
+        
+        logger.info(f"Attempting to create task for {login_code}")
+        logger.info(f"Full Payload: {req.model_dump_json(indent=2)}")
+        
+        api_response = await call_appsavy_api("CREATE_TASK", req)
+        
+        logger.info(f"Raw API Response: {api_response}")
+        
+        if not api_response:
+            return "API failure: No response from server."
+        
+        if isinstance(api_response, dict):
+            if api_response.get('error'):
+                return f"API failure: {api_response.get('error')}"
+            
+            if api_response.get('RESULT') == 1 or api_response.get('result') == 1:
+                whatsapp_msg = f"New Task Assigned:\n\nTask: {task_name}\nDue Date: {deadline}\n\nPlease complete on time."
+                send_whatsapp_message(user['phone'], whatsapp_msg, os.getenv("PHONE_NUMBER_ID"))
+                
+                email_subject = f"New Task Assigned: {task_name}"
+                email_body = f"""Dear {user['name'].title()},
+
+You have been assigned a new task:
+
+Task Name: {task_name}
+Due Date: {deadline}
+
+Please ensure timely completion.
+
+Best regards,
+Task Management System"""
+                send_email(user['email'], email_subject, email_body)
+                
+                manager_subject = f"Task Assignment Confirmation: {task_name}"
+                manager_body = f"""Task Assignment Confirmed
+
+Assignee: {user['name'].title()}
+Task: {task_name}
+Due Date: {deadline}
+
+The task has been successfully assigned and the employee has been notified.
+
+Task Management System"""
+                send_email(MANAGER_EMAIL, manager_subject, manager_body)
+                
+                return f"Task successfully assigned to {user['name'].title()} (Login: {login_code}).\nNotifications sent via WhatsApp and email."
+            else:
+                return f"API returned unexpected response: {api_response}"
+        
+        return "API failure: Unexpected response format."
+        
+    except Exception as e:
+        logger.error(f"assign_new_task_tool error: {str(e)}", exc_info=True)
+        return f"Error assigning task: {str(e)}"
+
+async def assign_task_by_phone_tool(
+    ctx: RunContext[ManagerContext],
+    phone: str,
+    task_name: str,
+    deadline: str
+) -> str:
+    """
+    Assigns task using phone number instead of name.
+    Supports 10-digit and full formats.
+    """
+    try:
+        team = load_team()
+        
+        if len(phone) == 10 and not phone.startswith('91'):
+            phone = f"91{phone}"
+        
+        user = next((u for u in team if u['phone'] == phone), None)
+        if not user:
+            return f"Error: No employee found with phone number {phone}."
+        
+        return await assign_new_task_tool(ctx, user['name'], task_name, deadline)
+        
+    except Exception as e:
+        logger.error(f"assign_task_by_phone_tool error: {str(e)}", exc_info=True)
+        return f"Error assigning task by phone: {str(e)}"
+
+async def update_task_status_tool(ctx: RunContext[ManagerContext], task_id: str, action: str) -> str:
+    """
+    Updates task status via API (SID 607).
+    Enforces role-based permissions.
+    """
+    try:
+        status_map = {
+            "open": "Open",
+            "partial": "Partially Closed",
+            "reported": "Reported Closed",
+            "close": "Closed",
+            "reopen": "Reopened"
+        }
+        
+        new_status = status_map.get(action.lower())
+        if not new_status:
+            return f"Error: Invalid action. Use: open, partial, reported, close, reopen"
+        
+        if action.lower() in ["close", "reopen"] and ctx.deps.role != "manager":
+            return "Permission Denied: Only managers can Close or Reopen tasks."
+        elif action.lower() in ["open", "partial", "reported"] and ctx.deps.role != "employee":
+            return "Note: These statuses are restricted to assigned employees."
+        
+        team = load_team()
+        user = next((u for u in team if u['phone'] == ctx.deps.sender_phone), None)
+        if not user:
+            return "Error: Could not identify your user profile."
+        
+        req = UpdateTaskRequest(
+            TASK_ID=task_id,
+            STATUS=new_status
+        )
+        
+        api_response = await call_appsavy_api("UPDATE_STATUS", req)
+        
+        if not api_response:
+            return "API failure: No response from server."
+        
+        if isinstance(api_response, dict):
+            if api_response.get('error'):
+                return f"API failure: {api_response.get('error')}"
+            
+            if api_response.get('RESULT') == 1 or api_response.get('result') == 1:
+                return f"Success: Task {task_id} updated to '{new_status}'."
+            else:
+                return f"API returned unexpected response: {api_response}"
     
-    if sender_phone not in conversation_history:
-        conversation_history[sender_phone] = []
-
-    current_time = datetime.datetime.now()
-    system_prompt = get_system_prompt(current_time)
-
-    # Define tools
-    tools = {
-        "assign_new_task_tool": assign_new_task_tool,
-        "update_task_status_tool": update_task_status_tool,
-        "get_task_list_tool": get_task_list_tool,
-        "get_performance_report_tool": get_performance_report_tool,
-        "assign_task_by_phone_tool": assign_task_by_phone_tool,
-    }
-
-    context = ManagerContext(sender_phone=sender_phone, role="manager")  # Adjust role if needed
-
-    # Create agent
-    agent = Agent(model=ai_model, system_prompt=system_prompt, tools=tools)
-
-    # Handle media if present (e.g., document or image)
-    if message:
-        if 'document' in message or 'image' in message:
-            # For now, log and perhaps add to prompt or store for attachment
-            logger.info(f"Media received: {message}")
-            # Example: Append to prompt for clarification if no command
-            if not user_command:
-                user_command = "Received a file. Please provide task details."
-
-    # Prepare request with history
-    request = ModelRequest(
-        messages=conversation_history[sender_phone] + [UserPromptPart(text=user_command)]
-    )
-
-    # Run agent
-    response: ModelResponse = await agent.run(request, RunContext(context=context.dict()))
-
-    # Append to history
-    conversation_history[sender_phone].append(UserPromptPart(text=user_command))
-    conversation_history[sender_phone].append(TextPart(text=response.content, role="assistant"))
-
-    # Send response via WhatsApp
-    send_whatsapp_message(sender_phone, response.content)
-
-    return response.content
-
-# Add main/agent run logic if needed; assuming this is integrated in webhook.py or elsewhere
+    except Exception as e:
+        logger.error(f"update_task_status_tool error: {str(e)}", exc_info=True)
+        return f"Error updating task status: {str(e)}"
+    
+async def handle_message(command, sender, pid, message=None, full_message=None):
+    try:
+        if len(sender) == 10 and not sender.startswith('91'):
+            sender = f"91{sender}"
+    
+        msg_type = message.get("type", "text") if message else "text"
+        is_media = msg_type in ["document", "image", "video", "audio"]
+    
+        if is_media and not command:
+            send_whatsapp_message(
+                sender,
+               "File received. Please provide the assignee name, task description, and deadline to complete the assignment.",
+                pid
+            )
+            return
+    
+        manager_phone = os.getenv("MANAGER_PHONE", "919650523477")
+        team = load_team()
+    
+        if sender == manager_phone:
+            role = "manager"
+        elif any(u['phone'] == sender for u in team):
+            role = "employee"
+        else:
+            role = None
+    
+        if not role:
+            send_whatsapp_message(sender, "Access Denied: Your number is not authorized to use this system.", pid)
+            return
+    
+        if sender not in conversation_history:
+            conversation_history[sender] = []
+    
+        if command:
+            try:
+                current_time = datetime.datetime.now()
+                dynamic_prompt = get_system_prompt(current_time)
+            
+                current_agent = Agent(ai_model, deps_type=ManagerContext, system_prompt=dynamic_prompt)
+            
+                current_agent.tool(get_performance_report_tool)
+                current_agent.tool(get_task_list_tool)
+                current_agent.tool(assign_new_task_tool)
+                current_agent.tool(assign_task_by_phone_tool)
+                current_agent.tool(update_task_status_tool)
+            
+                result = await current_agent.run(
+                    command,
+                    message_history=conversation_history[sender],
+                    deps=ManagerContext(sender_phone=sender, role=role, current_time=current_time)
+                )
+            
+                conversation_history[sender] = result.all_messages()
+            
+                if len(conversation_history[sender]) > 10:
+                    conversation_history[sender] = conversation_history[sender][-10:]
+            
+                send_whatsapp_message(sender, result.output, pid)
+            
+            except Exception as e:
+                logger.error(f"Agent execution failed: {str(e)}", exc_info=True)
+                send_whatsapp_message(sender, f"System Error: Unable to process request. Please try again.", pid)
+            
+    except Exception as e:
+        logger.error(f"handle_message error: {str(e)}", exc_info=True)
+        send_whatsapp_message(sender, "An unexpected error occaurred. Please try again.", pid)
