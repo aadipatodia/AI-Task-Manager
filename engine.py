@@ -194,7 +194,7 @@ def load_team():
     return [
         {"name": "mdpvvnl", "phone": "919650523477", "email": "varun.verma@mobineers.com", "login_code": "mdpvvnl"},
         {"name": "chairman", "phone": "919310104458", "email": "abhilasha1333@gmail.com", "login_code": "chairman"},
-        {"name": "mddvvnl", "phone": "91XXXXXXXXXX", "email": "mddvvnl@example.com", "login_code": "mddvvnl"},
+        {"name": "mddvvnl", "phone": "917428134319", "email": "patodiaaadi@gmail.com.com", "login_code": "mddvvnl"},
         {"name": "ce_ghaziabad", "phone": "91XXXXXXXXXX", "email": "ce@example.com", "login_code": "ce_ghaziabad"}
     ]
 
