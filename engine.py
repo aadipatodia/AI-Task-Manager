@@ -345,7 +345,7 @@ async def fetch_task_counts_api(login_code: str, assignment_type: str = "Assigne
     """Retrieves aggregate counts via SID 616 with dynamic filters."""
     child = [{
         "Control_Id": "108118",
-        "AC_ID": "113229",  # Keep as per doc; if invalid, replace with correct AC_ID from your environment
+        "AC_ID": "113229",  # Verify this AC_ID; logs show it's incorrect - replace with correct value from your Appsavy instance if needed
         "Parent": [
             {"Control_Id": "111548", "Value": "1", "Data_Form_Id": ""},
             {"Control_Id": "107566", "Value": login_code, "Data_Form_Id": ""},  # Assignee filter
@@ -451,5 +451,44 @@ async def assign_task_by_phone_tool(phone: str, description: str, deadline: str,
     if not member:
         return {"error": f"No team member found with phone {phone}"}
     return await assign_new_task_tool(member["name"], description, deadline, task_name)
+
+async def handle_message(message: str, sender_phone: str) -> str:
+    """Handle incoming message using AI agent."""
+    if sender_phone not in conversation_history:
+        conversation_history[sender_phone] = []
+
+    current_time = datetime.datetime.now()
+    system_prompt = get_system_prompt(current_time)
+
+    # Define tools (assuming pydantic_ai supports dict of async functions)
+    tools = {
+        "assign_new_task_tool": assign_new_task_tool,
+        "update_task_status_tool": update_task_status_tool,
+        "get_task_list_tool": get_task_list_tool,
+        "get_performance_report_tool": get_performance_report_tool,
+        "assign_task_by_phone_tool": assign_task_by_phone_tool,
+    }
+
+    context = ManagerContext(sender_phone=sender_phone, role="manager")  # Adjust role based on sender if needed
+
+    # Create agent
+    agent = Agent(model=ai_model, system_prompt=system_prompt, tools=tools)
+
+    # Prepare request with history
+    request = ModelRequest(
+        messages=conversation_history[sender_phone] + [UserPromptPart(text=message)]
+    )
+
+    # Run agent (assuming async run)
+    response: ModelResponse = await agent.run(request, RunContext(context=context.dict()))
+
+    # Append to history
+    conversation_history[sender_phone].append(UserPromptPart(text=message))
+    conversation_history[sender_phone].append(TextPart(text=response.content, role="assistant"))  # Adjust based on lib
+
+    # Send response via WhatsApp
+    send_whatsapp_message(sender_phone, response.content)
+
+    return response.content
 
 # Add main/agent run logic if needed; assuming this is integrated in webhook.py or elsewhere
