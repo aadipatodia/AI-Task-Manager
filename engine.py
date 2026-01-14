@@ -198,10 +198,9 @@ def load_team():
         {"name": "ce_ghaziabad", "phone": "91XXXXXXXXXX", "email": "ce@example.com", "login_code": "ce_ghaziabad"}
     ]
 
-# --- API SCHEMAS ---
 class DetailChild(BaseModel):
-    SEL: str = "Y"
-    LOGIN: str
+    SEL: str = "Y"  # Required selection flag [cite: 6, 22]
+    LOGIN: str      # Login code [cite: 6, 24]
     PARTICIPANTS: str
 
 class Details(BaseModel):
@@ -218,24 +217,24 @@ class DocumentItem(BaseModel):
 class Documents(BaseModel):
     CHILD: List[DocumentItem]
 
-from pydantic import BaseModel
-
 class CreateTaskRequest(BaseModel):
-    SID: str = "604"
+    SID: str = "604"  # [cite: 1, 22]
+    ASSIGNEE: str      # Mandatory in request body 
     DESCRIPTION: str
-    EXPECTED_END_DATE: str
+    EXPECTED_END_DATE: str # Format: YYYY-MM-DD 
     TASK_NAME: str
-    DETAILS: Details
-    DOCUMENTS: Documents
+    DETAILS: Details  # [cite: 20, 22]
+    DOCUMENTS: Documents # [cite: 21, 22]
     
-    MANUAL_DIARY_NUMBER: str = "er3"
-    NATURE_OF_COMPLAINT: str = "1"  
-    NOTICE_BEFORE: str = "4"        
-    NOTIFICATION: str = ""           
-    ORIGINAL_LETTER_NUMBER: str = "32" 
-    REFERENCE_LETTER_NUMBER: str = "334" 
-    TYPE: str = "TYPE"              
-    PRIORTY_TASK: str = "N"          
+    # Missing fields from YAML marked as mandatory for DB save:
+    MANUAL_DIARY_NUMBER: str = "er3" # 
+    NATURE_OF_COMPLAINT: str = "1"   # [cite: 16, 23]
+    NOTICE_BEFORE: str = "4"         # [cite: 17, 23]
+    NOTIFICATION: str = ""           # [cite: 17, 23]
+    ORIGINAL_LETTER_NUMBER: str = "32" # [cite: 18, 23]
+    REFERENCE_LETTER_NUMBER: str = "334" # [cite: 19, 23]
+    TYPE: str = "TYPE"               # [cite: 20, 24]
+    PRIORTY_TASK: str = "N"          # [cite: 18, 23]          
 
 class GetTasksRequest(BaseModel):
     Event: str = "106830"
@@ -547,36 +546,47 @@ async def assign_new_task_tool(
         
         login_code = user['login_code']
         
+        # Format the deadline to YYYY-MM-DD as required by the YAML spec 
+        formatted_deadline = deadline.split('T')[0] if 'T' in deadline else deadline
+
         # No MongoDB, so no pending document handling - assume no document
         doc_payload = Documents(CHILD=[])
         
-        # Create task via API
+        # Create task via API using mandatory YAML fields [cite: 14, 21, 22]
         req = CreateTaskRequest(
+            ASSIGNEE="D-3514-1001",            # MANDATORY body field 
             DESCRIPTION=task_name,
-            EXPECTED_END_DATE=deadline,
+            EXPECTED_END_DATE=formatted_deadline, # Must be YYYY-MM-DD 
             TASK_NAME=task_name,
             DETAILS=Details(CHILD=[DetailChild(
-                LOGIN=login_code, # This is where the assignee code goes [cite: 24]
+                SEL="Y",                    # MANDATORY flag 
+                LOGIN=login_code,           # Assignee login [cite: 24]
                 PARTICIPANTS=user['name'].upper()
             )]),
-            DOCUMENTS=doc_payload,
+            DOCUMENTS=doc_payload,          # MANDATORY object [cite: 21, 22]
+            # Additional mandatory defaults from YAML [cite: 16-24]
+            MANUAL_DIARY_NUMBER="er3",
             NATURE_OF_COMPLAINT="1", 
+            NOTICE_BEFORE="4",
+            NOTIFICATION="",
+            ORIGINAL_LETTER_NUMBER="32",
+            REFERENCE_LETTER_NUMBER="334",
+            TYPE="TYPE",
             PRIORTY_TASK="N"
         )
         
-        # --- INSIDE assign_new_task_tool ---
-
-        # 1. ADD THIS: Debug the payload being sent
+        # --- DEBUGGING PAYLOAD ---
         print(f"DEBUG: Attempting to create task for {login_code}")
         print(f"DEBUG: Full Payload: {req.model_dump_json(indent=2)}")
 
         api_response = await call_appsavy_api("CREATE_TASK", req)
         
-        # 2. ADD THIS: Debug the raw API response
+        # --- DEBUGGING RESPONSE ---
         print(f"DEBUG: Raw API Response: {api_response}")
 
-        if not api_response or isinstance(api_response, dict) and "error" in api_response:
-            return "API failure: Task creation was not successful."
+        # Standard Appsavy success check (result '1' means success) [cite: 22]
+        if not api_response or (isinstance(api_response, dict) and api_response.get('result') != '1'):
+            return "API failure: Task creation was not successful at the database level."
         
         # Send WhatsApp notification to employee
         whatsapp_msg = f"New Task Assigned:\n\nTask: {task_name}\nDue Date: {deadline}\n\nPlease complete on time."
