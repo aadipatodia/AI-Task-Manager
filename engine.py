@@ -492,34 +492,56 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
         return f"Error generating performance report: {str(e)}"
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext], target_name: Optional[str] = None) -> str:
+    """
+    Retrieves task list from API (SID 610) using call_appsavy_api directly.
+    Without name: Show tasks for requesting user.
+    With name: Show tasks for specified employee (Managers only).
+    Sort by due date (oldest first).
+    """
     try:
-        tasks_data = await call_appsavy_api()
+        # Directly call call_appsavy_api with mandatory key and payload
+        tasks_data = await call_appsavy_api("GET_TASKS", GetTasksRequest(Child=[{
+            "Control_Id": "106831", 
+            "AC_ID": "110803", 
+            "Parent": [{
+                "Control_Id": "106825", 
+                "Value": "Pending,Open,Closed,Partially Closed,Reported Closed,Reopened", 
+                "Data_Form_Id": ""
+            }]
+        }]))
+
+        if not isinstance(tasks_data, list):
+            logger.error(f"Unexpected tasks_data format: {type(tasks_data)}")
+            tasks_data = []
+
         team = load_team()
         
-        # Identify user
+        # Determine which user's tasks to display
         if target_name:
-            # SECURITY FIX: Only managers can view other people's tasks
+            # PRIVACY CHECK: Only managers can view another employee's specific task list
             if ctx.deps.role != "manager":
-                return "Permission Denied: Employees can only view their own tasks. Please just ask 'Show my tasks'."
+                return "Permission Denied: You can only view your own tasks. Try asking 'Show my tasks'."
             
             user = next((u for u in team if target_name.lower() in u['name'].lower() or target_name.lower() == u['login_code'].lower()), None)
             if not user:
-                return f"User '{target_name}' not found."
+                return f"User '{target_name}' not found in directory."
         else:
-            # User viewing their own tasks
+            # Identify the requesting user by their phone number
             user = next((u for u in team if u['phone'] == ctx.deps.sender_phone), None)
-            
-
+            if not user:
+                return "Unable to identify your profile. Please contact the administrator."
+        
+        # Filter tasks for the identified user (Case-Insensitive)
         filtered = [
             t for t in tasks_data 
-            if isinstance(t, dict) and t.get('LOGIN', '').lower() == user['login_code'].lower()
+            if isinstance(t, dict) and str(t.get('LOGIN', '')).lower() == user['login_code'].lower()
         ]
         
-        # Sort by due date (oldest first - descending order by date value)
+        # Sort by due date (Oldest first - descending by ISO date string)
         filtered.sort(key=lambda x: x.get('EXPECTED_END_DATE', ''), reverse=True)
         
         if not filtered:
-            return f"No tasks found for {user['name']}."
+            return f"No tasks found for {user['name'].title()}."
         
         output = f"Task List for {user['name'].title()}:\n\n"
         for task in filtered:
