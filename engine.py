@@ -517,32 +517,23 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
                 counts = await fetch_task_counts_api(login)
                 
                 member_tasks = [
-                    t for t in tasks_data 
-                    if isinstance(t, dict) and str(t.get('LOGIN', '')).lower() == login.lower()
+                    t for t in tasks_data
+                    if isinstance(t, dict) and t.get("REPORTER", "").upper() == "TM_API"
                 ]
+
                 
                 within_time = 0
                 beyond_time = 0
                 closed_count = 0
                 
                 for task in member_tasks:
-                    status = task.get('STATUS', '').lower()
+                    status = str(task.get('STS', '')).lower()
                     
                     if status == 'closed':
                         closed_count += 1
                     elif status in ['open', 'pending', 'partially closed', 'reported closed', 'reopened', '']:
                         try:
-                            due_date_str = task.get('EXPECTED_END_DATE', '')
-                            if due_date_str:
-                                due_date_str = due_date_str.replace("Z", "").replace("+00:00", "")
-                                due_date = datetime.datetime.fromisoformat(due_date_str)
-                                
-                                if due_date > now:
-                                    within_time += 1
-                                else:
-                                    beyond_time += 1
-                            else:
-                                within_time += 1
+                            within_time += 1
                         except Exception as date_error:
                             logger.warning(f"Date parsing error for task {task['task_id']}: {date_error}")
                             within_time += 1
@@ -599,10 +590,36 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext], target_name: Optio
         if not tasks_data:
             return "No tasks found."
 
-        normalized = [normalize_task(t) for t in tasks_data]
+        # 🚫 Appsavy limitation: cannot fetch per-employee ownership
+        if target_name and ctx.deps.role == "manager":
+            return (
+                "Appsavy limitation:\n"
+                "This API does NOT expose per-employee task ownership.\n\n"
+                "What I CAN show:\n"
+                "• All tasks created by you\n"
+                "• Aggregate report per employee\n\n"
+                "Please ask for a performance report instead."
+            )
 
+        # ✅ Filter ONLY tasks created by this system (TM_API)
+        filtered = [
+            normalize_task(t)
+            for t in tasks_data
+            if isinstance(t, dict) and t.get("REPORTER", "").upper() == "TM_API"
+        ]
+
+        if not filtered:
+            return "No tasks found."
+        
+        if ctx.deps.role == "employee":
+            return (
+                "Appsavy limitation:\n"
+                "Individual task ownership is not available.\n"
+                "Please ask your manager for task details."
+            )
+        
         output = "Task List:\n\n"
-        for t in normalized:
+        for t in filtered:
             output += (
                 f"ID: {t['task_id']}\n"
                 f"Task: {t['task_name']}\n"
@@ -670,7 +687,12 @@ async def assign_new_task_tool(
             
             if api_response.get('RESULT') == 1 or api_response.get('result') == 1:
                 whatsapp_msg = f"New Task Assigned:\n\nTask: {task_name}\nDue Date: {deadline}\n\nPlease complete on time."
-                send_whatsapp_message(user['phone'], whatsapp_msg, os.getenv("PHONE_NUMBER_ID"))
+                phone_id = os.getenv("PHONE_NUMBER_ID")
+                if not phone_id:
+                    logger.error("PHONE_NUMBER_ID missing. WhatsApp notification skipped.")
+                else:
+                    send_whatsapp_message(user['phone'], whatsapp_msg, phone_id)
+
                 
                 email_subject = f"New Task Assigned: {task_name}"
                 email_body = f"""Dear {user['name'].title()},
