@@ -322,6 +322,30 @@ def send_email(to_email: str, subject: str, body: str) -> bool:
         logger.error(f"Email sending failed: {str(e)}")
         return False
 
+def normalize_tasks_response(tasks_data):
+    """
+    Normalize Appsavy GET_TASKS response to always return a list
+    """
+    if isinstance(tasks_data, dict):
+        return tasks_data.get("data", {}).get("Result", [])
+    if isinstance(tasks_data, list):
+        return tasks_data
+    return []
+
+def normalize_task(task: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize Appsavy task object to internal standard keys
+    """
+    return {
+        "task_id": task.get("TID"),
+        "task_name": task.get("COMMENTS"),
+        "assigned_by": task.get("REPORTER"),
+        "assign_date": task.get("ASSIGN_DATE"),
+        "status": task.get("STS"),
+        "task_type": task.get("TASK_TYPE")
+    }
+
+
 # --- REST API HELPERS ---
 async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
     """Universal wrapper for Appsavy POST requests - 100% API dependency."""
@@ -433,7 +457,7 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
         
         status_filter = build_status_filter(ctx.deps.role)
 
-        tasks_data = await call_appsavy_api(
+        raw_tasks_data = await call_appsavy_api(
             "GET_TASKS",
             GetTasksRequest(
                 Child=[{
@@ -474,11 +498,7 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
                 }]
             )
         )
-
-        
-        if not isinstance(tasks_data, list):
-            logger.error(f"Unexpected tasks_data format: {type(tasks_data)}")
-            tasks_data = []
+        tasks_data = normalize_tasks_response(raw_tasks_data)
         
         team = load_team()
         now = ctx.deps.current_time
@@ -524,7 +544,7 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
                             else:
                                 within_time += 1
                         except Exception as date_error:
-                            logger.warning(f"Date parsing error for task {task.get('TASK_ID')}: {date_error}")
+                            logger.warning(f"Date parsing error for task {task['task_id']}: {date_error}")
                             within_time += 1
                 
                 assigned_count = counts.get('ASSIGNED_TASK', str(len(member_tasks)))
@@ -555,100 +575,47 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
         return f"Error generating performance report: {str(e)}"
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext], target_name: Optional[str] = None) -> str:
-    """
-    Retrieves task list from API (SID 610) using call_appsavy_api directly.
-    Without name: Show tasks for requesting user.
-    With name: Show tasks for specified employee (Managers only).
-    Sort by due date (oldest first).
-    """
     try:
-        status_filter = build_status_filter(ctx.deps.role)
-
-        tasks_data = await call_appsavy_api(
+        raw_tasks_data = await call_appsavy_api(
             "GET_TASKS",
             GetTasksRequest(
                 Child=[{
                     "Control_Id": "106831",
                     "AC_ID": "110803",
                     "Parent": [
-                        {
-                            "Control_Id": "106825",
-                            "Value": status_filter,
-                            "Data_Form_Id": ""
-                         },
-                        {
-                            "Control_Id": "106824",
-                            "Value": "",
-                            "Data_Form_Id": ""
-                        },
-                        {
-                            "Control_Id": "106827",
-                            "Value": "",
-                            "Data_Form_Id": ""
-                        },
-                        {
-                            "Control_Id": "106829",
-                            "Value": "",
-                            "Data_Form_Id": ""
-                        },
-                        {
-                            "Control_Id": "107046",
-                            "Value": "",
-                            "Data_Form_Id": ""
-                        },
-                        {
-                            "Control_Id": "107809",
-                            "Value": "0",
-                            "Data_Form_Id": ""
-                        }
+                        {"Control_Id": "106825", "Value": build_status_filter(ctx.deps.role), "Data_Form_Id": ""},
+                        {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
+                        {"Control_Id": "106827", "Value": "", "Data_Form_Id": ""},
+                        {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
+                        {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
+                        {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""}
                     ]
                 }]
             )
         )
 
-        
-        if not isinstance(tasks_data, list):
-            logger.error(f"Unexpected tasks_data format: {type(tasks_data)}")
-            tasks_data = []
-        
-        team = load_team()
-        
-        if target_name:
-            if ctx.deps.role != "manager":
-                return "Permission Denied: You can only view your own tasks. Try asking 'Show my tasks'."
-            
-            user = next((u for u in team if target_name.lower() in u['name'].lower() or target_name.lower() == u['login_code'].lower()), None)
-            if not user:
-                return f"User '{target_name}' not found in directory."
-        else:
-            user = next((u for u in team if u['phone'] == ctx.deps.sender_phone), None)
-            if not user:
-                return "Unable to identify your profile. Please contact the administrator."
-        
-        filtered = [
-            t for t in tasks_data 
-            if isinstance(t, dict) and str(t.get('LOGIN', '')).lower() == user['login_code'].lower()
-        ]
-        
-        filtered.sort(key=lambda x: x.get('EXPECTED_END_DATE', ''), reverse=False)
-        
-        if not filtered:
-            return f"No tasks found for {user['name'].title()}."
-        
-        output = f"Task List for {user['name'].title()}:\n\n"
-        for task in filtered:
+        tasks_data = normalize_tasks_response(raw_tasks_data)
+
+        if not tasks_data:
+            return "No tasks found."
+
+        normalized = [normalize_task(t) for t in tasks_data]
+
+        output = "Task List:\n\n"
+        for t in normalized:
             output += (
-                f"ID: {task.get('TASK_ID')}\n"
-                f"Task: {task.get('TASK_NAME')}\n"
-                f"Due: {task.get('EXPECTED_END_DATE')}\n"
-                f"Status: {task.get('STATUS')}\n\n"
+                f"ID: {t['task_id']}\n"
+                f"Task: {t['task_name']}\n"
+                f"Assigned On: {t['assign_date']}\n"
+                f"Status: {t['status']}\n\n"
             )
-        
+
         return output.strip()
-        
+
     except Exception as e:
         logger.error(f"get_task_list_tool error: {str(e)}", exc_info=True)
-        return f"Error retrieving task list: {str(e)}"
+        return "Error retrieving task list."
+
 
 async def assign_new_task_tool(
     ctx: RunContext[ManagerContext],
