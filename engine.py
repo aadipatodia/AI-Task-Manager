@@ -686,7 +686,7 @@ async def assign_new_task_tool(
                     else:
                         logger.error(f"Failed to send template to {user['name']}")
 
-                
+                    send_whatsapp_message(user['phone'], whatsapp_msg, phone_id)
                 email_subject = f"New Task Assigned: {task_name}"
                 email_body = f"""Dear {user['name'].title()},
 
@@ -805,8 +805,9 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         if len(sender) == 10 and not sender.startswith('91'):
             sender = f"91{sender}"
     
-        msg_type = message.get("type", "text") if message else "text"
-        is_media = msg_type in ["document", "image", "video", "audio"]
+        is_media = False
+        if message:
+            is_media = any(k in message for k in ["document", "image", "video", "audio", "type"])
     
         if is_media and not command:
             send_whatsapp_message(

@@ -64,13 +64,13 @@ async def handle_webhook(request: Request):
                     doc = message.get("document", {})
                     if doc:
                         user_command = doc.get("caption", "").strip()
-                        message_data = {"document": doc}
+                        message_data = {"document": doc, "type": "document"}
                         
                 elif msg_type == "image":
                     doc = message.get("image", {})
                     if doc:
                         user_command = doc.get("caption", "").strip()
-                        message_data = {"image": doc}
+                        message_data = {"image": doc, "type": "image"}
 
                 if user_command or message_data:
                     # Circular import risk check: Ensure engine.py does not import from webhook.py

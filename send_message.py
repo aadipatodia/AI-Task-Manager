@@ -67,7 +67,7 @@ def send_registration_template(recipient_number, customer_name, phone_number_id=
         "to": recipient_number,
         "type": "template",
         "template": {
-            "name": "task_assigner",
+            "name": "task_manager",
             "language": {
                 "code": "en"
             },
