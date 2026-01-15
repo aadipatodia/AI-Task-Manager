@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from send_message import send_whatsapp_message, send_whatsapp_document
 from google_auth_oauthlib.flow import Flow
 import asyncio
+from send_message import send_registration_template
 
 # Load environment variables from .env file
 load_dotenv()
@@ -565,73 +566,57 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
         logger.error(f"get_performance_report_tool error: {str(e)}", exc_info=True)
         return f"Error generating performance report: {str(e)}"
 
-async def get_task_list_tool(ctx: RunContext[ManagerContext], target_name: Optional[str] = None) -> str:
+async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
     try:
+        # 1. Identify employee from WhatsApp number
+        team = load_team()
+        user = next((u for u in team if u["phone"] == ctx.deps.sender_phone), None)
+
+        if not user:
+            return "Unable to identify your profile."
+
+        login_code = user["login_code"]
+
+        # 2. Call Appsavy EXACTLY as their working curl
         raw_tasks_data = await call_appsavy_api(
             "GET_TASKS",
             GetTasksRequest(
+                Event="106830",
                 Child=[{
                     "Control_Id": "106831",
                     "AC_ID": "110803",
                     "Parent": [
-                        {"Control_Id": "106825", "Value": build_status_filter(ctx.deps.role), "Data_Form_Id": ""},
+                        {"Control_Id": "106825", "Value": "", "Data_Form_Id": ""},
                         {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
-                        {"Control_Id": "106827", "Value": "", "Data_Form_Id": ""},
+                        {"Control_Id": "106827", "Value": login_code, "Data_Form_Id": ""},
                         {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
                         {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
-                        {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""}
+                        {"Control_Id": "107809", "Value": "", "Data_Form_Id": ""}
                     ]
                 }]
             )
         )
 
-        tasks_data = normalize_tasks_response(raw_tasks_data)
+        tasks = normalize_tasks_response(raw_tasks_data)
 
-        if not tasks_data:
-            return "No tasks found."
+        if not tasks:
+            return "No tasks assigned to you."
 
-        # 🚫 Appsavy limitation: cannot fetch per-employee ownership
-        if target_name and ctx.deps.role == "manager":
-            return (
-                "Appsavy limitation:\n"
-                "This API does NOT expose per-employee task ownership.\n\n"
-                "What I CAN show:\n"
-                "• All tasks created by you\n"
-                "• Aggregate report per employee\n\n"
-                "Please ask for a performance report instead."
-            )
-
-        # ✅ Filter ONLY tasks created by this system (TM_API)
-        filtered = [
-            normalize_task(t)
-            for t in tasks_data
-            if isinstance(t, dict) and t.get("REPORTER", "").upper() == "TM_API"
-        ]
-
-        if not filtered:
-            return "No tasks found."
-        
-        if ctx.deps.role == "employee":
-            return (
-                "Appsavy limitation:\n"
-                "Individual task ownership is not available.\n"
-                "Please ask your manager for task details."
-            )
-        
-        output = "Task List:\n\n"
-        for t in filtered:
+        # 3. Format response
+        output = f"Tasks assigned to you ({user['name'].title()}):\n\n"
+        for t in tasks:
             output += (
-                f"ID: {t['task_id']}\n"
-                f"Task: {t['task_name']}\n"
-                f"Assigned On: {t['assign_date']}\n"
-                f"Status: {t['status']}\n\n"
+                f"ID: {t.get('TID')}\n"
+                f"Task: {t.get('COMMENTS')}\n"
+                f"Assigned On: {t.get('ASSIGN_DATE')}\n"
+                f"Status: {t.get('STS')}\n\n"
             )
 
         return output.strip()
 
     except Exception as e:
         logger.error(f"get_task_list_tool error: {str(e)}", exc_info=True)
-        return "Error retrieving task list."
+        return "Error fetching your tasks."
 
 
 async def assign_new_task_tool(
@@ -691,7 +676,15 @@ async def assign_new_task_tool(
                 if not phone_id:
                     logger.error("PHONE_NUMBER_ID missing. WhatsApp notification skipped.")
                 else:
-                    send_whatsapp_message(user['phone'], whatsapp_msg, phone_id)
+                    wa_status = send_registration_template(
+                        recipient_number=user['phone'], 
+                        customer_name=user['name'], 
+                        phone_number_id=phone_id
+                    )
+                    if wa_status:
+                        logger.info(f"Template successfully sent to {user['name']}")
+                    else:
+                        logger.error(f"Failed to send template to {user['name']}")
 
                 
                 email_subject = f"New Task Assigned: {task_name}"

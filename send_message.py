@@ -55,7 +55,7 @@ def send_registration_template(recipient_number, customer_name, phone_number_id=
     """
     pn_id = phone_number_id or os.getenv("PHONE_NUMBER_ID")
     access_token = os.getenv("ACCESS_TOKEN")
-    url = f"https://graph.facebook.com/v21.0/{pn_id}/messages"
+    url = f"https://graph.facebook.com/{VERSION}/{pn_id}/messages"
     
     headers = {
         "Authorization": f"Bearer {access_token}",
