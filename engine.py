@@ -796,11 +796,7 @@ async def update_task_status_tool(
         if not user:
             return "Error: Could not identify your user profile."
         
-        req = UpdateTaskRequest(
-            TASK_ID=task_id,
-            STATUS=new_status
-            COMMENTS=remark or "Updated by employee"
-        )
+        req = UpdateTaskRequest(TASK_ID=task_id, STATUS=new_status, COMMENTS=remark or "Updated by employee")
         
         api_response = await call_appsavy_api("UPDATE_STATUS", req)
         
