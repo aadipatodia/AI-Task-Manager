@@ -255,6 +255,12 @@ When user asks to send, share, or receive a report on WhatsApp:
 - STATUS examples: Open, Closed, Reported Closed
 - If no assignee specified, send report for requesting user
 
+When user says:
+- "tasks assigned by me"
+- "summary of tasks assigned by me"
+Use get_tasks_assigned_by_me_tool.
+
+
 ### IMPORTANT:
 - Ignore WhatsApp headers like '[7:03 pm, 13/1/2026] ABC:' and focus only on the text after the colon.
 """
@@ -294,6 +300,7 @@ class CreateTaskRequest(BaseModel):
     EXPECTED_END_DATE: str
     MANUAL_DIARY_NUMBER: str = "er3"
     REFERENCE: str = "WHATSAPP_TASK"
+    TASK_SOURCE: str = "Whatsapp"
     MOBILE_NUMBER: str
     NATURE_OF_COMPLAINT: str = "1"
     NOTICE_BEFORE: str = "4"
@@ -417,6 +424,12 @@ def normalize_task(task: Dict[str, Any]) -> Dict[str, Any]:
         "status": task.get("STS"),
         "task_type": task.get("TASK_TYPE")
     }
+    
+def extract_deadline_fallback(text: str) -> str:
+    now = datetime.datetime.now()
+    if "tomorrow" in text.lower():
+        return (now + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+    return now.strftime("%Y-%m-%d")
 
 async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
     """Universal wrapper for Appsavy POST requests - 100% API dependency."""
@@ -515,6 +528,46 @@ def download_and_encode_document(document_data: Dict):
         return None
 
 # --- NEW TOOLS ---
+
+async def get_tasks_assigned_by_me_tool(ctx: RunContext[ManagerContext]) -> str:
+    raw_tasks_data = await call_appsavy_api(
+        "GET_TASKS",
+        GetTasksRequest(
+            Child=[{
+                "Control_Id": "106831",
+                "AC_ID": "110803",
+                "Parent": [
+                    {"Control_Id": "106825", "Value": "", "Data_Form_Id": ""},
+                    {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
+                    {"Control_Id": "106827", "Value": "", "Data_Form_Id": ""},
+                    {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
+                    {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
+                    {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""}
+                ]
+            }]
+        )
+    )
+
+    tasks = normalize_tasks_response(raw_tasks_data)
+
+    assigned_by_me = [
+        t for t in tasks
+        if t.get("REPORTER") == "TM_API"
+    ]
+
+    if not assigned_by_me:
+        return "You have not assigned any tasks yet."
+
+    result = "Summary of tasks assigned by you:\n\n"
+    for t in assigned_by_me:
+        result += (
+            f"Task ID: {t.get('TID')}\n"
+            f"Task: {t.get('COMMENTS')}\n"
+            f"Status: {t.get('STS')}\n\n"
+        )
+
+    return result.strip()
+
 
 async def send_whatsapp_report_tool(
     ctx: RunContext[ManagerContext],
@@ -650,7 +703,7 @@ async def get_users_by_id_tool(ctx: RunContext[ManagerContext], id_value: str) -
         if isinstance(api_response, list):
             for item in api_response:
                 if isinstance(item, dict):
-                    user_id = item.get("USER_ID") or item.get("LOGIN_ID") or item.get("ID")
+                    user_id = item.get("LOGIN_ID")
                     name = item.get("NAME") or item.get("USER_NAME")
                     email = item.get("EMAIL")
                     phone = item.get("PHONE") or item.get("MOBILE")
@@ -736,8 +789,12 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
                 
                 member_tasks = [
                     t for t in tasks_data
-                    if isinstance(t, dict) and t.get("ASSIGNEE")==login
+                    if isinstance(t, dict)
+                    and t.get("COMMENTS")  # task exists
+                    and t.get("REPORTER") == "TM_API"
+                    and login in t.get("COMMENTS", "").upper()
                 ]
+
                 
                 within_time = 0
                 beyond_time = 0
@@ -761,9 +818,10 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
                         except Exception:
                             within_time += 1
 
-                
-                assigned_count = counts.get('ASSIGNED_TASK', str(len(member_tasks)))
-                closed_from_api = counts.get('CLOSED_TASK', str(closed_count))
+                assigned_count = str(len(member_tasks))
+                closed_from_api = str(
+                    sum(1 for t in member_tasks if t.get("STS") == "Closed")
+                )
                 
                 results.append(
                     f"Name- {member['name'].title()}\n"
@@ -837,6 +895,14 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
     except Exception as e:
         logger.error(f"get_task_list_tool error: {str(e)}", exc_info=True)
         return "Error fetching your tasks."
+
+def extract_multiple_assignees(text: str, team: list) -> list[str]:
+    text = text.lower()
+    found = []
+    for member in team:
+        if member["name"].lower() in text:
+            found.append(member["name"])
+    return list(set(found))
 
 async def assign_new_task_tool(
     ctx: RunContext[ManagerContext],
@@ -1021,9 +1087,10 @@ async def update_task_status_tool(ctx: RunContext[ManagerContext], task_id: str,
             return "Error: Could not identify your user profile."
         
         req = UpdateTaskRequest(
+            SID="607",
             TASK_ID=task_id,
             STATUS=new_status,
-            COMMENTS=remark or "Updated by employee"
+            COMMENTS=remark or "Updated by user"
         )
         
         api_response = await call_appsavy_api("UPDATE_STATUS", req)
@@ -1080,6 +1147,29 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
     
         if command:
             try:
+                 # 🔹 STEP 1: detect multiple assignees
+                assignees = extract_multiple_assignees(command, team)
+                 # 🔹 STEP 2: MULTI ASSIGNEE CASE
+                if len(assignees) > 1:
+                    for name in assignees:
+                        await assign_new_task_tool(
+                            ctx=ManagerContext(
+                            sender_phone=sender,
+                            role=role,
+                            current_time=datetime.datetime.now()
+                            ),
+                            name=name,
+                            task_name=command,
+                            deadline=datetime.datetime.now().strftime("%Y-%m-%d")
+                        )
+                    send_whatsapp_message(
+                           sender,
+                          f"Task successfully assigned to:\n" + "\n".join(assignees),
+                          pid
+                            )
+                    conversation_history[sender] = []
+                    return
+
                 current_time = datetime.datetime.now()
                 dynamic_prompt = get_system_prompt(current_time)
             
@@ -1093,6 +1183,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 current_agent.tool(get_assignee_list_tool)
                 current_agent.tool(get_users_by_id_tool)
                 current_agent.tool(send_whatsapp_report_tool)
+                current_agent.tool(get_tasks_assigned_by_me_tool)
 
             
                 result = await current_agent.run(
@@ -1104,6 +1195,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 conversation_history[sender] = result.all_messages()
             
                 if len(conversation_history[sender]) > 10:
+                    
                     conversation_history[sender] = conversation_history[sender][-10:]
             
                 send_whatsapp_message(sender, result.output, pid)
