@@ -450,7 +450,11 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
 
 async def fetch_task_counts_api(login_code: str, ctx_role: str):
     """Retrieves aggregate counts via SID 616 - API dependent with robust error handling."""
-    assignment_value = "Assigned By Me" if ctx_role == "manager" else "Assigned To Me"
+    if ctx_role == "manager":
+        assignment_value = "Assigned To Me"
+    else:
+        assignment_value = "Assigned To Me"
+
     req = GetCountRequest(Child=[{
         "Control_Id": "108118",
         "AC_ID": "113229", # Updated from YAML source [cite: 13]
