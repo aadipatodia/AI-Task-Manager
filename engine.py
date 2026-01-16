@@ -210,7 +210,7 @@ When user asks to see tasks, list tasks, pending work:
 - Use 'get_task_list_tool'
 - Without name → Show tasks for the requesting user
 - With name (managers only) → Show tasks for specified employee
-- Sort by due date (oldest first)
+- Show the tasks exactly as returned by the API without applying additional sorting
 
 ### TASK ASSIGNMENT BY PHONE:
 Support assignment using phone numbers:
@@ -452,13 +452,13 @@ async def fetch_task_counts_api(login_code: str):
     """Retrieves aggregate counts via SID 616 - API dependent with robust error handling."""
     req = GetCountRequest(Child=[{
         "Control_Id": "108118",
-        "AC_ID": "108118",
+        "AC_ID": "113229", # Updated from YAML source [cite: 13]
         "Parent": [
             {"Control_Id": "111548", "Value": "1", "Data_Form_Id": ""},
-            {"Control_Id": "107566", "Value": login_code, "Data_Form_Id": ""},
+            {"Control_Id": "107566", "Value": login_code, "Data_Form_Id": ""}, # Assignee ID [cite: 20]
             {"Control_Id": "107568", "Value": "", "Data_Form_Id": ""},
             {"Control_Id": "107569", "Value": "", "Data_Form_Id": ""},
-            {"Control_Id": "107599", "Value": "Assigned By Me", "Data_Form_Id": ""},
+            {"Control_Id": "107599", "Value": "Assigned To Me", "Data_Form_Id": ""}, # Corrected filter 
             {"Control_Id": "109599", "Value": "", "Data_Form_Id": ""},
             {"Control_Id": "108512", "Value": "", "Data_Form_Id": ""}
         ]
@@ -852,31 +852,38 @@ async def assign_new_task_tool(
     task_name: str,
     deadline: str
 ) -> str:
-    """Assigns new task via API (SID 604). Sends WhatsApp and email notifications."""
     try:
-        team = load_team()
+        # Step 1: Resolve Name/ID using the GET_USERS_BY_ID API (SID 609)
+        # This handles both individual IDs (D-...) and Group IDs (G-...) 
+        lookup_req = GetUsersByIdRequest(
+            Child=[{"Control_Id": "107019", "AC_ID": "111271", 
+                    "Parent": [{"Control_Id": "106771", "Value": name, "Data_Form_Id": ""}]}]
+        )
+        user_info = await call_appsavy_api("GET_USERS_BY_ID", lookup_req)
         
-        user = next((u for u in team if name.lower() in u['name'].lower() or name.lower() == u['login_code'].lower()), None)
-        if not user:
-            return f"Error: User '{name}' not found in directory."
+        if not user_info or (isinstance(user_info, dict) and "error" in user_info):
+            return f"Error: Could not find user or group '{name}' in the system."
+
+        # Extract the resolved Login ID (e.g., D-3514-1001) 
+        resolved_user = user_info[0] if isinstance(user_info, list) else user_info
+        login_code = resolved_user.get("LOGIN_ID") or resolved_user.get("USER_ID")
         
-        login_code = user['login_code']
-        formatted_deadline = deadline.split('T')[0] if 'T' in deadline else deadline
-        doc_payload = Documents(CHILD=[])
-        
+        # Step 2: Proceed to Create Task (SID 604) using the resolved code [cite: 80]
         req = CreateTaskRequest(
             ASSIGNEE=login_code,
             DESCRIPTION=task_name,
-            EXPECTED_END_DATE=formatted_deadline,
+            EXPECTED_END_DATE=deadline.split('T')[0],
             TASK_NAME=task_name,
-            MOBILE_NUMBER=user["phone"][-10:],
+            MOBILE_NUMBER=resolved_user.get("PHONE", ""),
             DETAILS=Details(CHILD=[DetailChild(
                 SEL="Y",
                 LOGIN=login_code,
-                PARTICIPANTS=user['name'].upper()
+                PARTICIPANTS=resolved_user.get("NAME", "USER").upper()
             )]),
-            DOCUMENTS=doc_payload
+            DOCUMENTS=Documents(CHILD=[])
         )
+        
+        api_response = await call_appsavy_api("CREATE_TASK", req)
         
         logger.info(f"Attempting to create task for {login_code}")
         logger.info(f"Full Payload: {req.model_dump_json(indent=2)}")
