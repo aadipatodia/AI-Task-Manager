@@ -152,18 +152,21 @@ Current Time: {current_time_str}
 * **Name Resolution**: Map names to login IDs from team directory
 
 ### TASK STATUS WORKFLOW:
-1. **Pending** - Initial state when task is created
+1. **Pending** - Task is still open and not completed
 2. **Work Done** - Employee uses 'reported' action
 3. **Completed** - Manager uses 'close' action to approve
 
 **Status Actions:**
-- 'open' → "Open" (employee marks task as acknowledged/started)
+- 'pending' → "Open" (task not completed)
+- 'open' → "Open"
 - 'partial' → "Partially Closed" (work in progress)
 - 'reported' → "Reported Closed" (employee marks as done, awaits approval)
 
 **Role Permissions:**
-- Employees: Can mark tasks as 'partial' or 'reported' only
+- Employees: Can mark tasks as 'pending' (open), 'partial' (in progress), or 'reported' (completed by employee)
 - Managers: Can 'close' (approve) or 'reopen' (reject) tasks
+
+When updating task status, extract any additional text from the user's message as a remark and pass it in the COMMENTS field.
 
 ### PERFORMANCE REPORTING:
 When user asks about performance, pending tasks, statistics, reports, or task counts:
@@ -872,7 +875,7 @@ async def update_task_status_tool(ctx: RunContext[ManagerContext], task_id: str,
         
         if action.lower() in ["close", "reopen"] and ctx.deps.role != "manager":
             return "Permission Denied: Only managers can Close or Reopen tasks."
-        elif action.lower() in ["open", "partial", "reported"] and ctx.deps.role != "employee":
+        elif action.lower() in ["open", "pending", "partial", "reported"] and ctx.deps.role != "employee":
             return "Note: These statuses are restricted to assigned employees."
         
         team = load_team()

@@ -749,19 +749,38 @@ async def assign_task_by_phone_tool(
         logger.error(f"assign_task_by_phone_tool error: {str(e)}", exc_info=True)
         return f"Error assigning task by phone: {str(e)}"
 
-async def update_task_status_tool(ctx: RunContext[ManagerContext], task_id: str, action: str) -> str:
+async def update_task_status_tool(
+    ctx: RunContext[ManagerContext],
+    task_id: str,
+    action: str,
+    remark: Optional[str] = None
+) -> str:
+
     """
     Updates task status via API (SID 607).
     Enforces role-based permissions.
     """
     try:
         status_map = {
+            # task NOT completed          
+            "pending": "Open",
             "open": "Open",
+
+    # task in progress
+            "in progress": "Partially Closed",
             "partial": "Partially Closed",
+            "working": "Partially Closed",
+
+    # task completed by employee
+            "completed": "Reported Closed",
+            "done": "Reported Closed",
             "reported": "Reported Closed",
+
+    # manager only
             "close": "Closed",
             "reopen": "Reopened"
-        }
+}
+
         
         new_status = status_map.get(action.lower())
         if not new_status:
@@ -780,6 +799,7 @@ async def update_task_status_tool(ctx: RunContext[ManagerContext], task_id: str,
         req = UpdateTaskRequest(
             TASK_ID=task_id,
             STATUS=new_status
+            COMMENTS=remark or "Updated by employee"
         )
         
         api_response = await call_appsavy_api("UPDATE_STATUS", req)
