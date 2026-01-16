@@ -650,8 +650,8 @@ async def get_assignee_list_tool(ctx: RunContext[ManagerContext]) -> str:
         if isinstance(api_response, list):
             for item in api_response:
                 if isinstance(item, dict):
-                    login_id = item.get("LOGIN_ID") or item.get("ID")
-                    name = item.get("NAME") or item.get("PARTICIPANT_NAME")
+                    login_id = item.get("LOGIN_ID")
+                    name = item.get("NAME")
                     if login_id and name:
                         assignees.append(f"{name} (ID: {login_id})")
         
@@ -718,7 +718,7 @@ async def get_users_by_id_tool(ctx: RunContext[ManagerContext], id_value: str) -
                     
                     users.append(user_info)
         elif isinstance(api_response, dict):
-            user_id = api_response.get("USER_ID") or api_response.get("LOGIN_ID")
+            user_id = api_response.get("LOGIN_ID")
             name = api_response.get("NAME") or api_response.get("USER_NAME")
             email = api_response.get("EMAIL")
             phone = api_response.get("PHONE") or api_response.get("MOBILE")
@@ -792,8 +792,7 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
                     if isinstance(t, dict)
                     and t.get("COMMENTS")  # task exists
                     and t.get("REPORTER") == "TM_API"
-                    and login in t.get("COMMENTS", "").upper()
-                ]
+                                    ]
 
                 
                 within_time = 0
