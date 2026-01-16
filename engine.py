@@ -838,6 +838,14 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
         logger.error(f"get_task_list_tool error: {str(e)}", exc_info=True)
         return "Error fetching your tasks."
 
+def extract_multiple_assignees(text: str, team: list) -> list[str]:
+    text = text.lower()
+    found = []
+    for member in team:
+        if member["name"].lower() in text:
+            found.append(member["name"])
+    return list(set(found))
+
 async def assign_new_task_tool(
     ctx: RunContext[ManagerContext],
     name: str,
@@ -1080,6 +1088,29 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
     
         if command:
             try:
+                 # 🔹 STEP 1: detect multiple assignees
+                assignees = extract_multiple_assignees(command, team)
+                 # 🔹 STEP 2: MULTI ASSIGNEE CASE
+                if len(assignees) > 1:
+                    for name in assignees:
+                        await assign_new_task_tool(
+                            ctx=ManagerContext(
+                            sender_phone=sender,
+                            role=role,
+                            current_time=datetime.datetime.now()
+                            ),
+                            name=name,
+                            task_name=command,
+                            deadline=datetime.datetime.now().strftime("%Y-%m-%d")
+                        )
+                    send_whatsapp_message(
+                           sender,
+                          f"Task successfully assigned to:\n" + "\n".join(assignees),
+                          pid
+                            )
+                    return  # 🚨 agent.run() yahin stop
+
+
                 current_time = datetime.datetime.now()
                 dynamic_prompt = get_system_prompt(current_time)
             
@@ -1104,6 +1135,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 conversation_history[sender] = result.all_messages()
             
                 if len(conversation_history[sender]) > 10:
+                    
                     conversation_history[sender] = conversation_history[sender][-10:]
             
                 send_whatsapp_message(sender, result.output, pid)
