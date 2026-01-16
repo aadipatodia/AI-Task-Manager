@@ -448,8 +448,9 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
         logger.error(f"Exception calling API {key}: {str(e)}")
         return None
 
-async def fetch_task_counts_api(login_code: str):
+async def fetch_task_counts_api(login_code: str, ctx_role: str):
     """Retrieves aggregate counts via SID 616 - API dependent with robust error handling."""
+    assignment_value = "Assigned By Me" if ctx_role == "manager" else "Assigned To Me"
     req = GetCountRequest(Child=[{
         "Control_Id": "108118",
         "AC_ID": "113229", # Updated from YAML source [cite: 13]
@@ -458,7 +459,7 @@ async def fetch_task_counts_api(login_code: str):
             {"Control_Id": "107566", "Value": login_code, "Data_Form_Id": ""}, # Assignee ID [cite: 20]
             {"Control_Id": "107568", "Value": "", "Data_Form_Id": ""},
             {"Control_Id": "107569", "Value": "", "Data_Form_Id": ""},
-            {"Control_Id": "107599", "Value": "Assigned To Me", "Data_Form_Id": ""}, # Corrected filter 
+            {"Control_Id": "107599", "Value": assignment_value, "Data_Form_Id": ""},
             {"Control_Id": "109599", "Value": "", "Data_Form_Id": ""},
             {"Control_Id": "108512", "Value": "", "Data_Form_Id": ""}
         ]
@@ -545,10 +546,13 @@ async def send_whatsapp_report_tool(
 
         req = WhatsAppPdfReportRequest(
             ASSIGNED_TO=user["login_code"],
-        REPORT_TYPE=report_type,
-        STATUS=normalize_status_for_report(status),
-        MOBILE_NUMBER=user["phone"][-10:]
+            REPORT_TYPE=report_type,
+            STATUS=normalize_status_for_report(status),
+            MOBILE_NUMBER=user["phone"][-10:],
+            ASSIGNED_BY="Assigned By Me" if ctx.deps.role == "manager" else "Assigned To Me",
+            REFERENCE="WHATSAPP"
         )
+
 
 
 
@@ -708,7 +712,7 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
                     "Parent": [
                         {"Control_Id": "106825", "Value": status_filter, "Data_Form_Id": ""},
                         {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
-                        {"Control_Id": "106827", "Value": "", "Data_Form_Id": ""},
+                        {"Control_Id": "106827", "Value": login, "Data_Form_Id": ""},
                         {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
                         {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
                         {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""}
@@ -732,7 +736,7 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
         for member in display_team:
             login = member['login_code']
             try:
-                counts = await fetch_task_counts_api(login)
+                counts = await fetch_task_counts_api(login, ctx.deps.role)
                 
                 member_tasks = [
                     t for t in tasks_data
@@ -752,8 +756,9 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
 
                     elif expected_date:
                         try:
-                            expected = datetime.datetime.fromisoformat(expected_date.split('T')[0])
-
+                            expected = datetime.datetime.strptime(
+                            expected_date, "%m/%d/%Y %I:%M:%S %p"
+                        )
                             if expected >= now:
                                 within_time += 1
                             else:
@@ -865,8 +870,8 @@ async def assign_new_task_tool(
             return f"Error: Could not find user or group '{name}' in the system."
 
         # Extract the resolved Login ID (e.g., D-3514-1001) 
-        resolved_user = user_info[0] if isinstance(user_info, list) else user_info
-        login_code = resolved_user.get("LOGIN_ID") or resolved_user.get("USER_ID")
+        user = user_info[0] if isinstance(user_info, list) else user_info
+        login_code = user.get("LOGIN_ID") or user.get("USER_ID")
         
         # Step 2: Proceed to Create Task (SID 604) using the resolved code [cite: 80]
         req = CreateTaskRequest(
@@ -874,16 +879,14 @@ async def assign_new_task_tool(
             DESCRIPTION=task_name,
             EXPECTED_END_DATE=deadline.split('T')[0],
             TASK_NAME=task_name,
-            MOBILE_NUMBER=resolved_user.get("PHONE", ""),
+            MOBILE_NUMBER=user.get("PHONE", ""),
             DETAILS=Details(CHILD=[DetailChild(
                 SEL="Y",
                 LOGIN=login_code,
-                PARTICIPANTS=resolved_user.get("NAME", "USER").upper()
+                PARTICIPANTS=user.get("NAME", "USER").upper()
             )]),
             DOCUMENTS=Documents(CHILD=[])
         )
-        
-        api_response = await call_appsavy_api("CREATE_TASK", req)
         
         logger.info(f"Attempting to create task for {login_code}")
         logger.info(f"Full Payload: {req.model_dump_json(indent=2)}")
@@ -900,46 +903,59 @@ async def assign_new_task_tool(
                 return f"API failure: {api_response.get('error')}"
             
             if api_response.get('RESULT') == 1 or api_response.get('result') == 1:
-                whatsapp_msg = f"New Task Assigned:\n\nTask: {task_name}\nDue Date: {deadline}\n\nPlease complete on time."
+                whatsapp_msg = (
+                    f"New Task Assigned:\n\n"
+                    f"Task: {task_name}\n"
+                    f"Due Date: {deadline}\n\n"
+                    f"Please complete on time."
+                )
+
                 phone_id = os.getenv("PHONE_NUMBER_ID")
                 if not phone_id:
                     logger.error("PHONE_NUMBER_ID missing. WhatsApp notification skipped.")
                 else:
                     wa_status = send_registration_template(
-                        recipient_number=user['phone'], 
-                        customer_name=user['name'], 
+                        recipient_number=user.get("PHONE", ""),
+                        customer_name=user.get("NAME", "").title(),
                         phone_number_id=phone_id
                     )
+
                     if wa_status:
-                        logger.info(f"Template successfully sent to {user['name']}")
+                        logger.info(f"Template successfully sent to {user.get('NAME', '')}")
                     else:
-                        logger.error(f"Failed to send template to {user['name']}")
+                        logger.error(f"Failed to send template to {user.get('NAME', '')}")
 
-                    send_whatsapp_message(user['phone'], whatsapp_msg, phone_id)
+                    send_whatsapp_message(
+                        user.get("PHONE", ""),
+                        whatsapp_msg,
+                        phone_id
+                    )
+
                 email_subject = f"New Task Assigned: {task_name}"
-                email_body = f"""Dear {user['name'].title()},
-
-You have been assigned a new task:
-
-Task Name: {task_name}
-Due Date: {deadline}
-
-Please ensure timely completion.
-
-Best regards,
-Task Management System"""
-                send_email(user['email'], email_subject, email_body)
+                email_body = f"""Dear {user.get("NAME", "").title()},
+                You have been assigned a new task:
+                Task Name: {task_name}
+                Due Date: {deadline}
                 
+                Please ensure timely completion.
+                Best regards,
+                """
+
+                send_email(
+                    user.get("EMAIL", ""),
+                    email_subject,
+                    email_body
+                )
+
                 manager_subject = f"Task Assignment Confirmation: {task_name}"
                 manager_body = f"""Task Assignment Confirmed
 
-Assignee: {user['name'].title()}
-Task: {task_name}
-Due Date: {deadline}
+                Assignee: {user.get("NAME", "").title()}
+                Task: {task_name}
+                Due Date: {deadline}
 
-The task has been successfully assigned and the employee has been notified.
-
-Task Management System"""
+                The task has been successfully assigned and the employee has been notified.
+                """
                 send_email(MANAGER_EMAIL, manager_subject, manager_body)
                 
                 return f"Task successfully assigned to {user['name'].title()} (Login: {login_code}).\nNotifications sent via WhatsApp and email."
