@@ -294,6 +294,7 @@ class CreateTaskRequest(BaseModel):
     EXPECTED_END_DATE: str
     MANUAL_DIARY_NUMBER: str = "er3"
     REFERENCE: str = "WHATSAPP_TASK"
+    MOBILE_NUMBER: str
     NATURE_OF_COMPLAINT: str = "1"
     NOTICE_BEFORE: str = "4"
     NOTIFICATION: str = ""
@@ -860,6 +861,7 @@ async def assign_new_task_tool(
             DESCRIPTION=task_name,
             EXPECTED_END_DATE=formatted_deadline,
             TASK_NAME=task_name,
+            MOBILE_NUMBER=user["phone"][-10:],
             DETAILS=Details(CHILD=[DetailChild(
                 SEL="Y",
                 LOGIN=login_code,
