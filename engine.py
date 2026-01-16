@@ -293,6 +293,7 @@ class CreateTaskRequest(BaseModel):
     DESCRIPTION: str
     EXPECTED_END_DATE: str
     MANUAL_DIARY_NUMBER: str = "er3"
+    REFERENCE: str = "WHATSAPP_TASK"
     NATURE_OF_COMPLAINT: str = "1"
     NOTICE_BEFORE: str = "4"
     NOTIFICATION: str = ""
