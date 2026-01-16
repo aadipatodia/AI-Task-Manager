@@ -695,14 +695,51 @@ async def get_users_by_id_tool(ctx: RunContext[ManagerContext], id_value: str) -
         logger.error(f"get_users_by_id_tool error: {str(e)}", exc_info=True)
         return f"Error fetching user information: {str(e)}"
 
-async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Optional[str] = None) -> str:
-    """Generate performance report using API data (SID 616 for counts, SID 610 for task details)."""
+async def get_performance_report_tool(
+    ctx: RunContext[ManagerContext],
+    name: Optional[str] = None
+) -> str:
+    """
+    Generate performance report using API data
+    - SID 616 for counts
+    - SID 610 for task details
+    """
     try:
+        team = load_team()
+
+        # 🔒 Role check
         if not name and ctx.deps.role != "manager":
             return "Permission Denied: Only managers can view the full team report."
-        
+
+        # 🔹 Decide whose tasks to fetch in GET_TASKS
+        assignee_login = ""
+
+        if name:
+            matched = next(
+                (
+                    u for u in team
+                    if name.lower() in u["name"].lower()
+                    or name.lower() == u["login_code"].lower()
+                ),
+                None
+            )
+            if not matched:
+                return f"User '{name}' not found in directory."
+            assignee_login = matched["login_code"]
+
+        elif ctx.deps.role != "manager":
+            self_user = next(
+                (u for u in team if u["phone"] == ctx.deps.sender_phone),
+                None
+            )
+            if not self_user:
+                return "Unable to identify your profile."
+            assignee_login = self_user["login_code"]
+
+        # 🔹 Status filter
         status_filter = build_status_filter(ctx.deps.role)
 
+        # 🔹 Fetch tasks (SID 610)
         raw_tasks_data = await call_appsavy_api(
             "GET_TASKS",
             GetTasksRequest(
@@ -712,7 +749,7 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
                     "Parent": [
                         {"Control_Id": "106825", "Value": status_filter, "Data_Form_Id": ""},
                         {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
-                        {"Control_Id": "106827", "Value": login, "Data_Form_Id": ""},
+                        {"Control_Id": "106827", "Value": assignee_login, "Data_Form_Id": ""},
                         {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
                         {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
                         {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""}
@@ -720,45 +757,47 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
                 }]
             )
         )
+
         tasks_data = normalize_tasks_response(raw_tasks_data)
-        
-        team = load_team()
         now = ctx.deps.current_time
-        
+
+        # 🔹 Decide whose report to show
         if name:
-            display_team = [e for e in team if name.lower() in e['name'].lower() or name.lower() == e['login_code'].lower()]
-            if not display_team:
-                return f"User '{name}' not found in directory."
-        else:
+            display_team = [matched]
+        elif ctx.deps.role == "manager":
             display_team = team
-        
+        else:
+            display_team = [self_user]
+
         results = []
+
         for member in display_team:
-            login = member['login_code']
+            member_login = member["login_code"]
+
             try:
-                counts = await fetch_task_counts_api(login, ctx.deps.role)
-                
+                counts = await fetch_task_counts_api(member_login, ctx.deps.role)
+
                 member_tasks = [
                     t for t in tasks_data
-                    if isinstance(t, dict) and t.get("ASSIGNEE")==login
+                    if isinstance(t, dict) and t.get("ASSIGNEE") == member_login
                 ]
-                
+
                 within_time = 0
                 beyond_time = 0
                 closed_count = 0
-                
+
                 for task in member_tasks:
-                    status = str(task.get('STS', '')).lower()
+                    status = str(task.get("STS", "")).lower()
                     expected_date = task.get("EXPECTED_END_DATE")
 
-                    if status == 'closed':
+                    if status == "closed":
                         closed_count += 1
-
                     elif expected_date:
                         try:
                             expected = datetime.datetime.strptime(
-                            expected_date, "%m/%d/%Y %I:%M:%S %p"
-                        )
+                                expected_date,
+                                "%m/%d/%Y %I:%M:%S %p"
+                            )
                             if expected >= now:
                                 within_time += 1
                             else:
@@ -766,10 +805,15 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
                         except Exception:
                             within_time += 1
 
-                
-                assigned_count = counts.get('ASSIGNED_TASK', str(len(member_tasks)))
-                closed_from_api = counts.get('CLOSED_TASK', str(closed_count))
-                
+                assigned_count = counts.get(
+                    "ASSIGNED_TASK",
+                    str(len(member_tasks))
+                )
+                closed_from_api = counts.get(
+                    "CLOSED_TASK",
+                    str(closed_count)
+                )
+
                 results.append(
                     f"Name- {member['name'].title()}\n"
                     f"Task Assigned- Count of Task {assigned_count} Nos\n"
@@ -778,21 +822,26 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
                     f"Within time: {within_time}\n"
                     f"Beyond time: {beyond_time}"
                 )
+
             except Exception as member_error:
-                logger.error(f"Error processing report for {member['name']}: {str(member_error)}", exc_info=True)
+                logger.error(
+                    f"Error processing report for {member['name']}",
+                    exc_info=True
+                )
                 results.append(
                     f"Name- {member['name'].title()}\n"
                     f"Error: Unable to fetch report data"
                 )
-        
+
         if not results:
             return "No team members found for reporting."
-        
+
         return "\n\n".join(results)
-        
+
     except Exception as e:
-        logger.error(f"get_performance_report_tool error: {str(e)}", exc_info=True)
+        logger.error("get_performance_report_tool error", exc_info=True)
         return f"Error generating performance report: {str(e)}"
+
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
     try:
