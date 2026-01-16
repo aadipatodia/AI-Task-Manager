@@ -20,21 +20,17 @@ from google_auth_oauthlib.flow import Flow
 import asyncio
 from send_message import send_registration_template
 
-# Load environment variables from .env file
 load_dotenv()
 
-# --- LOGGING CONFIGURATION ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- GMAIL & OAUTH CONSTANTS ---
 SCOPES = ['https://www.googleapis.com/auth/gmail.send']
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-38w7.onrender.com/oauth2callback")
 MANAGER_EMAIL = "patodiaaadi@gmail.com"
 
 conversation_history: Dict[str, List[Any]] = {}
 
-# --- API CONFIGURATION (100% Dependency) ---
 APPSAVY_BASE_URL = "https://configapps.appsavy.com/api/AppsavyRestService"
 
 API_CONFIGS = {
@@ -97,18 +93,52 @@ API_CONFIGS = {
             "roleid": "1627",
             "TokenKey": "75c6ec2e-9f9c-48fa-be24-d8eb612f4c03"
         }
+    },
+    "GET_USERS_BY_ID": {
+        "url": f"{APPSAVY_BASE_URL}/GetDataJSONClient",
+        "headers": {
+            "sid": "609",
+            "pid": "309",
+            "fid": "10344",
+            "cid": "64",
+            "uid": "TM_API",
+            "roleid": "1627",
+            "TokenKey": "d23e5874-ba53-4490-941f-0c70b25f6f56"
+        }
+    },
+    "WHATSAPP_PDF_REPORT": {
+        "url": f"{APPSAVY_BASE_URL}/PushdataJSONClient",
+        "headers": {
+            "sid": "627",
+            "pid": "309",
+            "fid": "13574",
+            "cid": "64",
+            "uid": "TM_API",
+            "roleid": "1627",
+            "TokenKey": "dea16c4c-bf19-423f-a567-c2c265c7dd22"
+        }
     }
 }
 
-# --- PYDANTIC AI AGENT INITIALIZATION ---
 ai_model = GeminiModel('gemini-2.0-flash-exp')
 
 class ManagerContext(BaseModel):
     sender_phone: str
     role: str
     current_time: datetime.datetime = Field(default_factory=datetime.datetime.now)
+    
+class WhatsAppPdfReportRequest(BaseModel):
+    SID: str = "627"
+    ASSIGNED_TO: str
+    REPORT_TYPE: str  # Count / Detail
+    STATUS: str
+    MOBILE_NUMBER: str
+    FROM_DATE: str = ""
+    TO_DATE: str = ""
+    ASSIGNED_BY: str = ""
+    REFERENCE: str = ""
 
-# --- ENHANCED SYSTEM PROMPT FOR NATURAL CONVERSATION ---
+
 def get_system_prompt(current_time: datetime.datetime) -> str:
     team = load_team()
     team_description = "\n".join([f"- {u['name']} (Login: {u['login_code']})" for u in team])
@@ -146,18 +176,21 @@ Current Time: {current_time_str}
 * **Name Resolution**: Map names to login IDs from team directory
 
 ### TASK STATUS WORKFLOW:
-1. **Pending** - Initial state when task is created
+1. **Pending** - Task is still open and not completed
 2. **Work Done** - Employee uses 'reported' action
 3. **Completed** - Manager uses 'close' action to approve
 
 **Status Actions:**
-- 'open' → "Open" (employee marks task as acknowledged/started)
+- 'pending' → "Open" (task not completed)
+- 'open' → "Open"
 - 'partial' → "Partially Closed" (work in progress)
 - 'reported' → "Reported Closed" (employee marks as done, awaits approval)
 
 **Role Permissions:**
-- Employees: Can mark tasks as 'partial' or 'reported' only
+- Employees: Can mark tasks as 'pending' (open), 'partial' (in progress), or 'reported' (completed by employee)
 - Managers: Can 'close' (approve) or 'reopen' (reject) tasks
+
+When updating task status, extract any additional text from the user's message as a remark and pass it in the COMMENTS field.
 
 ### PERFORMANCE REPORTING:
 When user asks about performance, pending tasks, statistics, reports, or task counts:
@@ -184,6 +217,17 @@ Support assignment using phone numbers:
 - Extract 10-digit number or full format
 - Use 'assign_task_by_phone_tool'
 
+### USER LOOKUP:
+When asked about users in a group or specific user details:
+- Use 'get_users_by_id_tool' with group ID or user ID
+- Group IDs start with 'G-' (e.g., G-10343-41)
+- User IDs start with 'D-' (e.g., D-3514-1001)
+
+### ASSIGNEE LOOKUP:
+When needing to list all available assignees:
+- Use 'get_assignee_list_tool'
+- Returns all users who can be assigned tasks
+
 ### DOCUMENT HANDLING:
 - When file received without task details: Ask for assignee name, task description, and deadline
 - When file received with partial info: Ask for missing details
@@ -204,11 +248,17 @@ Employees can always view their own tasks
 - Ask clarifying questions when needed
 - Confirm critical actions before executing
 
+### WHATSAPP PDF REPORTS:
+When user asks to send, share, or receive a report on WhatsApp:
+- Use 'send_whatsapp_report_tool'
+- REPORT_TYPE: "Count" or "Detail"
+- STATUS examples: Open, Closed, Reported Closed
+- If no assignee specified, send report for requesting user
+
 ### IMPORTANT:
 - Ignore WhatsApp headers like '[7:03 pm, 13/1/2026] ABC:' and focus only on the text after the colon.
 """
 
-# --- AUTHORIZED TEAM CONFIGURATION ---
 def load_team():
     """Static team directory - source of truth for authentication and name resolution."""
     return [
@@ -270,6 +320,14 @@ class GetCountRequest(BaseModel):
     Event: str = "107567"
     Child: List[Dict]
 
+class GetAssigneeRequest(BaseModel):
+    Event: str = "0"
+    Child: List[Dict]
+
+class GetUsersByIdRequest(BaseModel):
+    Event: str = "107018"
+    Child: List[Dict]
+
 def get_gmail_service():
     """Initialize Gmail API service with OAuth2 credentials from environment variables."""
     try:
@@ -291,11 +349,27 @@ def get_gmail_service():
 
 def build_status_filter(role: str) -> str:
     if role == "manager":
-        # Manager sees only managerial-relevant states
         return "Open,Closed,Reopened"
     else:
-        # Employee sees only employee-actionable states
         return "Open,Partially Closed,Reported Closed"
+
+def normalize_status_for_report(status: str) -> str:
+    report_status_map = {
+        "open": "Open",
+        "pending": "Open",
+
+        "partial": "Partially Closed",
+        "in progress": "Partially Closed",
+
+        "reported": "Reported Closed",
+
+        # user usually means final completion
+        "completed": "Closed",
+        "done": "Closed",
+        "closed": "Closed"
+    }
+
+    return report_status_map.get(status.lower(), status)
 
 
 def send_email(to_email: str, subject: str, body: str) -> bool:
@@ -324,9 +398,7 @@ def send_email(to_email: str, subject: str, body: str) -> bool:
         return False
 
 def normalize_tasks_response(tasks_data):
-    """
-    Normalize Appsavy GET_TASKS response to always return a list
-    """
+    """Normalize Appsavy GET_TASKS response to always return a list"""
     if isinstance(tasks_data, dict):
         return tasks_data.get("data", {}).get("Result", [])
     if isinstance(tasks_data, list):
@@ -334,9 +406,7 @@ def normalize_tasks_response(tasks_data):
     return []
 
 def normalize_task(task: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Normalize Appsavy task object to internal standard keys
-    """
+    """Normalize Appsavy task object to internal standard keys"""
     return {
         "task_id": task.get("TID"),
         "task_name": task.get("COMMENTS"),
@@ -346,8 +416,6 @@ def normalize_task(task: Dict[str, Any]) -> Dict[str, Any]:
         "task_type": task.get("TASK_TYPE")
     }
 
-
-# --- REST API HELPERS ---
 async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
     """Universal wrapper for Appsavy POST requests - 100% API dependency."""
     config = API_CONFIGS[key]
@@ -356,10 +424,10 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
         
         res = await asyncio.to_thread(
             requests.post,
-        config["url"],
-        headers=config["headers"],
-        json=payload.model_dump(),
-        timeout=15
+            config["url"],
+            headers=config["headers"],
+            json=payload.model_dump(),
+            timeout=15
         )
         
         logger.info(f"API {key} response status: {res.status_code}")
@@ -393,7 +461,6 @@ async def fetch_task_counts_api(login_code: str):
             {"Control_Id": "108512", "Value": "", "Data_Form_Id": ""}
         ]
     }])
-
     
     try:
         res = await call_appsavy_api("GET_COUNT", req)
@@ -445,13 +512,185 @@ def download_and_encode_document(document_data: Dict):
         logger.error(f"Document download failed: {str(e)}")
         return None
 
-# --- AGENT TOOLS (Will be registered dynamically) ---
+# --- NEW TOOLS ---
+
+async def send_whatsapp_report_tool(
+    ctx: RunContext[ManagerContext],
+    report_type: str,
+    status: str,
+    assigned_to: Optional[str] = None
+) -> str:
+    """
+    Sends WhatsApp PDF report using SID 627.
+    """
+    try:
+        team = load_team()
+
+        # Resolve user
+        if assigned_to:
+            user = next(
+                (u for u in team if assigned_to.lower() in u["name"].lower()
+                 or assigned_to == u["login_code"]),
+                None
+            )
+            if not user:
+                return f"User '{assigned_to}' not found."
+        else:
+            user = next((u for u in team if u["phone"] == ctx.deps.sender_phone), None)
+
+        if not user:
+            return "Unable to resolve user for report."
+
+        req = WhatsAppPdfReportRequest(
+            ASSIGNED_TO=user["login_code"],
+        REPORT_TYPE=report_type,
+        STATUS=normalize_status_for_report(status),
+        MOBILE_NUMBER=user["phone"][-10:]
+        )
+
+
+
+        api_response = await call_appsavy_api("WHATSAPP_PDF_REPORT", req)
+
+        if not api_response:
+            return "Failed to generate WhatsApp report."
+
+        if isinstance(api_response, dict) and api_response.get("error"):
+            return f"API Error: {api_response['error']}"
+
+        return (
+            f"WhatsApp PDF report sent successfully.\n"
+            f"Report Type: {report_type}\n"
+            f"Status: {status}"
+        )
+
+    except Exception as e:
+        logger.error("send_whatsapp_report_tool error", exc_info=True)
+        return f"Error sending WhatsApp report: {str(e)}"
+
+
+async def get_assignee_list_tool(ctx: RunContext[ManagerContext]) -> str:
+    """
+    Retrieves list of all assignees/users available in the system using SID 606.
+    Returns formatted list with Login IDs and Names.
+    """
+    try:
+        req = GetAssigneeRequest(
+            Event="0",
+            Child=[{
+                "Control_Id": "106771",
+                "AC_ID": "111057"
+            }]
+        )
+        
+        api_response = await call_appsavy_api("GET_ASSIGNEE", req)
+        
+        if not api_response:
+            return "Error: Unable to fetch assignee list from API."
+        
+        if isinstance(api_response, dict) and "error" in api_response:
+            return f"API Error: {api_response['error']}"
+        
+        assignees = []
+        if isinstance(api_response, list):
+            for item in api_response:
+                if isinstance(item, dict):
+                    login_id = item.get("LOGIN_ID") or item.get("ID")
+                    name = item.get("NAME") or item.get("PARTICIPANT_NAME")
+                    if login_id and name:
+                        assignees.append(f"{name} (ID: {login_id})")
+        
+        if not assignees:
+            return "No assignees found in the system."
+        
+        return "Available Assignees:\n" + "\n".join(assignees)
+        
+    except Exception as e:
+        logger.error(f"get_assignee_list_tool error: {str(e)}", exc_info=True)
+        return f"Error fetching assignee list: {str(e)}"
+
+async def get_users_by_id_tool(ctx: RunContext[ManagerContext], id_value: str) -> str:
+    """
+    Retrieves user information by Group ID (G-XXXX-XX) or User ID (D-XXXX-XXXX).
+    
+    Args:
+        id_value: Group ID starting with 'G-' or User ID starting with 'D-'
+    
+    Returns:
+        Formatted user information
+    """
+    try:
+        if not (id_value.startswith('G-') or id_value.startswith('D-')):
+            return "Error: ID must start with 'G-' (Group) or 'D-' (User). Example: G-10343-41 or D-3514-1001"
+        
+        req = GetUsersByIdRequest(
+            Event="107018",
+            Child=[{
+                "Control_Id": "107019",
+                "AC_ID": "111271",
+                "Parent": [{
+                    "Control_Id": "106771",
+                    "Value": id_value,
+                    "Data_Form_Id": ""
+                }]
+            }]
+        )
+        
+        api_response = await call_appsavy_api("GET_USERS_BY_ID", req)
+        
+        if not api_response:
+            return f"Error: Unable to fetch information for ID '{id_value}'."
+        
+        if isinstance(api_response, dict) and "error" in api_response:
+            return f"API Error: {api_response['error']}"
+        
+        users = []
+        if isinstance(api_response, list):
+            for item in api_response:
+                if isinstance(item, dict):
+                    user_id = item.get("USER_ID") or item.get("LOGIN_ID") or item.get("ID")
+                    name = item.get("NAME") or item.get("USER_NAME")
+                    email = item.get("EMAIL")
+                    phone = item.get("PHONE") or item.get("MOBILE")
+                    
+                    user_info = f"Name: {name}"
+                    if user_id:
+                        user_info += f"\nUser ID: {user_id}"
+                    if email:
+                        user_info += f"\nEmail: {email}"
+                    if phone:
+                        user_info += f"\nPhone: {phone}"
+                    
+                    users.append(user_info)
+        elif isinstance(api_response, dict):
+            user_id = api_response.get("USER_ID") or api_response.get("LOGIN_ID")
+            name = api_response.get("NAME") or api_response.get("USER_NAME")
+            email = api_response.get("EMAIL")
+            phone = api_response.get("PHONE") or api_response.get("MOBILE")
+            
+            user_info = f"Name: {name}"
+            if user_id:
+                user_info += f"\nUser ID: {user_id}"
+            if email:
+                user_info += f"\nEmail: {email}"
+            if phone:
+                user_info += f"\nPhone: {phone}"
+            
+            users.append(user_info)
+        
+        if not users:
+            return f"No users found for ID '{id_value}'."
+        
+        result = f"User Information for {id_value}:\n\n"
+        result += "\n\n".join(users)
+        return result
+        
+    except Exception as e:
+        logger.error(f"get_users_by_id_tool error: {str(e)}", exc_info=True)
+        return f"Error fetching user information: {str(e)}"
+
 async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Optional[str] = None) -> str:
-    """
-    Generate performance report using API data (SID 616 for counts, SID 610 for task details).
-    Without name: Report for ALL employees (Manager only)
-    With name: Report for specific employee
-    """
+    """Generate performance report using API data (SID 616 for counts, SID 610 for task details)."""
     try:
         if not name and ctx.deps.role != "manager":
             return "Permission Denied: Only managers can view the full team report."
@@ -465,36 +704,12 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
                     "Control_Id": "106831",
                     "AC_ID": "110803",
                     "Parent": [
-                        {
-                            "Control_Id": "106825",
-                            "Value": status_filter,
-                            "Data_Form_Id": ""
-                        },
-                        {
-                            "Control_Id": "106824",
-                            "Value": "",
-                            "Data_Form_Id": ""
-                        },
-                        {
-                            "Control_Id": "106827",
-                            "Value": "",
-                            "Data_Form_Id": ""
-                        },
-                        {
-                            "Control_Id": "106829",
-                            "Value": "",
-                            "Data_Form_Id": ""
-                        },
-                        {
-                            "Control_Id": "107046",
-                            "Value": "",
-                            "Data_Form_Id": ""
-                        },
-                        {
-                            "Control_Id": "107809",
-                            "Value": "0",
-                            "Data_Form_Id": ""
-                        }
+                        {"Control_Id": "106825", "Value": status_filter, "Data_Form_Id": ""},
+                        {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
+                        {"Control_Id": "106827", "Value": "", "Data_Form_Id": ""},
+                        {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
+                        {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
+                        {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""}
                     ]
                 }]
             )
@@ -519,9 +734,8 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
                 
                 member_tasks = [
                     t for t in tasks_data
-                    if isinstance(t, dict) and t.get("REPORTER", "").upper() == "TM_API"
+                    if isinstance(t, dict) and t.get("ASSIGNEE")==login
                 ]
-
                 
                 within_time = 0
                 beyond_time = 0
@@ -529,15 +743,22 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
                 
                 for task in member_tasks:
                     status = str(task.get('STS', '')).lower()
-                    
+                    expected_date = task.get("EXPECTED_END_DATE")
+
                     if status == 'closed':
                         closed_count += 1
-                    elif status in ['open', 'pending', 'partially closed', 'reported closed', 'reopened', '']:
+
+                    elif expected_date:
                         try:
+                            expected = datetime.datetime.fromisoformat(expected_date.split('T')[0])
+
+                            if expected >= now:
+                                within_time += 1
+                            else:
+                                beyond_time += 1
+                        except Exception:
                             within_time += 1
-                        except Exception as date_error:
-                            logger.warning(f"Date parsing error for task {task['task_id']}: {date_error}")
-                            within_time += 1
+
                 
                 assigned_count = counts.get('ASSIGNED_TASK', str(len(member_tasks)))
                 closed_from_api = counts.get('CLOSED_TASK', str(closed_count))
@@ -568,7 +789,6 @@ async def get_performance_report_tool(ctx: RunContext[ManagerContext], name: Opt
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
     try:
-        # 1. Identify employee from WhatsApp number
         team = load_team()
         user = next((u for u in team if u["phone"] == ctx.deps.sender_phone), None)
 
@@ -577,7 +797,6 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
 
         login_code = user["login_code"]
 
-        # 2. Call Appsavy EXACTLY as their working curl
         raw_tasks_data = await call_appsavy_api(
             "GET_TASKS",
             GetTasksRequest(
@@ -602,7 +821,6 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
         if not tasks:
             return "No tasks assigned to you."
 
-        # 3. Format response
         output = f"Tasks assigned to you ({user['name'].title()}):\n\n"
         for t in tasks:
             output += (
@@ -618,18 +836,13 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
         logger.error(f"get_task_list_tool error: {str(e)}", exc_info=True)
         return "Error fetching your tasks."
 
-
 async def assign_new_task_tool(
     ctx: RunContext[ManagerContext],
     name: str,
     task_name: str,
     deadline: str
 ) -> str:
-    """
-    Assigns new task via API (SID 604).
-    Sends WhatsApp notification to employee.
-    Sends email to both employee and manager.
-    """
+    """Assigns new task via API (SID 604). Sends WhatsApp and email notifications."""
     try:
         team = load_team()
         
@@ -638,9 +851,7 @@ async def assign_new_task_tool(
             return f"Error: User '{name}' not found in directory."
         
         login_code = user['login_code']
-        
         formatted_deadline = deadline.split('T')[0] if 'T' in deadline else deadline
-        
         doc_payload = Documents(CHILD=[])
         
         req = CreateTaskRequest(
@@ -749,12 +960,7 @@ async def assign_task_by_phone_tool(
         logger.error(f"assign_task_by_phone_tool error: {str(e)}", exc_info=True)
         return f"Error assigning task by phone: {str(e)}"
 
-async def update_task_status_tool(
-    ctx: RunContext[ManagerContext],
-    task_id: str,
-    action: str,
-    remark: Optional[str] = None
-) -> str:
+async def update_task_status_tool(ctx: RunContext[ManagerContext], task_id: str, action: str, remark: Optional[str] = None) -> str:
 
     """
     Updates task status via API (SID 607).
@@ -766,37 +972,56 @@ async def update_task_status_tool(
             "pending": "Open",
             "open": "Open",
 
-    # task in progress
+            # task in progress
             "in progress": "Partially Closed",
             "partial": "Partially Closed",
             "working": "Partially Closed",
 
-    # task completed by employee
+            # task completed by employee
             "completed": "Reported Closed",
             "done": "Reported Closed",
             "reported": "Reported Closed",
 
-    # manager only
+            # manager only
             "close": "Closed",
             "reopen": "Reopened"
-}
+        }
+
 
         
         new_status = status_map.get(action.lower())
         if not new_status:
-            return f"Error: Invalid action. Use: open, partial, reported, close, reopen"
+            return "Error: Could not understand the requested task status."
+
         
-        if action.lower() in ["close", "reopen"] and ctx.deps.role != "manager":
-            return "Permission Denied: Only managers can Close or Reopen tasks."
-        elif action.lower() in ["open", "partial", "reported"] and ctx.deps.role != "employee":
-            return "Note: These statuses are restricted to assigned employees."
+        employee_statuses = {
+            "Open",
+            "Partially Closed",
+            "Reported Closed"
+        }
+
+        manager_statuses = {
+            "Closed",
+            "Reopened"
+        }
+
+        if new_status in manager_statuses and ctx.deps.role != "manager":
+            return "Permission Denied: Only managers can perform this action."
+
+        if new_status in employee_statuses and ctx.deps.role != "employee":
+            return "Permission Denied: Only employees can update task progress."
+
         
         team = load_team()
         user = next((u for u in team if u['phone'] == ctx.deps.sender_phone), None)
         if not user:
             return "Error: Could not identify your user profile."
         
-        req = UpdateTaskRequest(TASK_ID=task_id, STATUS=new_status, COMMENTS=remark or "Updated by employee")
+        req = UpdateTaskRequest(
+            TASK_ID=task_id,
+            STATUS=new_status,
+            COMMENTS=remark or "Updated by employee"
+        )
         
         api_response = await call_appsavy_api("UPDATE_STATUS", req)
         
@@ -862,6 +1087,10 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 current_agent.tool(assign_new_task_tool)
                 current_agent.tool(assign_task_by_phone_tool)
                 current_agent.tool(update_task_status_tool)
+                current_agent.tool(get_assignee_list_tool)
+                current_agent.tool(get_users_by_id_tool)
+                current_agent.tool(send_whatsapp_report_tool)
+
             
                 result = await current_agent.run(
                     command,
