@@ -882,7 +882,7 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
                 try:
                     deadline = datetime.datetime.strptime(
                         deadline_raw, "%m/%d/%Y %I:%M:%S %p"
-                    ).strftime("%d-%b-%Y")
+                    ).strftime("%d-%b-%Y  %I:%M %p")
                 except Exception:
                     deadline = deadline_raw
 
@@ -1095,8 +1095,9 @@ async def update_task_status_tool(ctx: RunContext[ManagerContext], task_id: str,
             "Reopened"
         }
 
-        if new_status in manager_statuses and ctx.deps.role != "manager":
-            return "Permission Denied: Only managers can perform this action."
+        if new_status == "Closed" and ctx.deps.role != "manager":
+            return "Permission Denied: Only managers can close tasks."
+
 
         if new_status in {"Closed", "Reopened"} and ctx.deps.role != "manager":
             return "Permission Denied: Only managers can perform this action."
