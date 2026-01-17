@@ -992,9 +992,9 @@ async def assign_new_task_tool(
                     )
 
                     if wa_status:
-                        logger.info(f"Template successfully sent to {user["name"]}")
+                        logger.info(f"Template successfully sent to {user['name']}")
                     else:
-                        logger.error(f"Failed to send template to {user["name"]}")
+                        logger.error(f"Failed to send template to {user['name']}")
 
                     send_whatsapp_message(
                         user["phone"],
@@ -1003,11 +1003,12 @@ async def assign_new_task_tool(
                     )
 
                 email_subject = f"New Task Assigned: {task_name}"
-                email_body = f"""Dear {user.get("NAME", "").title()},
+                email_body = f"""Dear {user["name"].title()},
                 You have been assigned a new task:
+
                 Task Name: {task_name}
                 Due Date: {deadline}
-                
+
                 Please ensure timely completion.
                 Best regards,
                 """
@@ -1021,14 +1022,16 @@ async def assign_new_task_tool(
                 manager_subject = f"Task Assignment Confirmation: {task_name}"
                 manager_body = f"""Task Assignment Confirmed
 
-                Assignee: {user["name"].title()}                Task: {task_name}
+                Assignee: {user["name"].title()}
+                Task: {task_name}
                 Due Date: {deadline}
 
                 The task has been successfully assigned and the employee has been notified.
                 """
+
                 send_email(MANAGER_EMAIL, manager_subject, manager_body)
-                
                 return f"Task successfully assigned to {user['name'].title()} (Login: {login_code}).\nNotifications sent via WhatsApp and email."
+
             else:
                 return f"API returned unexpected response: {api_response}"
         
