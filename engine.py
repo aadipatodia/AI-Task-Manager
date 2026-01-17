@@ -34,6 +34,20 @@ conversation_history: Dict[str, List[Any]] = {}
 APPSAVY_BASE_URL = "https://configapps.appsavy.com/api/AppsavyRestService"
 
 API_CONFIGS = {
+    "ADD_DELETE_USER":{
+        "url": f"{APPSAVY_BASE_URL}/PushdataJSONClient",
+        "headers": {
+            "sid": "629",
+            "pid": "309",
+            "fid": "13580",
+            "cid": "64",
+            "uid": "TM_API",
+            "roleid": "1627",
+            "TokenKey": "799f57e5-af33-4341-9c0f-4c0f42ac9f79"
+        
+        }
+    },
+      
     "CREATE_TASK": {
         "url": f"{APPSAVY_BASE_URL}/PushdataJSONClient",
         "headers": {
@@ -307,8 +321,8 @@ class CreateTaskRequest(BaseModel):
     PRIORTY_TASK: str = "N"
     REFERENCE_LETTER_NUMBER: str = "001"
     TYPE: str = "Days"
-    DETAILS: Details             
-    DOCUMENTS: Documents
+    DETAILS: Details = Details(CHILD=[])
+    DOCUMENTS: Documents = Documents(CHILD=[])
 
 
 class GetTasksRequest(BaseModel):
@@ -334,6 +348,55 @@ class GetAssigneeRequest(BaseModel):
 class GetUsersByIdRequest(BaseModel):
     Event: str = "107018"
     Child: List[Dict]
+
+class AddDeleteUserRequest(BaseModel):
+    SID: str = "629"
+    ACTION: str            # "Add" or "Delete"
+    CREATOR_MOBILE_NUMBER: str
+    EMAIL: str
+    MOBILE_NUMBER: str
+    NAME: str
+
+async def add_user_tool(
+    ctx: RunContext[ManagerContext],
+    name: str,
+    email: str,
+    mobile: str
+) -> str:
+    req = AddDeleteUserRequest(
+        ACTION="Add",
+        CREATOR_MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
+        NAME=name,
+        EMAIL=email,
+        MOBILE_NUMBER=mobile[-10:]
+    )
+
+    res = await call_appsavy_api("ADD_DELETE_USER", req)
+
+    if isinstance(res, dict) and (res.get("RESULT") == 1 or res.get("result") == 1):
+
+        return f"User {name} added successfully."
+    return f"Failed to add user: {res}"
+
+async def delete_user_tool(
+    ctx: RunContext[ManagerContext],
+    name: str,
+    email: str,
+    mobile: str
+) -> str:
+    req = AddDeleteUserRequest(
+        ACTION="Delete",
+        CREATOR_MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
+        NAME=name,
+        EMAIL=email,
+        MOBILE_NUMBER=mobile[-10:]
+    )
+
+    res = await call_appsavy_api("ADD_DELETE_USER", req)
+
+    if isinstance(res, dict) and (res.get("RESULT") == 1 or res.get("result") == 1):
+        return f"User {name} deleted successfully."
+    return f"Failed to delete user: {res}"
 
 def get_gmail_service():
     """Initialize Gmail API service with OAuth2 credentials from environment variables."""
@@ -1215,7 +1278,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 dynamic_prompt = get_system_prompt(current_time)
             
                 current_agent = Agent(ai_model, deps_type=ManagerContext, system_prompt=dynamic_prompt)
-            
+                
                 current_agent.tool(get_performance_report_tool)
                 current_agent.tool(get_task_list_tool)
                 current_agent.tool(assign_new_task_tool)
@@ -1224,6 +1287,9 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 current_agent.tool(get_assignee_list_tool)
                 current_agent.tool(get_users_by_id_tool)
                 current_agent.tool(send_whatsapp_report_tool)
+                current_agent.tool(add_user_tool)
+                current_agent.tool(delete_user_tool)
+
 
             
                 result = await current_agent.run(
