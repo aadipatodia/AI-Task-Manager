@@ -776,11 +776,7 @@ async def get_performance_report_tool(
             try:
                 counts = await fetch_task_counts_api(member_login, ctx.deps.role)
 
-                member_tasks = [
-                    t for t in tasks_data
-                    if isinstance(t, dict) and t.get("ASSIGNEE") == member_login
-                ]
-
+                member_tasks = tasks_data
                 within_time = 0
                 beyond_time = 0
                 closed_count = 0
@@ -876,7 +872,7 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
         if not tasks:
             return "No tasks assigned to you."
 
-        deadline_raw = t.get("EXPECTED_END_DATE")
+        deadline_raw = tasks.get("EXPECTED_END_DATE")
         deadline = ""
 
         if deadline_raw:
@@ -888,12 +884,13 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
                 deadline = deadline_raw
 
         output += (
-            f"ID: {t.get('TID')}\n"
-            f"Task: {t.get('COMMENTS')}\n"
-            f"Assigned On: {t.get('ASSIGN_DATE')}\n"
+            f"ID: {tasks.get('TID')}\n"
+            f"Task: {tasks.get('COMMENTS')}\n"
+            f"Assigned On: {tasks.get('ASSIGN_DATE')}\n"
             f"Deadline: {deadline}\n"
-            f"Status: {t.get('STS')}\n\n"
+            f"Status: {tasks.get('STS')}\n\n"
         )
+
         return output.strip()
 
     except Exception as e:
@@ -1099,8 +1096,8 @@ async def update_task_status_tool(ctx: RunContext[ManagerContext], task_id: str,
         if new_status in manager_statuses and ctx.deps.role != "manager":
             return "Permission Denied: Only managers can perform this action."
 
-        if new_status in employee_statuses and ctx.deps.role != "employee":
-            return "Permission Denied: Only employees can update task progress."
+        if new_status in {"Closed", "Reopened"} and ctx.deps.role != "manager":
+            return "Permission Denied: Only managers can perform this action."
 
         
         team = load_team()
