@@ -292,19 +292,21 @@ class CreateTaskRequest(BaseModel):
     ASSIGNEE: str
     DESCRIPTION: str
     EXPECTED_END_DATE: str
-    MANUAL_DIARY_NUMBER: str = "er3"
-    REFERENCE: str = "WHATSAPP_TASK"
-    MOBILE_NUMBER: str
+    TASK_NAME: str
+    MOBILE_NUMBER: str              
+    TASK_SOURCE: str = "Whatsapp"   
+    REFERENCE: str = "WHATSAPP_TASK" 
+    MANUAL_DIARY_NUMBER: str = "121"
     NATURE_OF_COMPLAINT: str = "1"
     NOTICE_BEFORE: str = "4"
     NOTIFICATION: str = ""
-    ORIGINAL_LETTER_NUMBER: str = "32"
+    ORIGINAL_LETTER_NUMBER: str = "22"
     PRIORTY_TASK: str = "N"
-    REFERENCE_LETTER_NUMBER: str = "334"
-    TASK_NAME: str
-    TYPE: str = "TYPE"
-    DETAILS: Details
+    REFERENCE_LETTER_NUMBER: str = "001"
+    TYPE: str = "Days"
+    DETAILS: Details             
     DOCUMENTS: Documents
+
 
 class GetTasksRequest(BaseModel):
     Event: str = "106830"
@@ -372,6 +374,14 @@ def normalize_status_for_report(status: str) -> str:
     }
 
     return report_status_map.get(status.lower(), status)
+
+def to_appsavy_datetime(iso_dt: str) -> str:
+    """
+    Converts ISO datetime (YYYY-MM-DDTHH:MM:SS)
+    to Appsavy format: YYYY-MM-DD HH:MM:SS.mmm
+    """
+    dt = datetime.datetime.fromisoformat(iso_dt)
+    return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
 def send_email(to_email: str, subject: str, body: str) -> bool:
@@ -601,7 +611,7 @@ async def get_assignee_list_tool(ctx: RunContext[ManagerContext]) -> str:
             for item in api_response:
                 if isinstance(item, dict):
                     login_id = item.get("LOGIN_ID") or item.get("ID")
-                    name = item.get("NAME") or item.get("PARTICIPANT_NAME")
+                    name = item.get("name") or item.get("PARTICIPANT_NAME")
                     if login_id and name:
                         assignees.append(f"{name} (ID: {login_id})")
         
@@ -654,9 +664,9 @@ async def get_users_by_id_tool(ctx: RunContext[ManagerContext], id_value: str) -
             for item in api_response:
                 if isinstance(item, dict):
                     user_id = item.get("USER_ID") or item.get("LOGIN_ID") or item.get("ID")
-                    name = item.get("NAME") or item.get("USER_NAME")
-                    email = item.get("EMAIL")
-                    phone = item.get("PHONE") or item.get("MOBILE")
+                    name = item.get("name") or item.get("USER_NAME")
+                    email = item.get("email")
+                    phone = item.get("phone") or item.get("MOBILE")
                     
                     user_info = f"Name: {name}"
                     if user_id:
@@ -669,9 +679,9 @@ async def get_users_by_id_tool(ctx: RunContext[ManagerContext], id_value: str) -
                     users.append(user_info)
         elif isinstance(api_response, dict):
             user_id = api_response.get("USER_ID") or api_response.get("LOGIN_ID")
-            name = api_response.get("NAME") or api_response.get("USER_NAME")
-            email = api_response.get("EMAIL")
-            phone = api_response.get("PHONE") or api_response.get("MOBILE")
+            name = api_response.get("name") or api_response.get("USER_NAME")
+            email = api_response.get("email")
+            phone = api_response.get("phone") or api_response.get("MOBILE")
             
             user_info = f"Name: {name}"
             if user_id:
@@ -882,7 +892,7 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
                 try:
                     deadline = datetime.datetime.strptime(
                         deadline_raw, "%m/%d/%Y %I:%M:%S %p"
-                    ).strftime("%d-%b-%Y  %I:%M %p")
+                    ).strftime("%d-%b-%Y %I:%M %p")
                 except Exception:
                     deadline = deadline_raw
 
@@ -916,31 +926,36 @@ async def assign_new_task_tool(
     try:
         # Step 1: Resolve Name/ID using the GET_USERS_BY_ID API (SID 609)
         # This handles both individual IDs (D-...) and Group IDs (G-...) 
-        lookup_req = GetUsersByIdRequest(
-            Child=[{"Control_Id": "107019", "AC_ID": "111271", 
-                    "Parent": [{"Control_Id": "106771", "Value": name, "Data_Form_Id": ""}]}]
+        team = load_team()
+        user_info = next(
+            (u for u in team if name.lower() in u["name"].lower()),
+            None
         )
-        user_info = await call_appsavy_api("GET_USERS_BY_ID", lookup_req)
-        
+
+        if not user_info:
+            return f"User '{name}' not found in authorized directory."
+        user = user_info
+        login_code = user["login_code"]
+
+
         if not user_info or (isinstance(user_info, dict) and "error" in user_info):
             return f"Error: Could not find user or group '{name}' in the system."
-
-        # Extract the resolved Login ID (e.g., D-3514-1001) 
-        user = user_info[0] if isinstance(user_info, list) else user_info
-        login_code = user.get("LOGIN_ID") or user.get("USER_ID")
         
         # Step 2: Proceed to Create Task (SID 604) using the resolved code [cite: 80]
         req = CreateTaskRequest(
             ASSIGNEE=login_code,
             DESCRIPTION=task_name,
-            EXPECTED_END_DATE=deadline.split('T'," "),
             TASK_NAME=task_name,
-            MOBILE_NUMBER=user.get("PHONE", ""),
-            DETAILS=Details(CHILD=[DetailChild(
-                SEL="Y",
-                LOGIN=login_code,
-                PARTICIPANTS=user.get("NAME", "USER").upper()
-            )]),
+            EXPECTED_END_DATE=to_appsavy_datetime(deadline),
+            MOBILE_NUMBER=user["phone"][-10:],
+            DETAILS=Details(
+                CHILD=[DetailChild(
+                    SEL="Y",
+                    LOGIN=login_code,
+                    PARTICIPANTS=user["name"].upper()
+                )]
+            ),
+
             DOCUMENTS=Documents(CHILD=[])
         )
         
@@ -971,18 +986,18 @@ async def assign_new_task_tool(
                     logger.error("PHONE_NUMBER_ID missing. WhatsApp notification skipped.")
                 else:
                     wa_status = send_registration_template(
-                        recipient_number=user.get("PHONE", ""),
-                        customer_name=user.get("NAME", "").title(),
+                        recipient_number=user["phone"],
+                        customer_name=user["name"].title(),
                         phone_number_id=phone_id
                     )
 
                     if wa_status:
-                        logger.info(f"Template successfully sent to {user.get('NAME', '')}")
+                        logger.info(f"Template successfully sent to {user["name"]}")
                     else:
-                        logger.error(f"Failed to send template to {user.get('NAME', '')}")
+                        logger.error(f"Failed to send template to {user["name"]}")
 
                     send_whatsapp_message(
-                        user.get("PHONE", ""),
+                        user["phone"],
                         whatsapp_msg,
                         phone_id
                     )
@@ -998,7 +1013,7 @@ async def assign_new_task_tool(
                 """
 
                 send_email(
-                    user.get("EMAIL", ""),
+                    user["email"],
                     email_subject,
                     email_body
                 )
@@ -1006,8 +1021,7 @@ async def assign_new_task_tool(
                 manager_subject = f"Task Assignment Confirmation: {task_name}"
                 manager_body = f"""Task Assignment Confirmed
 
-                Assignee: {user.get("NAME", "").title()}
-                Task: {task_name}
+                Assignee: {user["name"].title()}                Task: {task_name}
                 Due Date: {deadline}
 
                 The task has been successfully assigned and the employee has been notified.
