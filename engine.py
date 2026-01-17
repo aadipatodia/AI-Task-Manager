@@ -450,20 +450,17 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
 
 async def fetch_task_counts_api(login_code: str, ctx_role: str):
     """Retrieves aggregate counts via SID 616 - API dependent with robust error handling."""
-    if ctx_role == "manager":
-        assignment_value = "Assigned To Me"
-    else:
-        assignment_value = "Assigned To Me"
+    assignment_value = "Assigned To Me"
 
     req = GetCountRequest(Child=[{
         "Control_Id": "108118",
         "AC_ID": "113229", # Updated from YAML source [cite: 13]
         "Parent": [
             {"Control_Id": "111548", "Value": "1", "Data_Form_Id": ""},
-            {"Control_Id": "107566", "Value": login_code, "Data_Form_Id": ""}, # Assignee ID [cite: 20]
+            {"Control_Id": "107566", "Value": login_code, "Data_Form_Id": ""},
             {"Control_Id": "107568", "Value": "", "Data_Form_Id": ""},
             {"Control_Id": "107569", "Value": "", "Data_Form_Id": ""},
-            {"Control_Id": "107599", "Value": assignment_value, "Data_Form_Id": ""},
+            {"Control_Id": "107599", "Value": "Assigned To Me", "Data_Form_Id": ""},
             {"Control_Id": "109599", "Value": "", "Data_Form_Id": ""},
             {"Control_Id": "108512", "Value": "", "Data_Form_Id": ""}
         ]
@@ -553,11 +550,9 @@ async def send_whatsapp_report_tool(
             REPORT_TYPE=report_type,
             STATUS=normalize_status_for_report(status),
             MOBILE_NUMBER=user["phone"][-10:],
-            ASSIGNED_BY="Assigned By Me" if ctx.deps.role == "manager" else "Assigned To Me",
+            ASSIGNED_BY="Assigned By Me",
             REFERENCE="WHATSAPP"
         )
-
-
 
 
         api_response = await call_appsavy_api("WHATSAPP_PDF_REPORT", req)
