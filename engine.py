@@ -211,6 +211,9 @@ When user asks to see tasks, list tasks, pending work:
 - Without name → Show tasks for the requesting user
 - With name (managers only) → Show tasks for specified employee
 - Show the tasks exactly as returned by the API without applying additional sorting
+- IMPORTANT:
+When responding with task lists, return the tool output EXACTLY as-is.
+Do not summarize, rephrase, or omit any fields.
 
 ### TASK ASSIGNMENT BY PHONE:
 Support assignment using phone numbers:
