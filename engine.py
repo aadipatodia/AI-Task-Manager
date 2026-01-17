@@ -876,15 +876,24 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
         if not tasks:
             return "No tasks assigned to you."
 
-        output = f"Tasks assigned to you ({user['name'].title()}):\n\n"
-        for t in tasks:
-            output += (
-                f"ID: {t.get('TID')}\n"
-                f"Task: {t.get('COMMENTS')}\n"
-                f"Assigned On: {t.get('ASSIGN_DATE')}\n"
-                f"Status: {t.get('STS')}\n\n"
-            )
+        deadline_raw = t.get("EXPECTED_END_DATE")
+        deadline = ""
 
+        if deadline_raw:
+            try:
+                deadline = datetime.datetime.strptime(
+                    deadline_raw, "%m/%d/%Y %I:%M:%S %p"
+                ).strftime("%d-%b-%Y")
+            except Exception:
+                deadline = deadline_raw
+
+        output += (
+            f"ID: {t.get('TID')}\n"
+            f"Task: {t.get('COMMENTS')}\n"
+            f"Assigned On: {t.get('ASSIGN_DATE')}\n"
+            f"Deadline: {deadline}\n"
+            f"Status: {t.get('STS')}\n\n"
+        )
         return output.strip()
 
     except Exception as e:
