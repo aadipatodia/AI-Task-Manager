@@ -266,7 +266,7 @@ def load_team():
     """Static team directory - source of truth for authentication and name resolution."""
     return [
         {"name": "mdpvvnl", "phone": "919650523477", "email": "varun.verma@mobineers.com", "login_code": "D-3514-1001"},
-        {"name": "chairman", "phone": "919310104458", "email": "abhilasha1333@gmail.com", "login_code": "D-3514-1003"},
+        {"name": "chairman", "phone": "91XXXXXXXXX", "email": "example@gmail.com", "login_code": "D-3514-1003"},
         {"name": "mddvvnl", "phone": "917428134319", "email": "patodiaaadi@gmail.com", "login_code": "D-3514-1002"},
         {"name": "ce_ghaziabad", "phone": "91XXXXXXXXXX", "email": "ce@example.com", "login_code": "D-3514-1004"}
     ]
