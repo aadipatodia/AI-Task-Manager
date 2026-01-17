@@ -933,7 +933,7 @@ async def assign_new_task_tool(
         req = CreateTaskRequest(
             ASSIGNEE=login_code,
             DESCRIPTION=task_name,
-            EXPECTED_END_DATE=deadline.split('T')[0],
+            EXPECTED_END_DATE=deadline.split('T'," "),
             TASK_NAME=task_name,
             MOBILE_NUMBER=user.get("PHONE", ""),
             DETAILS=Details(CHILD=[DetailChild(
