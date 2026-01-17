@@ -48,10 +48,10 @@ def send_whatsapp_message(recipient_number, message_text, phone_number_id=None):
         logger.error(f"Error: {e}")
         return None
 
-def send_registration_template(recipient_number, customer_name, phone_number_id=None):
+def send_registration_template(recipient_number, user_identifier, phone_number_id=None):
     """
-    Specifically for the 'task_manager' template.
-    Targets {{cust_name}} in the HEADER using Named Parameters.
+    Updated for the 'new_template_task_manager' template.
+    Targets {{user_id}} in the BODY using Named Parameters.
     """
     pn_id = phone_number_id or os.getenv("PHONE_NUMBER_ID")
     access_token = os.getenv("ACCESS_TOKEN")
@@ -67,18 +67,18 @@ def send_registration_template(recipient_number, customer_name, phone_number_id=
         "to": recipient_number,
         "type": "template",
         "template": {
-            "name": "task_manager",
+            "name": "new_template_task_manager", # New template name
             "language": {
                 "code": "en"
             },
             "components": [
                 {
-                    "type": "header",
+                    "type": "body", # Variable is now in the body
                     "parameters": [
                         {
                             "type": "text",
-                            "parameter_name": "cust_name",  # MUST MATCH TEMPLATE VARIABLE
-                            "text": customer_name
+                            "parameter_name": "user_id", # New parameter name
+                            "text": user_identifier
                         }
                     ]
                 }
@@ -89,7 +89,7 @@ def send_registration_template(recipient_number, customer_name, phone_number_id=
     try:
         response = requests.post(url, headers=headers, json=payload)
         if response.status_code == 200:
-            print(f"  Success! Template sent to {customer_name}")
+            print(f"  Success! Template sent to {user_identifier}")
             return True
         else:
             print(f"  API Error: {response.text}")

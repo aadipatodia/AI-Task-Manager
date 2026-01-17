@@ -8,10 +8,10 @@ ACCESS_TOKEN = os.getenv('ACCESS_TOKEN')
 PHONE_NUMBER_ID = os.getenv('PHONE_NUMBER_ID') 
 VERSION = os.getenv('VERSION', 'v22.0')
 
-def send_whatsapp_message(recipient_number, customer_name):
+def send_whatsapp_message(recipient_number, user_identifier):
     """
-    Sends a WhatsApp message using the 'task_manager' template.
-    Uses named parameters ('parameter_name') for variables like {{cust_name}}.
+    Sends a WhatsApp message using the 'new_template_task_manager' template.
+    Uses 'user_id' parameter in the body.
     """
     url = f"https://graph.facebook.com/{VERSION}/{PHONE_NUMBER_ID}/messages"
     
@@ -25,30 +25,29 @@ def send_whatsapp_message(recipient_number, customer_name):
         "to": recipient_number,
         "type": "template",
         "template": {
-            "name": "task_manager", 
+            "name": "new_template_task_manager", 
             "language": {
                 "code": "en"  
             },
             "components": [
                 {
-                    "type": "header", 
+                    "type": "body", 
                     "parameters": [
                         {
                             "type": "text",
-                            "text": customer_name,
-                            "parameter_name": "cust_name"  
+                            "text": user_identifier,
+                            "parameter_name": "user_id"  
                         }
                     ]
                 }
             ]
         }
     }
-
     try:
         response = requests.post(url, headers=headers, json=payload)
         
         if response.status_code == 200:
-            print(f"  Success! Message sent to {customer_name}")
+            print(f"  Success! Message sent ")
             return True
         else:
             print(f" Failed! Status Code: {response.status_code}")
