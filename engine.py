@@ -460,7 +460,7 @@ async def fetch_task_counts_api(login_code: str, ctx_role: str):
             {"Control_Id": "107566", "Value": login_code, "Data_Form_Id": ""},
             {"Control_Id": "107568", "Value": "", "Data_Form_Id": ""},
             {"Control_Id": "107569", "Value": "", "Data_Form_Id": ""},
-            {"Control_Id": "107599", "Value": "Assigned To Me", "Data_Form_Id": ""},
+            {"Control_Id": "107599", "Value": "1", "Data_Form_Id": ""},
             {"Control_Id": "109599", "Value": "", "Data_Form_Id": ""},
             {"Control_Id": "108512", "Value": "", "Data_Form_Id": ""}
         ]
@@ -872,27 +872,29 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
         if not tasks:
             return "No tasks assigned to you."
 
-        deadline_raw = tasks.get("EXPECTED_END_DATE")
-        deadline = ""
+        output = ""
 
-        if deadline_raw:
-            try:
-                deadline = datetime.datetime.strptime(
-                    deadline_raw, "%m/%d/%Y %I:%M:%S %p"
-                ).strftime("%d-%b-%Y")
-            except Exception:
-                deadline = deadline_raw
+        for task in tasks:
+            deadline_raw = task.get("EXPECTED_END_DATE")
+            deadline = ""
 
-        output += (
-            f"ID: {tasks.get('TID')}\n"
-            f"Task: {tasks.get('COMMENTS')}\n"
-            f"Assigned On: {tasks.get('ASSIGN_DATE')}\n"
-            f"Deadline: {deadline}\n"
-            f"Status: {tasks.get('STS')}\n\n"
-        )
+            if deadline_raw:
+                try:
+                    deadline = datetime.datetime.strptime(
+                        deadline_raw, "%m/%d/%Y %I:%M:%S %p"
+                    ).strftime("%d-%b-%Y")
+                except Exception:
+                    deadline = deadline_raw
+
+            output += (
+                f"ID: {task.get('TID')}\n"
+                f"Task: {task.get('COMMENTS')}\n"
+                f"Assigned On: {task.get('ASSIGN_DATE')}\n"
+                f"Deadline: {deadline}\n"
+                f"Status: {task.get('STS')}\n\n"
+            )
 
         return output.strip()
-
     except Exception as e:
         logger.error(f"get_task_list_tool error: {str(e)}", exc_info=True)
         return "Error fetching your tasks."
