@@ -714,18 +714,17 @@ async def get_performance_report_tool(
     """
     Generate performance report using API data
     - SID 616 for counts
-    - SID 610 for task details
+    - SID 610 for task details (PER USER)
     """
     try:
         team = load_team()
+        now = ctx.deps.current_time
 
         # 🔒 Role check
         if not name and ctx.deps.role != "manager":
             return "Permission Denied: Only managers can view the full team report."
 
-        # 🔹 Decide whose tasks to fetch in GET_TASKS
-        assignee_login = ""
-
+        # 🔹 Decide whose report to show
         if name:
             matched = next(
                 (
@@ -737,70 +736,70 @@ async def get_performance_report_tool(
             )
             if not matched:
                 return f"User '{name}' not found in directory."
-            assignee_login = matched["login_code"]
+            display_team = [matched]
 
-        elif ctx.deps.role != "manager":
+        elif ctx.deps.role == "manager":
+            display_team = team
+
+        else:
             self_user = next(
                 (u for u in team if u["phone"] == ctx.deps.sender_phone),
                 None
             )
             if not self_user:
                 return "Unable to identify your profile."
-            assignee_login = self_user["login_code"]
+            display_team = [self_user]
 
         # 🔹 Status filter
         status_filter = build_status_filter(ctx.deps.role)
 
-        # 🔹 Fetch tasks (SID 610)
-        raw_tasks_data = await call_appsavy_api(
-            "GET_TASKS",
-            GetTasksRequest(
-                Child=[{
-                    "Control_Id": "106831",
-                    "AC_ID": "110803",
-                    "Parent": [
-                        {"Control_Id": "106825", "Value": status_filter, "Data_Form_Id": ""},
-                        {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
-                        {"Control_Id": "106827", "Value": assignee_login, "Data_Form_Id": ""},
-                        {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
-                        {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
-                        {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""}
-                    ]
-                }]
-            )
-        )
-
-        tasks_data = normalize_tasks_response(raw_tasks_data)
-        now = ctx.deps.current_time
-
-        # 🔹 Decide whose report to show
-        if name:
-            display_team = [matched]
-        elif ctx.deps.role == "manager":
-            display_team = team
-        else:
-            display_team = [self_user]
-
         results = []
 
+        # =====================================================
+        # 🔁 FETCH DATA PER USER (THIS FIXES THE BUG)
+        # =====================================================
         for member in display_team:
             member_login = member["login_code"]
 
             try:
+                # 🔹 Fetch task list for THIS USER ONLY (SID 610)
+                raw_tasks_data = await call_appsavy_api(
+                    "GET_TASKS",
+                    GetTasksRequest(
+                        Child=[{
+                            "Control_Id": "106831",
+                            "AC_ID": "110803",
+                            "Parent": [
+                                {"Control_Id": "106825", "Value": status_filter, "Data_Form_Id": ""},
+                                {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
+                                {"Control_Id": "106827", "Value": member_login, "Data_Form_Id": ""},
+                                {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
+                                {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
+                                {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""}
+                            ]
+                        }]
+                    )
+                )
+
+                member_tasks = normalize_tasks_response(raw_tasks_data)
+
+                # 🔹 Fetch counts (SID 616)
                 counts = await fetch_task_counts_api(member_login, ctx.deps.role)
 
-                member_tasks = tasks_data
                 within_time = 0
                 beyond_time = 0
                 closed_count = 0
 
+                # 🔹 Pending / completed logic
                 for task in member_tasks:
                     status = str(task.get("STS", "")).lower()
                     expected_date = task.get("EXPECTED_END_DATE")
 
                     if status == "closed":
                         closed_count += 1
-                    elif expected_date:
+                        continue
+
+                    if expected_date:
                         try:
                             expected = datetime.datetime.strptime(
                                 expected_date,
@@ -811,12 +810,14 @@ async def get_performance_report_tool(
                             else:
                                 beyond_time += 1
                         except Exception:
+                            # fallback: treat as within time
                             within_time += 1
 
                 assigned_count = counts.get(
                     "ASSIGNED_TASK",
                     str(len(member_tasks))
                 )
+
                 closed_from_api = counts.get(
                     "CLOSED_TASK",
                     str(closed_count)
@@ -831,7 +832,7 @@ async def get_performance_report_tool(
                     f"Beyond time: {beyond_time}"
                 )
 
-            except Exception as member_error:
+            except Exception:
                 logger.error(
                     f"Error processing report for {member['name']}",
                     exc_info=True
@@ -849,7 +850,6 @@ async def get_performance_report_tool(
     except Exception as e:
         logger.error("get_performance_report_tool error", exc_info=True)
         return f"Error generating performance report: {str(e)}"
-
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
     try:
