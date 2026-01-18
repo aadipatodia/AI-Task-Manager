@@ -536,7 +536,7 @@ async def fetch_task_counts_api(login_code: str, ctx_role: str):
             {"Control_Id": "107566", "Value": login_code, "Data_Form_Id": ""},
             {"Control_Id": "107568", "Value": "", "Data_Form_Id": ""},
             {"Control_Id": "107569", "Value": "", "Data_Form_Id": ""},
-            {"Control_Id": "107599", "Value": "1", "Data_Form_Id": ""},
+            {"Control_Id": "107599", "Value": "Assigned To Me", "Data_Form_Id": ""},
             {"Control_Id": "109599", "Value": "", "Data_Form_Id": ""},
             {"Control_Id": "108512", "Value": "", "Data_Form_Id": ""}
         ]
@@ -1133,72 +1133,65 @@ async def assign_task_by_phone_tool(
         logger.error(f"assign_task_by_phone_tool error: {str(e)}", exc_info=True)
         return f"Error assigning task by phone: {str(e)}"
 
-async def update_task_status_tool(ctx: RunContext[ManagerContext], task_id: str, action: str, remark: Optional[str] = None) -> str:
-
+async def update_task_status_tool(
+    ctx: RunContext[ManagerContext], 
+    task_id: str, 
+    action: str, 
+    remark: Optional[str] = None
+) -> str:
     """
     Updates task status via API (SID 607).
-    Enforces role-based permissions.
+    Automatically maps conversational intent (like 'close') to the correct 
+    technical status based on whether the user is a manager or employee.
     """
     try:
-        status_map = {
-            # task NOT completed          
-            "pending": "Open",
-            "open": "Open",
+        # 1. Handle Contextual Mapping for 'close'
+        if action.lower() == "close":
+            if ctx.deps.role == "manager":
+                new_status = "Closed"
+            else:
+                # Per requirement: If an employee says 'close', they mean 'Partially Closed'
+                new_status = "Partially Closed"
+        else:
+            # Standard mapping for other status actions
+            status_map = {
+                "pending": "Open",
+                "open": "Open",
+                "in progress": "Partially Closed",
+                "partial": "Partially Closed",
+                "working": "Partially Closed",
+                "completed": "Reported Closed",
+                "done": "Reported Closed",
+                "reported": "Reported Closed",
+                "reopen": "Reopened"
+            }
+            new_status = status_map.get(action.lower())
 
-            # task in progress
-            "in progress": "Partially Closed",
-            "partial": "Partially Closed",
-            "working": "Partially Closed",
-
-            # task completed by employee
-            "completed": "Reported Closed",
-            "done": "Reported Closed",
-            "reported": "Reported Closed",
-
-            # manager only
-            "close": "Closed",
-            "reopen": "Reopened"
-        }
-
-
-        
-        new_status = status_map.get(action.lower())
+        # 2. Validate that a status was identified
         if not new_status:
-            return "Error: Could not understand the requested task status."
+            return f"Error: Could not understand the requested status action '{action}'."
 
-        
-        employee_statuses = {
-            "Open",
-            "Partially Closed",
-            "Reported Closed"
-        }
-
-        manager_statuses = {
-            "Closed",
-            "Reopened"
-        }
-
-        if new_status == "Closed" and ctx.deps.role != "manager":
-            return "Permission Denied: Only managers can close tasks."
-
-
+        # 3. Enforce Role-Based Permissions
+        # Manager-only statuses: 'Closed' and 'Reopened'
         if new_status in {"Closed", "Reopened"} and ctx.deps.role != "manager":
-            return "Permission Denied: Only managers can perform this action."
+            return f"Permission Denied: Only managers can officially {new_status} tasks."
 
-        
+        # 4. Identify User Profile
         team = load_team()
         user = next((u for u in team if u['phone'] == ctx.deps.sender_phone), None)
         if not user:
-            return "Error: Could not identify your user profile."
+            return "Error: Could not identify your user profile for this update."
         
+        # 5. Prepare and Execute API Request (SID 607)
         req = UpdateTaskRequest(
             TASK_ID=task_id,
             STATUS=new_status,
-            COMMENTS=remark or "Updated by employee"
+            COMMENTS=remark or f"Status updated to {new_status} via WhatsApp"
         )
         
         api_response = await call_appsavy_api("UPDATE_STATUS", req)
         
+        # 6. Handle API Response
         if not api_response:
             return "API failure: No response from server."
         
@@ -1206,10 +1199,13 @@ async def update_task_status_tool(ctx: RunContext[ManagerContext], task_id: str,
             if api_response.get('error'):
                 return f"API failure: {api_response.get('error')}"
             
+            # Appsavy returns result: 1 for success
             if api_response.get('RESULT') == 1 or api_response.get('result') == 1:
-                return f"Success: Task {task_id} updated to '{new_status}'."
+                return f"Success: Task {task_id} has been updated to '{new_status}'."
             else:
-                return f"API returned unexpected response: {api_response}"
+                return f"API returned unexpected response: {api_response.get('RESULTMESSAGE', api_response)}"
+        
+        return "API failure: Unexpected response format from server."
     
     except Exception as e:
         logger.error(f"update_task_status_tool error: {str(e)}", exc_info=True)
@@ -1232,7 +1228,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
             return
     
-        manager_phone = os.getenv("MANAGER_PHONE", "919650523477")
+        manager_phone = os.getenv("MANAGER_PHONE", "917428134319")
         team = load_team()
     
         if sender == manager_phone:
