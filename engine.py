@@ -247,10 +247,10 @@ Support assignment using phone numbers:
 - Use 'assign_task_by_phone_tool'
 
 ### USER LOOKUP:
-When asked about users in a group or specific user details:
-- Use 'get_users_by_id_tool' with group ID or user ID
-- Group IDs start with 'G-' (e.g., G-10343-41)
-- User IDs start with 'D-' (e.g., D-3514-1001)
+When asked about users or resolving names:
+- Use 'get_users_by_id_tool' with the ID from the directory.
+- Note: IDs can start with 'D-' (Static User), 'G-' (Group), or 'O-' (Newly Created/Other). 
+- All three formats ('D-', 'G-', 'O-') are valid for task assignment.
 
 ### ASSIGNEE LOOKUP:
 When needing to list all available assignees:
@@ -955,17 +955,15 @@ async def get_dynamic_team_list() -> List[Dict[str, str]]:
         req = GetAssigneeRequest(Event="0", Child=[{"Control_Id": "106771", "AC_ID": "111057"}])
         api_response = await call_appsavy_api("GET_ASSIGNEE", req)
         
-        # FIX: API returns a dict with 'data' -> 'Result', not a direct list
         result_list = []
         if isinstance(api_response, dict):
+            # API returns data -> Result list
             result_list = api_response.get("data", {}).get("Result", [])
-        elif isinstance(api_response, list):
-            result_list = api_response
-
+        
         return [
             {
-                "name": (u.get("name") or u.get("NAME") or u.get("PARTICIPANT_NAME") or "Unknown"),
-                "login_code": (u.get("LOGIN_ID") or u.get("ID"))
+                "name": (u.get("NAME") or u.get("name") or "Unknown"),
+                "login_code": (u.get("ID") or u.get("LOGIN_ID"))
             }
             for u in result_list if isinstance(u, dict)
         ]
