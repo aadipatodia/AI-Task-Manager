@@ -8,7 +8,6 @@ from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.gemini import GeminiModel
-from pydantic_ai.messages import ModelResponse, ModelRequest, TextPart, UserPromptPart
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -43,8 +42,8 @@ API_CONFIGS = {
             "cid": "64",
             "uid": "TM_API",
             "roleid": "1627",
-            "TokenKey": "799f57e5-af33-4341-9c0f-4c0f42ac9f79"
-        
+            "TokenKey": "799f57e5-af33-4341-9c0f-4c0f42ac9f79",
+            "Cookie": ".AspNetCore.Antiforgery.DX06PTKdFOY=CfDJ8GsECdYRlwNDiE7FrXiNS9Vu1CzEhlc1-hKzhaifpxNfxBVBZbIgQXCNNvjyztiNjIqPWZr4FfxnVzUIs_ywP_M7udcWQj9oE-9aeSV7fruLH-MIiiGtQupgqSF1sn7zwJe-i_JM6BWaB66ksSMKU7E; XSRF-TOKEN=CfDJ8GsECdYRlwNDiE7FrXiNS9UyorRB1iuiI3RpvBinv1Dbh7vgW3WCkIAe2aAJN2XPLUnForPtj6yvncAR9pZdVq2Gm5oWHHivN5GEznNsNPSlcHdQb6NkCrtP3oUTLbfWURR9It4Jp-5WEW_SAwE6e9E"
         }
     },
       
@@ -57,7 +56,8 @@ API_CONFIGS = {
             "cid": "64",
             "uid": "TM_API",
             "roleid": "1627",
-            "TokenKey": "17bce718-18fb-43c4-90bb-910b19ffb34b"
+            "TokenKey": "17bce718-18fb-43c4-90bb-910b19ffb34b",
+            "Cookie": ".AspNetCore.Antiforgery.DX06PTKdFOY=CfDJ8GsECdYRlwNDiE7FrXiNS9Vu1CzEhlc1-hKzhaifpxNfxBVBZbIgQXCNNvjyztiNjIqPWZr4FfxnVzUIs_ywP_M7udcWQj9oE-9aeSV7fruLH-MIiiGtQupgqSF1sn7zwJe-i_JM6BWaB66ksSMKU7E; XSRF-TOKEN=CfDJ8GsECdYRlwNDiE7FrXiNS9UyorRB1iuiI3RpvBinv1Dbh7vgW3WCkIAe2aAJN2XPLUnForPtj6yvncAR9pZdVq2Gm5oWHHivN5GEznNsNPSlcHdQb6NkCrtP3oUTLbfWURR9It4Jp-5WEW_SAwE6e9E"
         }
     },
     "GET_ASSIGNEE": {
@@ -69,7 +69,8 @@ API_CONFIGS = {
             "cid": "64",
             "uid": "TM_API",
             "roleid": "1627",
-            "TokenKey": "d23e5874-ba53-4490-941f-0c70b25f6f56"
+            "TokenKey": "d23e5874-ba53-4490-941f-0c70b25f6f56",
+            "Cookie": ".AspNetCore.Antiforgery.DX06PTKdFOY=CfDJ8GsECdYRlwNDiE7FrXiNS9Vu1CzEhlc1-hKzhaifpxNfxBVBZbIgQXCNNvjyztiNjIqPWZr4FfxnVzUIs_ywP_M7udcWQj9oE-9aeSV7fruLH-MIiiGtQupgqSF1sn7zwJe-i_JM6BWaB66ksSMKU7E; XSRF-TOKEN=CfDJ8GsECdYRlwNDiE7FrXiNS9UyorRB1iuiI3RpvBinv1Dbh7vgW3WCkIAe2aAJN2XPLUnForPtj6yvncAR9pZdVq2Gm5oWHHivN5GEznNsNPSlcHdQb6NkCrtP3oUTLbfWURR9It4Jp-5WEW_SAwE6e9E"
         }
     },
     "GET_TASKS": {
@@ -81,7 +82,8 @@ API_CONFIGS = {
             "cid": "64",
             "uid": "TM_API",
             "roleid": "1627",
-            "TokenKey": "e5b4e098-f8b9-47bf-83f1-751582bfe147"
+            "TokenKey": "e5b4e098-f8b9-47bf-83f1-751582bfe147",
+            "Cookie": ".AspNetCore.Antiforgery.DX06PTKdFOY=CfDJ8GsECdYRlwNDiE7FrXiNS9Vu1CzEhlc1-hKzhaifpxNfxBVBZbIgQXCNNvjyztiNjIqPWZr4FfxnVzUIs_ywP_M7udcWQj9oE-9aeSV7fruLH-MIiiGtQupgqSF1sn7zwJe-i_JM6BWaB66ksSMKU7E; XSRF-TOKEN=CfDJ8GsECdYRlwNDiE7FrXiNS9UyorRB1iuiI3RpvBinv1Dbh7vgW3WCkIAe2aAJN2XPLUnForPtj6yvncAR9pZdVq2Gm5oWHHivN5GEznNsNPSlcHdQb6NkCrtP3oUTLbfWURR9It4Jp-5WEW_SAwE6e9E"
         }
     },
     "UPDATE_STATUS": {
@@ -93,7 +95,8 @@ API_CONFIGS = {
             "cid": "64",
             "uid": "TM_API",
             "roleid": "1627",
-            "TokenKey": "e5b4e098-f8b9-47bf-83f1-751582bfe147" 
+            "TokenKey": "e5b4e098-f8b9-47bf-83f1-751582bfe147", 
+            "Cookie": ".AspNetCore.Antiforgery.DX06PTKdFOY=CfDJ8GsECdYRlwNDiE7FrXiNS9Vu1CzEhlc1-hKzhaifpxNfxBVBZbIgQXCNNvjyztiNjIqPWZr4FfxnVzUIs_ywP_M7udcWQj9oE-9aeSV7fruLH-MIiiGtQupgqSF1sn7zwJe-i_JM6BWaB66ksSMKU7E; XSRF-TOKEN=CfDJ8GsECdYRlwNDiE7FrXiNS9UyorRB1iuiI3RpvBinv1Dbh7vgW3WCkIAe2aAJN2XPLUnForPtj6yvncAR9pZdVq2Gm5oWHHivN5GEznNsNPSlcHdQb6NkCrtP3oUTLbfWURR9It4Jp-5WEW_SAwE6e9E"
         }
     },
     "GET_COUNT": {
@@ -105,7 +108,8 @@ API_CONFIGS = {
             "cid": "64",
             "uid": "TM_API",
             "roleid": "1627",
-            "TokenKey": "75c6ec2e-9f9c-48fa-be24-d8eb612f4c03"
+            "TokenKey": "75c6ec2e-9f9c-48fa-be24-d8eb612f4c03",
+            "Cookie": ".AspNetCore.Antiforgery.DX06PTKdFOY=CfDJ8GsECdYRlwNDiE7FrXiNS9Vu1CzEhlc1-hKzhaifpxNfxBVBZbIgQXCNNvjyztiNjIqPWZr4FfxnVzUIs_ywP_M7udcWQj9oE-9aeSV7fruLH-MIiiGtQupgqSF1sn7zwJe-i_JM6BWaB66ksSMKU7E; XSRF-TOKEN=CfDJ8GsECdYRlwNDiE7FrXiNS9UyorRB1iuiI3RpvBinv1Dbh7vgW3WCkIAe2aAJN2XPLUnForPtj6yvncAR9pZdVq2Gm5oWHHivN5GEznNsNPSlcHdQb6NkCrtP3oUTLbfWURR9It4Jp-5WEW_SAwE6e9E"
         }
     },
     "GET_USERS_BY_ID": {
@@ -117,7 +121,8 @@ API_CONFIGS = {
             "cid": "64",
             "uid": "TM_API",
             "roleid": "1627",
-            "TokenKey": "d23e5874-ba53-4490-941f-0c70b25f6f56"
+            "TokenKey": "d23e5874-ba53-4490-941f-0c70b25f6f56",
+            "Cookie": ".AspNetCore.Antiforgery.DX06PTKdFOY=CfDJ8GsECdYRlwNDiE7FrXiNS9Vu1CzEhlc1-hKzhaifpxNfxBVBZbIgQXCNNvjyztiNjIqPWZr4FfxnVzUIs_ywP_M7udcWQj9oE-9aeSV7fruLH-MIiiGtQupgqSF1sn7zwJe-i_JM6BWaB66ksSMKU7E; XSRF-TOKEN=CfDJ8GsECdYRlwNDiE7FrXiNS9UyorRB1iuiI3RpvBinv1Dbh7vgW3WCkIAe2aAJN2XPLUnForPtj6yvncAR9pZdVq2Gm5oWHHivN5GEznNsNPSlcHdQb6NkCrtP3oUTLbfWURR9It4Jp-5WEW_SAwE6e9E"
         }
     },
     "WHATSAPP_PDF_REPORT": {
@@ -129,7 +134,8 @@ API_CONFIGS = {
             "cid": "64",
             "uid": "TM_API",
             "roleid": "1627",
-            "TokenKey": "dea16c4c-bf19-423f-a567-c2c265c7dd22"
+            "TokenKey": "dea16c4c-bf19-423f-a567-c2c265c7dd22",
+            "Cookie": ".AspNetCore.Antiforgery.DX06PTKdFOY=CfDJ8GsECdYRlwNDiE7FrXiNS9Vu1CzEhlc1-hKzhaifpxNfxBVBZbIgQXCNNvjyztiNjIqPWZr4FfxnVzUIs_ywP_M7udcWQj9oE-9aeSV7fruLH-MIiiGtQupgqSF1sn7zwJe-i_JM6BWaB66ksSMKU7E; XSRF-TOKEN=CfDJ8GsECdYRlwNDiE7FrXiNS9UyorRB1iuiI3RpvBinv1Dbh7vgW3WCkIAe2aAJN2XPLUnForPtj6yvncAR9pZdVq2Gm5oWHHivN5GEznNsNPSlcHdQb6NkCrtP3oUTLbfWURR9It4Jp-5WEW_SAwE6e9E"
         }
     }
 }
@@ -1015,7 +1021,6 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
         raw_tasks_data = await call_appsavy_api(
             "GET_TASKS",
             GetTasksRequest(
-                Event="106830",
                 Child=[{
                     "Control_Id": "106831",
                     "AC_ID": "110803",
