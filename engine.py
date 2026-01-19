@@ -954,14 +954,21 @@ async def get_dynamic_team_list() -> List[Dict[str, str]]:
     try:
         req = GetAssigneeRequest(Event="0", Child=[{"Control_Id": "106771", "AC_ID": "111057"}])
         api_response = await call_appsavy_api("GET_ASSIGNEE", req)
-        if isinstance(api_response, list):
-            return [
-                {
-                    "name": (u.get("name") or u.get("PARTICIPANT_NAME") or "Unknown"),
-                    "login_code": (u.get("LOGIN_ID") or u.get("ID"))
-                }
-                for u in api_response if isinstance(u, dict)
-            ]
+        
+        # FIX: API returns a dict with 'data' -> 'Result', not a direct list
+        result_list = []
+        if isinstance(api_response, dict):
+            result_list = api_response.get("data", {}).get("Result", [])
+        elif isinstance(api_response, list):
+            result_list = api_response
+
+        return [
+            {
+                "name": (u.get("name") or u.get("NAME") or u.get("PARTICIPANT_NAME") or "Unknown"),
+                "login_code": (u.get("LOGIN_ID") or u.get("ID"))
+            }
+            for u in result_list if isinstance(u, dict)
+        ]
     except Exception as e:
         logger.error(f"Error fetching dynamic team: {e}")
     return []
@@ -1069,28 +1076,29 @@ async def assign_new_task_tool(
     try:
         logger.info(f"Dynamic Assignment: Searching for user '{name}' via API...")
 
-        # --- STEP 1: RESOLVE NAME TO LOGIN_ID (SID 606) ---
-        # Fetch the most current list of all employees from the database
-        list_req = GetAssigneeRequest(
-            Event="0",
-            Child=[{"Control_Id": "106771", "AC_ID": "111057"}]
-        )
-        assignee_list = await call_appsavy_api("GET_ASSIGNEE", list_req)
+        # --- STEP 1: RESOLVE NAME TO LOGIN_ID ---
+        list_req = GetAssigneeRequest(Event="0", Child=[{"Control_Id": "106771", "AC_ID": "111057"}])
+        api_res = await call_appsavy_api("GET_ASSIGNEE", list_req)
         
-        if not assignee_list or not isinstance(assignee_list, list):
+        # FIX: Navigate the dictionary structure
+        assignee_list = []
+        if isinstance(api_res, dict):
+            assignee_list = api_res.get("data", {}).get("Result", [])
+        
+        if not assignee_list:
             return "Error: Could not retrieve the employee list from the system."
 
-        # Find the user in the API response (Case-insensitive match)
+        # Find the user in the API response
         matched_user = next(
-            (u for u in assignee_list if name.lower() in (u.get("name") or u.get("PARTICIPANT_NAME") or "").lower()),
+            (u for u in assignee_list if name.lower() in (u.get("NAME") or u.get("name") or "").lower()),
             None
         )
 
         if not matched_user:
-            return f"User '{name}' was not found in the system. Please ensure the user is added first."
+            return f"User '{name}' was not found in the system."
 
-        login_code = matched_user.get("LOGIN_ID") or matched_user.get("ID")
-        display_name = matched_user.get("name") or matched_user.get("PARTICIPANT_NAME")
+        login_code = matched_user.get("ID") or matched_user.get("LOGIN_ID")
+        display_name = matched_user.get("NAME") or matched_user.get("name")
 
         # --- STEP 2: FETCH CONTACT DETAILS (SID 609) ---
         # We need Phone and Email for notifications, which SID 606 might not provide
