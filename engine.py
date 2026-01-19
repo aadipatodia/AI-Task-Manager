@@ -190,19 +190,19 @@ Current Time: {current_time_str}
 * **Name Resolution**: Map names to login IDs from team directory
 
 ### TASK STATUS WORKFLOW:
-1. **Pending** - Task is still open and not completed
-2. **Work Done** - Employee uses 'reported' action
-3. **Completed** - Manager uses 'close' action to approve
+- **Open**: Initial state when a task is assigned.
+- **Work In Progress**: The employee (assignee) has started working.
+- **Close**: The employee has finished work and is submitting it (Assignee's version of "Done").
+- **Closed**: The Manager has officially approved and finalized the task.
+- **Reopened**: The Manager has rejected the work and sent it back.
 
-**Status Actions:**
-- 'pending' → "Open" (task not completed)
-- 'open' → "Open"
-- 'partial' → "Partially Closed" (work in progress)
-- 'reported' → "Reported Closed" (employee marks as done, awaits approval)
-
-**Role Permissions:**
-- Employees: Can mark tasks as 'pending' (open), 'partial' (in progress), or 'reported' (completed by employee)
-- Managers: Can 'close' (approve) or 'reopen' (reject) tasks
+**Role Permissions & Mapping:**
+- **Assignees (Employees)**: Can only use 'Open', 'Work In Progress', or 'Close'. 
+  * Map "starting", "in progress" → 'Work In Progress'
+  * Map "done", "finished", "completed" → 'Close'
+- **Managers**: Can only use 'Closed' or 'Reopened'.
+  * Map "approve", "verify", "finish" → 'Closed'
+  * Map "reject", "not good", "do again" → 'Reopened'
 
 When updating task status, extract any additional text from the user's message as a remark and pass it in the COMMENTS field.
 
@@ -329,11 +329,12 @@ class GetTasksRequest(BaseModel):
     Event: str = "106830"
     Child: List[Dict]
 
+
 class UpdateTaskRequest(BaseModel):
     SID: str = "607"
     TASK_ID: str
     STATUS: str
-    COMMENTS: str = "STATUS_UPDATE"
+    COMMENTS: str = ""
     UPLOAD_DOCUMENT: str = ""
     BASE64: str = ""
 
@@ -427,16 +428,19 @@ def normalize_status_for_report(status: str) -> str:
     report_status_map = {
         "open": "Open",
         "pending": "Open",
-
-        "partial": "Partially Closed",
-        "in progress": "Partially Closed",
-
-        "reported": "Reported Closed",
-
-        # user usually means final completion
+        "working": "Work In Progress",
+        "progress": "Work In Progress",
+        "partial": "Work In Progress",
+        "in progress": "Work In Progress",
+        "done": "Close",
+        "reported": "Close",
+        "submit": "Close",
+        "close": "Close",
         "completed": "Closed",
-        "done": "Closed",
-        "closed": "Closed"
+        "closed": "Closed",
+        "finalized": "Closed",
+        "reopen": "Reopened",
+        "reopened": "Reopened"
     }
 
     return report_status_map.get(status.lower(), status)
@@ -526,7 +530,6 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
 
 async def fetch_task_counts_api(login_code: str, ctx_role: str):
     """Retrieves aggregate counts via SID 616 - API dependent with robust error handling."""
-    assignment_value = "Assigned To Me"
 
     req = GetCountRequest(Child=[{
         "Control_Id": "108118",
@@ -974,6 +977,47 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
     except Exception as e:
         logger.error(f"get_task_list_tool error: {str(e)}", exc_info=True)
         return "Error fetching your tasks."
+    
+def notify_task_assignment(user, task_name, deadline, phone_id):
+    """
+    Consolidated function to handle both WhatsApp and Email notifications.
+    This ensures all messages are sent in one workflow.
+    """
+    # 1. WhatsApp Template (Fixed the 'customer_name' to 'user_identifier' error)
+    wa_template_status = send_registration_template(
+        recipient_number=user["phone"],
+        user_identifier=user["name"].title(),
+        phone_number_id=phone_id
+    )
+
+    # 2. WhatsApp Text Message
+    whatsapp_msg = (
+        f"New Task Assigned:\n\n"
+        f"Task: {task_name}\n"
+        f"Due Date: {deadline}\n\n"
+        f"Please complete on time."
+    )
+    send_whatsapp_message(user["phone"], whatsapp_msg, phone_id)
+
+    # 3. Email to Employee
+    email_subject = f"New Task Assigned: {task_name}"
+    email_body = f"""Dear {user["name"].title()},
+    You have been assigned a new task:
+
+    Task Name: {task_name}
+    Due Date: {deadline}
+
+    Please ensure timely completion.
+    Best regards
+    """
+    send_email(user["email"], email_subject, email_body)
+
+    # 4. Email Confirmation to Manager
+    manager_subject = f"Task Assignment Confirmation: {task_name}"
+    manager_body = f"Task '{task_name}' has been successfully assigned to {user['name'].title()}."
+    send_email(MANAGER_EMAIL, manager_subject, manager_body)
+    
+    return wa_template_status
 
 def extract_multiple_assignees(text: str, team: list) -> list[str]:
     text = text.lower()
@@ -1003,11 +1047,10 @@ async def assign_new_task_tool(
         user = user_info
         login_code = user["login_code"]
 
-
         if not user_info or (isinstance(user_info, dict) and "error" in user_info):
             return f"Error: Could not find user or group '{name}' in the system."
         
-        # Step 2: Proceed to Create Task (SID 604) using the resolved code [cite: 80]
+        # Step 2: Proceed to Create Task (SID 604) using the resolved code
         req = CreateTaskRequest(
             ASSIGNEE=login_code,
             DESCRIPTION=task_name,
@@ -1021,7 +1064,6 @@ async def assign_new_task_tool(
                     PARTICIPANTS=user["name"].upper()
                 )]
             ),
-
             DOCUMENTS=Documents(CHILD=[])
         )
         
@@ -1051,9 +1093,10 @@ async def assign_new_task_tool(
                 if not phone_id:
                     logger.error("PHONE_NUMBER_ID missing. WhatsApp notification skipped.")
                 else:
+                    # FIXED: Changed 'customer_name' to 'user_identifier' to match send_message.py
                     wa_status = send_registration_template(
                         recipient_number=user["phone"],
-                        customer_name=user["name"].title(),
+                        user_identifier=user["name"].title(), 
                         phone_number_id=phone_id
                     )
 
@@ -1106,7 +1149,7 @@ async def assign_new_task_tool(
     except Exception as e:
         logger.error(f"assign_new_task_tool error: {str(e)}", exc_info=True)
         return f"Error assigning task: {str(e)}"
-
+    
 async def assign_task_by_phone_tool(
     ctx: RunContext[ManagerContext],
     phone: str,
@@ -1140,76 +1183,51 @@ async def update_task_status_tool(
     remark: Optional[str] = None
 ) -> str:
     """
-    Updates task status via API (SID 607).
-    Automatically maps conversational intent (like 'close') to the correct 
-    technical status based on whether the user is a manager or employee.
+    Updated task status logic based on new role-based rules.
     """
-    try:
-        # 1. Handle Contextual Mapping for 'close'
-        if action.lower() == "close":
-            if ctx.deps.role == "manager":
-                new_status = "Closed"
-            else:
-                # Per requirement: If an employee says 'close', they mean 'Partially Closed'
-                new_status = "Partially Closed"
-        else:
-            # Standard mapping for other status actions
-            status_map = {
-                "pending": "Open",
-                "open": "Open",
-                "in progress": "Partially Closed",
-                "partial": "Partially Closed",
-                "working": "Partially Closed",
-                "completed": "Reported Closed",
-                "done": "Reported Closed",
-                "reported": "Reported Closed",
-                "reopen": "Reopened"
-            }
-            new_status = status_map.get(action.lower())
-
-        # 2. Validate that a status was identified
-        if not new_status:
-            return f"Error: Could not understand the requested status action '{action}'."
-
-        # 3. Enforce Role-Based Permissions
-        # Manager-only statuses: 'Closed' and 'Reopened'
-        if new_status in {"Closed", "Reopened"} and ctx.deps.role != "manager":
-            return f"Permission Denied: Only managers can officially {new_status} tasks."
-
-        # 4. Identify User Profile
-        team = load_team()
-        user = next((u for u in team if u['phone'] == ctx.deps.sender_phone), None)
-        if not user:
-            return "Error: Could not identify your user profile for this update."
-        
-        # 5. Prepare and Execute API Request (SID 607)
-        req = UpdateTaskRequest(
-            TASK_ID=task_id,
-            STATUS=new_status,
-            COMMENTS=remark or f"Status updated to {new_status} via WhatsApp"
-        )
-        
-        api_response = await call_appsavy_api("UPDATE_STATUS", req)
-        
-        # 6. Handle API Response
-        if not api_response:
-            return "API failure: No response from server."
-        
-        if isinstance(api_response, dict):
-            if api_response.get('error'):
-                return f"API failure: {api_response.get('error')}"
-            
-            # Appsavy returns result: 1 for success
-            if api_response.get('RESULT') == 1 or api_response.get('result') == 1:
-                return f"Success: Task {task_id} has been updated to '{new_status}'."
-            else:
-                return f"API returned unexpected response: {api_response.get('RESULTMESSAGE', api_response)}"
-        
-        return "API failure: Unexpected response format from server."
+    action_lower = action.lower()
     
-    except Exception as e:
-        logger.error(f"update_task_status_tool error: {str(e)}", exc_info=True)
-        return f"Error updating task status: {str(e)}"
+    # Define mappings based on the new requirements
+    if ctx.deps.role == "manager":
+        # Managers (Jo Tasks assign kr rhe h)
+        manager_map = {
+            "close": "Closed",
+            "closed": "Closed",
+            "reopen": "Reopened",
+            "reopened": "Reopened"
+        }
+        new_status = manager_map.get(action_lower)
+        allowed_roles_msg = "Only managers can officially 'Closed' or 'Reopened' tasks."
+    else:
+        # Assignees (Jinko Tasks assign hue h)
+        assignee_map = {
+            "open": "Open",
+            "pending": "Open",
+            "working": "Work In Progress",
+            "progress": "Work In Progress",
+            "done": "Close",
+            "close": "Close" 
+        }
+        new_status = assignee_map.get(action_lower)
+        allowed_roles_msg = "As an assignee, you can set status to 'Open', 'Work In Progress', or 'Close'."
+
+    if not new_status:
+        return f"Error: Could not understand the requested status '{action}'. Available for you: {allowed_roles_msg}"
+
+    # Prepare payload per SID 607 specification [cite: 227-231]
+    req = UpdateTaskRequest(
+        SID="607", 
+        TASK_ID=task_id,
+        STATUS=new_status,
+        COMMENTS=remark or f"Updated to {new_status} via AI Assistant"
+    )
+    
+    api_response = await call_appsavy_api("UPDATE_STATUS", req)
+    
+    if isinstance(api_response, dict) and (api_response.get('RESULT') == 1 or api_response.get('result') == 1):
+        return f"Success: Task {task_id} status changed to '{new_status}'."
+    
+    return f"Failed to update task: {api_response}"
     
 async def handle_message(command, sender, pid, message=None, full_message=None):
     try:
