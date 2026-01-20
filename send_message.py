@@ -43,6 +43,7 @@ def send_whatsapp_message(recipient_number, message_text, phone_number_id=None):
 
     try:
         response = requests.post(url, json=payload, headers=headers)
+        print(f"DEBUG: Meta Response for {recipient_number}: {response.text}") # Add this
         return response.json() if response.status_code == 200 else None
     except Exception as e:
         logger.error(f"Error: {e}")

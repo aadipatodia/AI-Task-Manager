@@ -26,8 +26,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 SCOPES = ['https://www.googleapis.com/auth/gmail.send']
+<<<<<<< HEAD
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-zvux.onrender.com/oauth2callback")
 MANAGER_EMAIL = "patodiaaadi@gmail.com"
+=======
+REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-1-ugb8.onrender.com/oauth2callback")
+MANAGER_EMAIL = "abhilasha1333@gmail.com"
+>>>>>>> 6603ab397ab41a83224d8a8c83f7ec69df75bcbb
 
 conversation_history: Dict[str, List[Any]] = {}
 
@@ -140,6 +145,7 @@ class ManagerContext(BaseModel):
     sender_phone: str
     role: str
     current_time: datetime.datetime = Field(default_factory=datetime.datetime.now)
+    document_data: Optional[Dict] = None
     
 class WhatsAppPdfReportRequest(BaseModel):
     SID: str = "627"
@@ -189,11 +195,10 @@ Current Time: {current_time_str}
   - Always format as ISO: YYYY-MM-DDTHH:MM:SS
 * **Name Resolution**: Map names to login IDs from team directory
 
-### TASK STATUS WORKFLOW:
-1. **Pending** - Task is still open and not completed
-2. **Work Done** - Employee uses 'reported' action
-3. **Completed** - Manager uses 'close' action to approve
+### TASK STATUS RULES (API SID 607):
+You must determine the correct 'new_status' string by interpreting the user's intent and role within the conversation context. Do not look for specific keywords; understand the "state" the user is describing.
 
+<<<<<<< HEAD
 ### USER MANAGEMENT RULES (ADD / DELETE USERS):
 
 - Any authorized user can ADD a new user.
@@ -224,12 +229,27 @@ Current Time: {current_time_str}
 - 'open' → "Open"
 - 'partial' → "Partially Closed" (work in progress)
 - 'reported' → "Reported Closed" (employee marks as done, awaits approval)
+=======
+Assignees (Employees) - Status Options:
+- "Open": The user acknowledges receipt of the task or indicates it is in their queue.
+- "Work In Progress": The user indicates they have started the task, are currently performing the actions, or are in the middle of the process.
+- "Close": The user indicates they have finished their portion of the work and are submitting it for the manager's review. 
+>>>>>>> 6603ab397ab41a83224d8a8c83f7ec69df75bcbb
 
-**Role Permissions:**
-- Employees: Can mark tasks as 'pending' (open), 'partial' (in progress), or 'reported' (completed by employee)
-- Managers: Can 'close' (approve) or 'reopen' (reject) tasks
+Managers - Status Options:
+- "Closed": The user expresses final satisfaction, gives formal approval, or indicates the task is officially completed and finished.
+- "Reopened": The user expresses dissatisfaction, rejects the submitted work, or indicates that more work is needed on a previously "Close" task.
 
-When updating task status, extract any additional text from the user's message as a remark and pass it in the COMMENTS field.
+CRITICAL LOGIC:
+- Intent Interpretation: Map the intent of "starting/doing" to 'Work In Progress'. Map the intent of "submitting for review" to 'Close'. Map "final approval" to 'Closed'.
+- Role Boundary: Never use "Closed" for an employee's message. Never use "Close" for a manager's final sign-off.
+- Context: If a user says "I'm done with the first part," use 'Work In Progress'. If they say "Here is the final file," use 'Close'.
+- When updating task status, extract any additional text from the user's message as a remark and pass it in the COMMENTS field.
+DOCUMENT HANDLING:
+- If a document/image is received with a command, call the tool; the tool handles the attachment.
+- Case 1: Manager creates task with doc. (assign_new_task_tool)
+- Case 2: Employee completes task (Close) with doc. (update_task_status_tool)
+- Case 3: Employee updates task (Work In Progress/Open) with doc. (update_task_status_tool)
 
 ### PERFORMANCE REPORTING:
 When user asks about performance, pending tasks, statistics, reports, or task counts:
@@ -304,6 +324,7 @@ When user asks to send, share, or receive a report on WhatsApp:
 def load_team():
     """Static team directory - source of truth for authentication and name resolution."""
     return [
+        
         {"name": "mdpvvnl", "phone": "919650523477", "email": "varun.verma@mobineers.com", "login_code": "D-3514-1001"},
         {"name": "chairman", "phone": "91XXXXXXXXX", "email": "example@gmail.com", "login_code": "D-3514-1003"},
         {"name": "mddvvnl", "phone": "917428134319", "email": "patodiaaadi@gmail.com", "login_code": "D-3514-1002"},
@@ -561,7 +582,7 @@ async def fetch_task_counts_api(login_code: str, ctx_role: str):
             {"Control_Id": "107566", "Value": login_code, "Data_Form_Id": ""},
             {"Control_Id": "107568", "Value": "", "Data_Form_Id": ""},
             {"Control_Id": "107569", "Value": "", "Data_Form_Id": ""},
-            {"Control_Id": "107599", "Value": "1", "Data_Form_Id": ""},
+            {"Control_Id": "107599", "Value": "Assigned To Me", "Data_Form_Id": ""},
             {"Control_Id": "109599", "Value": "", "Data_Form_Id": ""},
             {"Control_Id": "108512", "Value": "", "Data_Form_Id": ""}
         ]
@@ -1014,115 +1035,105 @@ async def assign_new_task_tool(
     task_name: str,
     deadline: str
 ) -> str:
+    """
+    Assigns a new task to a user or group. 
+    Includes document handling if a file was sent with the command.
+    """
     try:
-        # Step 1: Resolve Name/ID using the GET_USERS_BY_ID API (SID 609)
-        # This handles both individual IDs (D-...) and Group IDs (G-...) 
+        # 1. Resolve Assignee from Team Directory
         team = load_team()
-        user_info = next(
-            (u for u in team if name.lower() in u["name"].lower()),
+        user = next(
+            (u for u in team if name.lower() in u["name"].lower() or name.lower() == u["login_code"].lower()),
             None
         )
 
-        if not user_info:
-            return f"User '{name}' not found in authorized directory."
-        user = user_info
+        if not user:
+            return f"Error: User or Group '{name}' not found in the authorized directory."
+        
         login_code = user["login_code"]
 
+        # 2. Handle Document Attachment (Case 1: Manager sends doc with task)
+        documents_child = []
+        if ctx.deps.document_data:
+            # Extract media metadata (supports both 'document' and 'image' types)
+            media_type = ctx.deps.document_data.get("type")
+            media_info = ctx.deps.document_data.get(media_type)
+            
+            if media_info:
+                logger.info(f"Downloading attachment for new task: {media_type}")
+                base64_data = download_and_encode_document(media_info)
+                
+                if base64_data:
+                    # Determine filename
+                    fname = media_info.get("filename") or (
+                        f"task_image_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png" 
+                        if media_type == "image" else "task_document.pdf"
+                    )
+                    
+                    documents_child.append(DocumentItem(
+                        DOCUMENT=DocumentInfo(VALUE=fname, BASE64=base64_data),
+                        DOCUMENT_NAME=fname
+                    ))
 
-        if not user_info or (isinstance(user_info, dict) and "error" in user_info):
-            return f"Error: Could not find user or group '{name}' in the system."
-        
-        # Step 2: Proceed to Create Task (SID 604) using the resolved code [cite: 80]
+        # 3. Prepare the CreateTaskRequest (SID 604)
         req = CreateTaskRequest(
             ASSIGNEE=login_code,
             DESCRIPTION=task_name,
             TASK_NAME=task_name,
             EXPECTED_END_DATE=to_appsavy_datetime(deadline),
             MOBILE_NUMBER=user["phone"][-10:],
+<<<<<<< HEAD
             
+=======
+            DETAILS=Details(
+                CHILD=[DetailChild(
+                    SEL="Y",
+                    LOGIN=login_code,
+                    PARTICIPANTS=user["name"].upper()
+                )]
+            ),
+            DOCUMENTS=Documents(CHILD=documents_child)
+>>>>>>> 6603ab397ab41a83224d8a8c83f7ec69df75bcbb
         )
         
-        logger.info(f"Attempting to create task for {login_code}")
-        logger.info(f"Full Payload: {req.model_dump_json(indent=2)}")
-        
+        # 4. Execute API Call
         api_response = await call_appsavy_api("CREATE_TASK", req)
         
-        logger.info(f"Raw API Response: {api_response}")
-        
         if not api_response:
-            return "API failure: No response from server."
+            return "API failure: No response from server during task creation."
         
         if isinstance(api_response, dict):
             if api_response.get('error'):
                 return f"API failure: {api_response.get('error')}"
             
-            if api_response.get('RESULT') == 1 or api_response.get('result') == 1:
-                whatsapp_msg = (
-                    f"New Task Assigned:\n\n"
-                    f"Task: {task_name}\n"
-                    f"Due Date: {deadline}\n\n"
-                    f"Please complete on time."
-                )
-
+            # Check for success (RESULT 1)
+            if api_response.get('RESULT') == "1" or api_response.get('result') == "1":
+                # --- Send Notifications ---
                 phone_id = os.getenv("PHONE_NUMBER_ID")
-                if not phone_id:
-                    logger.error("PHONE_NUMBER_ID missing. WhatsApp notification skipped.")
-                else:
-                    wa_status = send_registration_template(
+                whatsapp_msg = f"New Task Assigned:\n\nTask: {task_name}\nDue Date: {deadline}\n\nPlease complete on time."
+
+                if phone_id:
+                    # Send Registration Template
+                    send_registration_template(
                         recipient_number=user["phone"],
                         customer_name=user["name"].title(),
                         phone_number_id=phone_id
                     )
+                    # Send Task Details
+                    send_whatsapp_message(user["phone"], whatsapp_msg, phone_id)
 
-                    if wa_status:
-                        logger.info(f"Template successfully sent to {user['name']}")
-                    else:
-                        logger.error(f"Failed to send template to {user['name']}")
-
-                    send_whatsapp_message(
-                        user["phone"],
-                        whatsapp_msg,
-                        phone_id
-                    )
-
+                # Send Emails
                 email_subject = f"New Task Assigned: {task_name}"
-                email_body = f"""Dear {user["name"].title()},
-                You have been assigned a new task:
+                send_email(user["email"], email_subject, whatsapp_msg)
+                send_email(MANAGER_EMAIL, f"Task Confirmed: {task_name}", f"Assigned to {user['name']}.")
 
-                Task Name: {task_name}
-                Due Date: {deadline}
+                return f"Task successfully assigned to {user['name'].title()} (ID: {login_code})."
 
-                Please ensure timely completion.
-                Best regards,
-                """
-
-                send_email(
-                    user["email"],
-                    email_subject,
-                    email_body
-                )
-
-                manager_subject = f"Task Assignment Confirmation: {task_name}"
-                manager_body = f"""Task Assignment Confirmed
-
-                Assignee: {user["name"].title()}
-                Task: {task_name}
-                Due Date: {deadline}
-
-                The task has been successfully assigned and the employee has been notified.
-                """
-
-                send_email(MANAGER_EMAIL, manager_subject, manager_body)
-                return f"Task successfully assigned to {user['name'].title()} (Login: {login_code}).\nNotifications sent via WhatsApp and email."
-
-            else:
-                return f"API returned unexpected response: {api_response}"
-        
-        return "API failure: Unexpected response format."
+        return f"API Error: {api_response.get('MESSAGE', 'Unexpected response format')}"
         
     except Exception as e:
         logger.error(f"assign_new_task_tool error: {str(e)}", exc_info=True)
-        return f"Error assigning task: {str(e)}"
+        return f"System Error: Unable to assign task ({str(e)})"
 
 async def assign_task_by_phone_tool(
     ctx: RunContext[ManagerContext],
@@ -1150,68 +1161,37 @@ async def assign_task_by_phone_tool(
         logger.error(f"assign_task_by_phone_tool error: {str(e)}", exc_info=True)
         return f"Error assigning task by phone: {str(e)}"
 
-async def update_task_status_tool(ctx: RunContext[ManagerContext], task_id: str, action: str, remark: Optional[str] = None) -> str:
+async def update_task_status_tool(
+    ctx: RunContext[ManagerContext], 
+    task_id: str, 
+    status: str, 
+    remark: Optional[str] = None
+) -> str:
+    """
+    Updates the status of a task. Gemini interprets user intent and role to select 
+    the correct status: Open, Work In Progress, Close, Closed, or Reopened.
+    """
+    # Handle Documents for Cases 2 & 3 (Employee/Manager sending docs with status update)
+    doc_name = ""
+    base64_data = ""
+    
+    if ctx.deps.document_data:
+        media_type = ctx.deps.document_data.get("type") # 'document' or 'image'
+        media_info = ctx.deps.document_data.get(media_type, {})
+        
+        if media_info:
+            logger.info(f"Processing attachment for status update on Task {task_id}")
+            base64_data = download_and_encode_document(media_info)
+            if base64_data:
+                doc_name = media_info.get("filename", f"{media_type}_update.png" if media_type == "image" else "update.pdf")
 
-    """
-    Updates task status via API (SID 607).
-    Enforces role-based permissions.
-    """
     try:
-        status_map = {
-            # task NOT completed          
-            "pending": "Open",
-            "open": "Open",
-
-            # task in progress
-            "in progress": "Partially Closed",
-            "partial": "Partially Closed",
-            "working": "Partially Closed",
-
-            # task completed by employee
-            "completed": "Reported Closed",
-            "done": "Reported Closed",
-            "reported": "Reported Closed",
-
-            # manager only
-            "close": "Closed",
-            "reopen": "Reopened"
-        }
-
-
-        
-        new_status = status_map.get(action.lower())
-        if not new_status:
-            return "Error: Could not understand the requested task status."
-
-        
-        employee_statuses = {
-            "Open",
-            "Partially Closed",
-            "Reported Closed"
-        }
-
-        manager_statuses = {
-            "Closed",
-            "Reopened"
-        }
-
-        if new_status == "Closed" and ctx.deps.role != "manager":
-            return "Permission Denied: Only managers can close tasks."
-
-
-        if new_status in {"Closed", "Reopened"} and ctx.deps.role != "manager":
-            return "Permission Denied: Only managers can perform this action."
-
-        
-        team = load_team()
-        user = next((u for u in team if u['phone'] == ctx.deps.sender_phone), None)
-        if not user:
-            return "Error: Could not identify your user profile."
-        
         req = UpdateTaskRequest(
             TASK_ID=task_id,
-            STATUS=new_status,
-            COMMENTS=remark or "Updated by employee"
+            STATUS=status,
+            COMMENTS=remark or f"Status updated to {status}",
+            UPLOAD_DOCUMENT=doc_name,
+            BASE64=base64_data
         )
         
         api_response = await call_appsavy_api("UPDATE_STATUS", req)
@@ -1223,14 +1203,17 @@ async def update_task_status_tool(ctx: RunContext[ManagerContext], task_id: str,
             if api_response.get('error'):
                 return f"API failure: {api_response.get('error')}"
             
+            # AppSavy SID 607 returns RESULT: 1 on success
             if api_response.get('RESULT') == 1 or api_response.get('result') == 1:
-                return f"Success: Task {task_id} updated to '{new_status}'."
+                return f"Success: Task {task_id} updated to '{status}'."
             else:
-                return f"API returned unexpected response: {api_response}"
-    
+                return f"API message: {api_response.get('MESSAGE', 'Unexpected response format')}"
+                
+        return "API failure: Unexpected response format."
+
     except Exception as e:
         logger.error(f"update_task_status_tool error: {str(e)}", exc_info=True)
-        return f"Error updating task status: {str(e)}"
+        return f"Error updating task: {str(e)}"
     
 async def handle_message(command, sender, pid, message=None, full_message=None):
     try:
@@ -1249,7 +1232,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
             return
     
-        manager_phone = os.getenv("MANAGER_PHONE", "919650523477")
+        manager_phone = os.getenv("MANAGER_PHONE", "919310104458")
         team = load_team()
     
         if sender == manager_phone:
@@ -1288,7 +1271,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                           f"Task successfully assigned to:\n" + "\n".join(assignees),
                           pid
                             )
-                    return  # 🚨 agent.run() yahin stop
+                    return  
 
 
                 current_time = datetime.datetime.now()
@@ -1306,13 +1289,16 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 current_agent.tool(send_whatsapp_report_tool)
                 current_agent.tool(add_user_tool)
                 current_agent.tool(delete_user_tool)
-
-
             
                 result = await current_agent.run(
                     command,
                     message_history=conversation_history[sender],
-                    deps=ManagerContext(sender_phone=sender, role=role, current_time=current_time)
+                    deps=ManagerContext(
+                        sender_phone=sender, 
+                        role=role, 
+                        current_time=current_time,
+                        document_data=message  
+                    )
                 )
             
                 conversation_history[sender] = result.all_messages()
