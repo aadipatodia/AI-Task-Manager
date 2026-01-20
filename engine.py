@@ -1175,6 +1175,7 @@ EMPLOYEE_ALLOWED_STATUSES = {
 
 MANAGER_ALLOWED_STATUSES = {
     # final approval
+    "close":"Closed",
     "closed": "Closed",
     "final close": "Closed",
     "approve": "Closed",
