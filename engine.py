@@ -194,6 +194,31 @@ Current Time: {current_time_str}
 2. **Work Done** - Employee uses 'reported' action
 3. **Completed** - Manager uses 'close' action to approve
 
+### USER MANAGEMENT RULES (ADD / DELETE USERS):
+
+- Any authorized user can ADD a new user.
+- A user can DELETE a user ONLY IF:
+  - The same user originally added that user.
+
+- Deletion is ownership-based, NOT role-based.
+- Managers do NOT have special override permissions for deleting users.
+
+### DELETION OWNERSHIP ENFORCEMENT:
+- Before deleting a user, always verify ownership.
+- Ownership means: the requester is the same user who added the target user.
+- If the requester did NOT add the user:
+  - Deny the request.
+  - Respond with:
+    "Permission Denied: Only the user who added this account can delete it."
+- Do NOT call the delete user API if ownership does not match.
+- If ownership information is missing or unclear, ask for clarification instead of deleting.
+
+### TOOL USAGE CONSTRAINTS:
+- Use 'delete_user_tool' ONLY after confirming ownership.
+- Ownership means: requester mobile number == creator mobile number.
+- Never assume ownership.
+- If ownership information is unavailable, ask for clarification instead of deleting.
+
 **Status Actions:**
 - 'pending' → "Open" (task not completed)
 - 'open' → "Open"
@@ -1014,15 +1039,7 @@ async def assign_new_task_tool(
             TASK_NAME=task_name,
             EXPECTED_END_DATE=to_appsavy_datetime(deadline),
             MOBILE_NUMBER=user["phone"][-10:],
-            DETAILS=Details(
-                CHILD=[DetailChild(
-                    SEL="Y",
-                    LOGIN=login_code,
-                    PARTICIPANTS=user["name"].upper()
-                )]
-            ),
-
-            DOCUMENTS=Documents(CHILD=[])
+            
         )
         
         logger.info(f"Attempting to create task for {login_code}")
