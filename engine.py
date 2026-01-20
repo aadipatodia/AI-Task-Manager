@@ -1114,7 +1114,7 @@ async def assign_new_task_tool(
                     # Send Registration Template
                     send_registration_template(
                         recipient_number=user["phone"],
-                        customer_name=user["name"].title(),
+                        user_identifier=user["name"].title(),
                         phone_number_id=phone_id
                     )
                     # Send Task Details
