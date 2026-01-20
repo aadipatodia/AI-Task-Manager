@@ -139,7 +139,7 @@ ai_model = GeminiModel('gemini-2.0-flash-exp')
 class ManagerContext(BaseModel):
     sender_phone: str
     role: str
-    current_time: datetime.datetime = Field(default_factory=datetime.now)
+    current_time: datetime.datetime = Field(default_factory=datetime.datetime.now)
     document_data: Optional[Dict] = None
     
 class WhatsAppPdfReportRequest(BaseModel):
