@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 SCOPES = ['https://www.googleapis.com/auth/gmail.send']
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-1-ugb8.onrender.com/oauth2callback")
-MANAGER_EMAIL = "patodiaaadi@gmail.com"
+MANAGER_EMAIL = "abhilasha1333@gmail.com"
 
 conversation_history: Dict[str, List[Any]] = {}
 
@@ -286,6 +286,7 @@ When user asks to send, share, or receive a report on WhatsApp:
 def load_team():
     """Static team directory - source of truth for authentication and name resolution."""
     return [
+        
         {"name": "mdpvvnl", "phone": "919650523477", "email": "varun.verma@mobineers.com", "login_code": "D-3514-1001"},
         {"name": "chairman", "phone": "91XXXXXXXXX", "email": "example@gmail.com", "login_code": "D-3514-1003"},
         {"name": "mddvvnl", "phone": "917428134319", "email": "patodiaaadi@gmail.com", "login_code": "D-3514-1002"},
