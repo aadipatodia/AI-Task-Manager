@@ -1107,7 +1107,7 @@ async def assign_new_task_tool(
                 return f"API failure: {api_response.get('error')}"
             
             # Check for success (RESULT 1)
-            if api_response.get('RESULT') == "1" or api_response.get('result') == "1":
+            if str(api_response.get('result'))== "1" or str(api_response.get('RESULT'))=="1":
                 # --- Send Notifications ---
                 phone_id = os.getenv("PHONE_NUMBER_ID")
                 whatsapp_msg = f"New Task Assigned:\n\nTask: {task_name}\nDue Date: {deadline}\n\nPlease complete on time."
@@ -1129,7 +1129,7 @@ async def assign_new_task_tool(
 
                 return f"Task successfully assigned to {user['name'].title()} (ID: {login_code})."
 
-        return f"API Error: {api_response.get('MESSAGE', 'Unexpected response format')}"
+        return f"API Error: {api_response.get('resultmessage', 'Unexpected response format')}"
         
     except Exception as e:
         logger.error(f"assign_new_task_tool error: {str(e)}", exc_info=True)
