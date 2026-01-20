@@ -1159,6 +1159,33 @@ async def assign_task_by_phone_tool(
         logger.error(f"assign_task_by_phone_tool error: {str(e)}", exc_info=True)
         return f"Error assigning task by phone: {str(e)}"
 
+
+EMPLOYEE_ALLOWED_STATUSES = {
+    "open": "Open",
+    "work in progress": "Work In Progress",
+    "wip": "Work In Progress",
+    "in progress": "Work In Progress",
+
+    # submission for approval
+    "close": "Close",
+    "done": "Close",
+    "completed": "Close",
+    "submit": "Close"
+}
+
+MANAGER_ALLOWED_STATUSES = {
+    # final approval
+    "closed": "Closed",
+    "final close": "Closed",
+    "approve": "Closed",
+    "approved": "Closed",
+
+    # rejection
+    "reopen": "Reopened",
+    "reopened": "Reopened",
+    "reject": "Reopened"
+}
+
 async def update_task_status_tool(
     ctx: RunContext[ManagerContext], 
     task_id: str, 
@@ -1166,9 +1193,35 @@ async def update_task_status_tool(
     remark: Optional[str] = None
 ) -> str:
     """
-    Updates the status of a task. Gemini interprets user intent and role to select 
-    the correct status: Open, Work In Progress, Close, Closed, or Reopened.
+   Status rules:
+    - Employee: Open → Work In Progress → Close (submission)
+    - Manager: Closed (final) or Reopened
     """
+    role = ctx.deps.role
+    status_key = status.lower().strip()
+    #role enforcement
+    if role == "employee":
+        if status_key not in EMPLOYEE_ALLOWED_STATUSES:
+            return(
+                "Invalid status.\n\n"
+                "You can use only:\n"
+                "- Open\n"
+                "- Work In Progress\n"
+                "- Close (Submit for approval)"
+            )
+        final_status = EMPLOYEE_ALLOWED_STATUSES[status_key]
+
+    elif role == "manager":
+        if status_key not in MANAGER_ALLOWED_STATUSES:
+            return (
+                "Invalid status.\n\n"
+                "Manager can use only:\n"
+                "- Closed(FINAL APPROVAL)\n"
+                "- Reopened"
+            )
+        final_status = MANAGER_ALLOWED_STATUSES[status_key]
+    else:
+        return "Permission denied"
     # Handle Documents for Cases 2 & 3 (Employee/Manager sending docs with status update)
     doc_name = ""
     base64_data = ""
@@ -1186,8 +1239,8 @@ async def update_task_status_tool(
     try:
         req = UpdateTaskRequest(
             TASK_ID=task_id,
-            STATUS=status,
-            COMMENTS=remark or f"Status updated to {status}",
+            STATUS=final_status,
+            COMMENTS=remark or f"Status updated to {final_status}",
             UPLOAD_DOCUMENT=doc_name,
             BASE64=base64_data
         )
@@ -1203,7 +1256,7 @@ async def update_task_status_tool(
             
             # AppSavy SID 607 returns RESULT: 1 on success
             if api_response.get('RESULT') == 1 or api_response.get('result') == 1:
-                return f"Success: Task {task_id} updated to '{status}'."
+                return f"Success: Task {task_id} updated to '{final_status}'."
             else:
                 return f"API message: {api_response.get('MESSAGE', 'Unexpected response format')}"
                 
