@@ -1,6 +1,6 @@
 import os
 import json
-import datetime 
+import datetime
 import base64
 import requests
 import logging
@@ -27,8 +27,7 @@ logger = logging.getLogger(__name__)
 
 SCOPES = ['https://www.googleapis.com/auth/gmail.send']
 
-REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-zvux.onrender.com/oauth2callback")
-MANAGER_EMAIL = "patodiaaadi@gmail.com"
+
 
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-1-ugb8.onrender.com/oauth2callback")
 MANAGER_EMAIL = "abhilasha1333@gmail.com"
@@ -492,7 +491,7 @@ def to_appsavy_datetime(iso_dt: str) -> str:
     Converts ISO datetime (YYYY-MM-DDTHH:MM:SS)
     to Appsavy format: YYYY-MM-DD HH:MM:SS.mmm
     """
-    dt = datetime.fromisoformat(iso_dt)
+    dt = datetime.datetime.fromisoformat(iso_dt)
     return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
