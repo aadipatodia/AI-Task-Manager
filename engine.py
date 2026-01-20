@@ -420,7 +420,7 @@ async def add_user_tool(
 
     if isinstance(res, dict) and (res.get("RESULT") == 1 or res.get("result") == 1):
 
-        return f"User {name} added successfully."
+        return f"User {name} with Mobile number {mobile[-10:]} and email {email} added successfully."
     return f"Failed to add user: {res}"
 
 async def delete_user_tool(
@@ -440,7 +440,7 @@ async def delete_user_tool(
     res = await call_appsavy_api("ADD_DELETE_USER", req)
 
     if isinstance(res, dict) and (res.get("RESULT") == 1 or res.get("result") == 1):
-        return f"User {name} deleted successfully."
+        return f"User {name} with Mobile number {mobile[-10:]} and email {email} deleted successfully."
     return f"Failed to delete user: {res}"
 
 def get_gmail_service():
