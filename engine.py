@@ -1,6 +1,6 @@
 import os
 import json
-import datetime
+import datetime from datetimefrom
 import base64
 import requests
 import logging
@@ -26,13 +26,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 SCOPES = ['https://www.googleapis.com/auth/gmail.send']
-<<<<<<< HEAD
+
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-zvux.onrender.com/oauth2callback")
 MANAGER_EMAIL = "patodiaaadi@gmail.com"
-=======
+
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-1-ugb8.onrender.com/oauth2callback")
 MANAGER_EMAIL = "abhilasha1333@gmail.com"
->>>>>>> 6603ab397ab41a83224d8a8c83f7ec69df75bcbb
+
 
 conversation_history: Dict[str, List[Any]] = {}
 
@@ -198,7 +198,7 @@ Current Time: {current_time_str}
 ### TASK STATUS RULES (API SID 607):
 You must determine the correct 'new_status' string by interpreting the user's intent and role within the conversation context. Do not look for specific keywords; understand the "state" the user is describing.
 
-<<<<<<< HEAD
+
 ### USER MANAGEMENT RULES (ADD / DELETE USERS):
 
 - Any authorized user can ADD a new user.
@@ -229,12 +229,12 @@ You must determine the correct 'new_status' string by interpreting the user's in
 - 'open' → "Open"
 - 'partial' → "Partially Closed" (work in progress)
 - 'reported' → "Reported Closed" (employee marks as done, awaits approval)
-=======
+
 Assignees (Employees) - Status Options:
 - "Open": The user acknowledges receipt of the task or indicates it is in their queue.
 - "Work In Progress": The user indicates they have started the task, are currently performing the actions, or are in the middle of the process.
 - "Close": The user indicates they have finished their portion of the work and are submitting it for the manager's review. 
->>>>>>> 6603ab397ab41a83224d8a8c83f7ec69df75bcbb
+
 
 Managers - Status Options:
 - "Closed": The user expresses final satisfaction, gives formal approval, or indicates the task is officially completed and finished.
@@ -864,9 +864,9 @@ async def get_performance_report_tool(
 
         results = []
 
-        # =====================================================
+        
         # 🔁 FETCH DATA PER USER (THIS FIXES THE BUG)
-        # =====================================================
+      
         for member in display_team:
             member_login = member["login_code"]
 
@@ -1082,9 +1082,8 @@ async def assign_new_task_tool(
             TASK_NAME=task_name,
             EXPECTED_END_DATE=to_appsavy_datetime(deadline),
             MOBILE_NUMBER=user["phone"][-10:],
-<<<<<<< HEAD
             
-=======
+
             DETAILS=Details(
                 CHILD=[DetailChild(
                     SEL="Y",
@@ -1093,7 +1092,7 @@ async def assign_new_task_tool(
                 )]
             ),
             DOCUMENTS=Documents(CHILD=documents_child)
->>>>>>> 6603ab397ab41a83224d8a8c83f7ec69df75bcbb
+
         )
         
         # 4. Execute API Call
