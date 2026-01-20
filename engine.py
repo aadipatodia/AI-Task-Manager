@@ -26,7 +26,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 SCOPES = ['https://www.googleapis.com/auth/gmail.send']
-REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-38w7.onrender.com/oauth2callback")
+REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-zvux.onrender.com/oauth2callback")
 MANAGER_EMAIL = "patodiaaadi@gmail.com"
 
 conversation_history: Dict[str, List[Any]] = {}
@@ -471,7 +471,7 @@ def to_appsavy_datetime(iso_dt: str) -> str:
     Converts ISO datetime (YYYY-MM-DDTHH:MM:SS)
     to Appsavy format: YYYY-MM-DD HH:MM:SS.mmm
     """
-    dt = datetime.datetime.fromisoformat(iso_dt)
+    dt = datetime.fromisoformat(iso_dt)
     return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
