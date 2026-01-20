@@ -97,7 +97,7 @@ API_CONFIGS = {
             "cid": "64",
             "uid": "TM_API",
             "roleid": "1627",
-            "TokenKey": "e5b4e098-f8b9-47bf-83f1-751582bfe147"
+            "TokenKey": "7bf28d4d-c14f-483d-872a-78c9c16bd982"
         }
     },
     "GET_COUNT": {
