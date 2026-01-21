@@ -418,10 +418,27 @@ async def add_user_tool(
 
     res = await call_appsavy_api("ADD_DELETE_USER", req)
 
-    if isinstance(res, dict) and (res.get("RESULT") == 1 or res.get("result") == 1):
+    if not isinstance(res,dict):
+        return f"Failed to add user: {res}"
+    msg = res.get("resultmessage","").lower()
 
-        return f"User {name} with Mobile number {mobile[-10:]} and email {email} added successfully."
-    return f"Failed to add user: {res}"
+    #user already exists
+    if "already exists" in msg:
+        return ( " This mobile number already exists in the system.\n\n"
+            f"{res.get('resultmessage')}\n\n"
+            "If you want to REPLACE the existing user, reply:\n"
+            "DELETE & ADD")
+    
+    # ✅ ACTUAL SUCCESS
+    if str(res.get("result")) == "1" or str(res.get("RESULT")) == "1":
+        return (
+            f" User added successfully.\n\n"
+            f"Name: {name}\n"
+            f"Mobile: {mobile[-10:]}\n"
+            f"Email: {email}"
+        )
+    
+    return f" Failed to add user: {res}"
 
 async def delete_user_tool(
     ctx: RunContext[ManagerContext],
@@ -439,9 +456,16 @@ async def delete_user_tool(
 
     res = await call_appsavy_api("ADD_DELETE_USER", req)
 
-    if isinstance(res, dict) and (res.get("RESULT") == 1 or res.get("result") == 1):
-        return f"User {name} with Mobile number {mobile[-10:]} and email {email} deleted successfully."
+    msg = res.get("resultmessage", "").lower()
+
+    if "permission denied" in msg:
+        return " Permission denied. You did not add this user."
+
+    if str(res.get("result")) == "1":
+        return "User deleted successfully."
+    
     return f"Failed to delete user: {res}"
+
 
 def get_gmail_service():
     """Initialize Gmail API service with OAuth2 credentials from environment variables."""
@@ -1268,6 +1292,18 @@ async def update_task_status_tool(
         return f"Error updating task: {str(e)}"
     
 async def handle_message(command, sender, pid, message=None, full_message=None):
+    # 🔥 MANUAL COMMAND (BEFORE GEMINI)
+    if command and command.strip().lower() == "delete & add":
+        send_whatsapp_message(
+            sender,
+            "Please resend user details in this format:\n\n"
+            "Add user\nName\nMobile\nEmail",
+            pid
+        )
+        return
+
+
+
     try:
         if len(sender) == 10 and not sender.startswith('91'):
             sender = f"91{sender}"
