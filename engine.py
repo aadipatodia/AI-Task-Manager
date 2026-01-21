@@ -37,8 +37,8 @@ MANAGER_EMAIL = "ankita.mishra@mobineers.com"
 # Initialize MongoDB Connection
 MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI, tlsCAFile=certifi.where()) if MONGO_URI else None
-db = client['ai_task_manager'] if client else None
-users_collection = db['users'] if db else None
+db = client['ai_task_manager'] if client is not None else None
+users_collection = db['users'] if db is not None else None
 conversation_history: Dict[str, List[Any]] = {}
 
 APPSAVY_BASE_URL = "https://configapps.appsavy.com/api/AppsavyRestService"
@@ -329,7 +329,7 @@ When user asks to send, share, or receive a report on WhatsApp:
 def load_team():
     """Ab ye function 100% dynamic hai, sirf MongoDB se users fetch karega."""
     if users_collection is None:
-        logger.error("MongoDB connection initialize nahi ho payi.")
+        logger.error("MongoDB connection cant be initialized")
         return []
 
     try:
