@@ -30,7 +30,7 @@ SCOPES = ['https://www.googleapis.com/auth/gmail.send']
 
 
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-1-ugb8.onrender.com/oauth2callback")
-MANAGER_EMAIL = "abhilasha1333@gmail.com"
+MANAGER_EMAIL = "ankita.mishra@mobineers.com"
 
 
 conversation_history: Dict[str, List[Any]] = {}
