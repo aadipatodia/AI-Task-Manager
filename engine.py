@@ -1,4 +1,6 @@
 import os
+from pymongo import MongoClient
+import certifi
 import json
 import datetime
 import base64
@@ -32,7 +34,11 @@ SCOPES = ['https://www.googleapis.com/auth/gmail.send']
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-1-ugb8.onrender.com/oauth2callback")
 MANAGER_EMAIL = "ankita.mishra@mobineers.com"
 
-
+# Initialize MongoDB Connection
+MONGO_URI = os.getenv("MONGO_URI")
+client = MongoClient(MONGO_URI, tlsCAFile=certifi.where()) if MONGO_URI else None
+db = client['ai_task_manager'] if client else None
+users_collection = db['users'] if db else None
 conversation_history: Dict[str, List[Any]] = {}
 
 APPSAVY_BASE_URL = "https://configapps.appsavy.com/api/AppsavyRestService"
@@ -321,14 +327,22 @@ When user asks to send, share, or receive a report on WhatsApp:
 """
 
 def load_team():
-    """Static team directory - source of truth for authentication and name resolution."""
-    return [
+    """Ab ye function 100% dynamic hai, sirf MongoDB se users fetch karega."""
+    if users_collection is None:
+        logger.error("MongoDB connection initialize nahi ho payi.")
+        return []
+
+    try:
+        # Database se saare users fetch karein
+        # {"_id": 0} se MongoDB ki default ID hat jati hai
+        db_users = list(users_collection.find({}, {"_id": 0}))
         
-        {"name": "mdpvvnl", "phone": "919650523477", "email": "varun.verma@mobineers.com", "login_code": "D-3514-1001"},
-        {"name": "chairman", "phone": "91XXXXXXXXX", "email": "example@gmail.com", "login_code": "D-3514-1003"},
-        {"name": "mddvvnl", "phone": "917428134319", "email": "patodiaaadi@gmail.com", "login_code": "D-3514-1002"},
-        {"name": "ce_ghaziabad", "phone": "91XXXXXXXXXX", "email": "ce@example.com", "login_code": "D-3514-1004"}
-    ]
+        logger.info(f"Successfully loaded {len(db_users)} users from MongoDB.")
+        return db_users
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch users from MongoDB: {e}")
+        return []
 
 class DetailChild(BaseModel):
     SEL: str = "Y"
@@ -431,14 +445,35 @@ async def add_user_tool(
     
     # ✅ ACTUAL SUCCESS
     if str(res.get("result")) == "1" or str(res.get("RESULT")) == "1":
+        #Note: Adjust the key 'LOGIN_CODE' if the API returns it under a different name
+        login_code = res.get("login_code") or res.get("LOGIN_CODE") or res.get("user_id")
+        if not login_code:
+            return "User added in system, but login code was not returned by API."
+        
+        # Prepare user data for MongoDB
+        new_user = {
+            "name": name.lower(),
+            "phone": "91" + mobile[-10:],
+            "email": email,
+            "login_code": login_code
+        }
+        # Store in MongoDB (Upsert ensures we don't create duplicates for the same phone)
+        if users_collection is not None:
+            users_collection.update_one(
+                {"phone": new_user["phone"]},
+                {"$set": new_user},
+                upsert=True
+            )
         return (
-            f" User added successfully.\n\n"
+            f"User added successfully and saved to database.\n\n"
             f"Name: {name}\n"
-            f"Mobile: {mobile[-10:]}\n"
-            f"Email: {email}"
+            f"Login Code: {login_code}\n"
+            f"Mobile: {mobile[-10:]}"
         )
     
-    return f" Failed to add user: {res}"
+    return f"Failed to add user: {res.get('resultmessage')}"
+
+# engine.py mein delete_user_tool ko isse replace karein
 
 async def delete_user_tool(
     ctx: RunContext[ManagerContext],
@@ -456,15 +491,26 @@ async def delete_user_tool(
 
     res = await call_appsavy_api("ADD_DELETE_USER", req)
 
+    if not isinstance(res, dict):
+        return f"Failed to delete user: {res}"
+
     msg = res.get("resultmessage", "").lower()
 
     if "permission denied" in msg:
         return " Permission denied. You did not add this user."
 
-    if str(res.get("result")) == "1":
-        return "User deleted successfully."
+    # ✅ Success Check
+    if str(res.get("result")) == "1" or str(res.get("RESULT")) == "1":
+        
+        # --- MongoDB se bhi hatane ka logic ---
+        if users_collection is not None:
+            # Phone number ke base par document delete karein
+            users_collection.delete_one({"phone": "91" + mobile[-10:]})
+            logger.info(f"User with mobile {mobile[-10:]} removed from MongoDB.")
+
+        return "User deleted successfully from system and database."
     
-    return f"Failed to delete user: {res}"
+    return f"Failed to delete user: {res.get('resultmessage')}"
 
 
 def get_gmail_service():
