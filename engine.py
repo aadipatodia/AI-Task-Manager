@@ -431,45 +431,43 @@ async def add_user_tool(
     )
 
     res = await call_appsavy_api("ADD_DELETE_USER", req)
-
-    if not isinstance(res,dict):
-        return f"Failed to add user: {res}"
-    msg = res.get("resultmessage","").lower()
-
-    #user already exists
-    if "already exists" in msg:
-        return ( " This mobile number already exists in the system.\n\n"
-            f"{res.get('resultmessage')}\n\n"
-            "If you want to REPLACE the existing user, reply:\n"
-            "DELETE & ADD")
+    if not isinstance(res, dict): return f"Failed to add user: {res}"
     
-    # ✅ ACTUAL SUCCESS
+    msg = res.get("resultmessage", "").lower()
+    if "already exists" in msg: return "This mobile number already exists."
+
     if str(res.get("result")) == "1" or str(res.get("RESULT")) == "1":
-        #Note: Adjust the key 'LOGIN_CODE' if the API returns it under a different name
+        # --- FALLBACK LOGIC START ---
+        # 1. Pehle direct response mein ID check karein
         login_code = res.get("login_code") or res.get("LOGIN_CODE") or res.get("user_id")
-        if not login_code:
-            return "User added in system, but login code was not returned by API."
         
-        # Prepare user data for MongoDB
-        new_user = {
-            "name": name.lower(),
-            "phone": "91" + mobile[-10:],
-            "email": email,
-            "login_code": login_code
-        }
-        # Store in MongoDB (Upsert ensures we don't create duplicates for the same phone)
-        if users_collection is not None:
-            users_collection.update_one(
-                {"phone": new_user["phone"]},
-                {"$set": new_user},
-                upsert=True
+        # 2. Agar ID nahi mili, toh Assignee List (SID 606) se fetch karein
+        if not login_code:
+            logger.info(f"ID not found in response, fetching list for {mobile}")
+            assignee_req = GetAssigneeRequest(
+                Event="0", 
+                Child=[{"Control_Id": "106771", "AC_ID": "111057"}]
             )
-        return (
-            f"User added successfully and saved to database.\n\n"
-            f"Name: {name}\n"
-            f"Login Code: {login_code}\n"
-            f"Mobile: {mobile[-10:]}"
-        )
+            assignee_res = await call_appsavy_api("GET_ASSIGNEE", assignee_req)
+            
+            if isinstance(assignee_res, list):
+                target = mobile[-10:]
+                for item in assignee_res:
+                    item_mobile = str(item.get("MOBILE", "") or item.get("phone", ""))
+                    if target in item_mobile:
+                        login_code = item.get("LOGIN_ID") or item.get("ID")
+                        break
+        # --- FALLBACK LOGIC END ---
+
+        if not login_code:
+            return f"User '{name}' created, but I couldn't fetch their ID. Please use 'get assignee list' to find it."
+
+        # MongoDB mein save karein
+        new_user = {"name": name.lower(), "phone": "91" + mobile[-10:], "email": email, "login_code": login_code}
+        if users_collection is not None:
+            users_collection.update_one({"phone": new_user["phone"]}, {"$set": new_user}, upsert=True)
+            
+        return f"User added & saved to database.\nName: {name}\nLogin Code: {login_code}"
     
     return f"Failed to add user: {res.get('resultmessage')}"
 
