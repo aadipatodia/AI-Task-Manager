@@ -6,6 +6,7 @@ import datetime
 import base64
 import requests
 import logging
+import re
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
@@ -422,6 +423,7 @@ async def add_user_tool(
     email: str,
     mobile: str
 ) -> str:
+    # 1. Attempt to add the user to Appsavy
     req = AddDeleteUserRequest(
         ACTION="Add",
         CREATOR_MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
@@ -433,45 +435,63 @@ async def add_user_tool(
     res = await call_appsavy_api("ADD_DELETE_USER", req)
     if not isinstance(res, dict): return f"Failed to add user: {res}"
     
-    msg = res.get("resultmessage", "").lower()
-    if "already exists" in msg: return "This mobile number already exists."
+    msg = res.get("resultmessage", "")
+    login_code = None
+    status_note = ""
 
+    # CASE A: New user created successfully (Extract Login Code via Regex)
     if str(res.get("result")) == "1" or str(res.get("RESULT")) == "1":
-        # --- FALLBACK LOGIC START ---
-        # 1. Pehle direct response mein ID check karein
-        login_code = res.get("login_code") or res.get("LOGIN_CODE") or res.get("user_id")
+        match = re.search(r"login Code:\s*([A-Z0-9-]+)", msg, re.IGNORECASE)
+        login_code = match.group(1) if match else None
+        status_note = "New user created and saved to database"
+
+    # CASE B: User already exists in Appsavy (Strict Name Sync)
+    elif "already exists" in msg.lower():
+        logger.info(f"User exists in Appsavy, performing strict name sync for: {name}")
         
-        # 2. Agar ID nahi mili, toh Assignee List (SID 606) se fetch karein
-        if not login_code:
-            logger.info(f"ID not found in response, fetching list for {mobile}")
-            assignee_req = GetAssigneeRequest(
-                Event="0", 
-                Child=[{"Control_Id": "106771", "AC_ID": "111057"}]
-            )
-            assignee_res = await call_appsavy_api("GET_ASSIGNEE", assignee_req)
-            
-            if isinstance(assignee_res, list):
-                target = mobile[-10:]
-                for item in assignee_res:
-                    item_mobile = str(item.get("MOBILE", "") or item.get("phone", ""))
-                    if target in item_mobile:
-                        login_code = item.get("LOGIN_ID") or item.get("ID")
-                        break
-        # --- FALLBACK LOGIC END ---
+        assignee_req = GetAssigneeRequest(
+            Event="0",
+            Child=[{"Control_Id": "106771", "AC_ID": "111057"}]
+        )
+        assignee_res = await call_appsavy_api("GET_ASSIGNEE", assignee_req)
+        
+        result_list = []
+        if isinstance(assignee_res, dict):
+            result_list = assignee_res.get("data", {}).get("Result", [])
+        
+        if result_list:
+            target_name = name.lower().strip()
+            # Loop through list for a STRICT match
+            for item in result_list:
+                item_name = str(item.get("NAME", "")).lower().strip()
+                
+                # Removed Smart Match: Now uses exact equality (==)
+                if target_name == item_name:
+                    login_code = item.get("ID") or item.get("LOGIN_ID")
+                    status_note = f"Existing user '{item_name}' found and synced"
+                    break
 
-        if not login_code:
-            return f"User '{name}' created, but I couldn't fetch their ID. Please use 'get assignee list' to find it."
-
-        # MongoDB mein save karein
-        new_user = {"name": name.lower(), "phone": "91" + mobile[-10:], "email": email, "login_code": login_code}
+    # 3. If Login Code was found (either from Success message or Strict Match)
+    if login_code:
+        new_user = {
+            "name": name.lower().strip(),
+            "phone": "91" + mobile[-10:],
+            "email": email,
+            "login_code": login_code
+        }
+        
         if users_collection is not None:
-            users_collection.update_one({"phone": new_user["phone"]}, {"$set": new_user}, upsert=True)
-            
-        return f"User added & saved to database.\nName: {name}\nLogin Code: {login_code}"
-    
-    return f"Failed to add user: {res.get('resultmessage')}"
+            users_collection.update_one(
+                {"phone": new_user["phone"]},
+                {"$set": new_user},
+                upsert=True
+            )
+            return (f"✅ Success: {status_note}!\n\n"
+                    f"Name: {name}\n"
+                    f"Login ID: {login_code}\n\n"
+                    )
 
-# engine.py mein delete_user_tool ko isse replace karein
+    return f"Failed: User exists in Appsavy, but I could not find an exact name match for '{name}' to get the ID. Error: {msg}"
 
 async def delete_user_tool(
     ctx: RunContext[ManagerContext],
