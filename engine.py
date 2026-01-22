@@ -439,60 +439,62 @@ async def add_user_tool(
     login_code = None
     status_note = ""
 
-    # CASE A: New user created successfully (Extract Login Code via Regex)
-    if str(res.get("result")) == "1" or str(res.get("RESULT")) == "1":
+    # Check for Success (1) or Already Exists
+    is_success = str(res.get("result")) == "1" or str(res.get("RESULT")) == "1"
+    is_existing = "already exists" in msg.lower()
+
+    if is_success or is_existing:
+        # STEP 1: Try to extract Login ID from the message text (Regex)
         match = re.search(r"login Code:\s*([A-Z0-9-]+)", msg, re.IGNORECASE)
         login_code = match.group(1) if match else None
-        status_note = "New user created and saved to database"
+        
+        if login_code:
+            status_note = "ID extracted from API message"
+        
+        # STEP 2: BACKUP - If ID is missing from the message, ALWAYS check the list
+        if not login_code:
+            logger.info(f"ID missing from message. Fetching list to find: '{name}'")
+            assignee_res = await call_appsavy_api("GET_ASSIGNEE", GetAssigneeRequest(Event="0", Child=[{"Control_Id": "106771", "AC_ID": "111057"}]))
+            
+            result_list = []
+            if isinstance(assignee_res, dict):
+                result_list = assignee_res.get("data", {}).get("Result", [])
+            elif isinstance(assignee_res, list):
+                result_list = assignee_res
 
-    # CASE B: User already exists in Appsavy (Strict Name Sync)
-    elif "already exists" in msg.lower():
-        logger.info(f"User exists in Appsavy, performing strict name sync for: {name}")
-        
-        assignee_req = GetAssigneeRequest(
-            Event="0",
-            Child=[{"Control_Id": "106771", "AC_ID": "111057"}]
-        )
-        assignee_res = await call_appsavy_api("GET_ASSIGNEE", assignee_req)
-        
-        result_list = []
-        if isinstance(assignee_res, dict):
-            result_list = assignee_res.get("data", {}).get("Result", [])
-        
-        if result_list:
-            target_name = name.lower().strip()
-            # Loop through list for a STRICT match
-            for item in result_list:
-                item_name = str(item.get("NAME", "")).lower().strip()
+            if result_list:
+                target_name = name.lower().strip()
+                for item in result_list:
+                    item_name = str(item.get("NAME", "")).lower().strip()
+                    if target_name == item_name:
+                        login_code = item.get("ID") or item.get("LOGIN_ID")
+                        status_note = "ID fetched from system list"
+                        break
+
+        # STEP 3: If we have an ID, save to MongoDB
+        if login_code:
+            new_user = {
+                "name": name.lower().strip(),
+                "phone": "91" + mobile[-10:],
+                "email": email,
+                "login_code": login_code
+            }
+            
+            if users_collection is not None:
+                users_collection.update_one(
+                    {"phone": new_user["phone"]},
+                    {"$set": new_user},
+                    upsert=True
+                )
+                logger.info(f"Successfully synced {name} to MongoDB with ID {login_code}")
                 
-                # Removed Smart Match: Now uses exact equality (==)
-                if target_name == item_name:
-                    login_code = item.get("ID") or item.get("LOGIN_ID")
-                    status_note = f"Existing user '{item_name}' found and synced"
-                    break
+                type_str = "Created" if is_success else "Synced"
+                return (f"✅ Success: {type_str}!\n\n"
+                        f"Name: {name}\n"
+                        f"Login ID: {login_code}\n"
+                        f"Source: {status_note}")
 
-    # 3. If Login Code was found (either from Success message or Strict Match)
-    if login_code:
-        new_user = {
-            "name": name.lower().strip(),
-            "phone": "91" + mobile[-10:],
-            "email": email,
-            "login_code": login_code
-        }
-        
-        if users_collection is not None:
-            users_collection.update_one(
-                {"phone": new_user["phone"]},
-                {"$set": new_user},
-                upsert=True
-            )
-            return (f"✅ Success: {status_note}!\n\n"
-                    f"Name: {name}\n"
-                    f"Login ID: {login_code}\n\n"
-                    )
-
-    return f"Failed: User exists in Appsavy, but I could not find an exact name match for '{name}' to get the ID. Error: {msg}"
-
+    return f"Failed: I could not find a Login ID for '{name}' in the message or the system list. Please check if the name matches exactly."
 async def delete_user_tool(
     ctx: RunContext[ManagerContext],
     name: str,
@@ -1384,7 +1386,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
             return
     
-        manager_phone = os.getenv("MANAGER_PHONE", "919310104458")
+        manager_phone = os.getenv("MANAGER_PHONE", "919871536210")
         team = load_team()
     
         if sender == manager_phone:
