@@ -612,11 +612,15 @@ def send_email(to_email: str, subject: str, body: str) -> bool:
 
 def normalize_tasks_response(tasks_data):
     """Normalize Appsavy GET_TASKS response to always return a list"""
-    if isinstance(tasks_data, dict):
-        return tasks_data.get("data", {}).get("Result", [])
-    if isinstance(tasks_data, list):
-        return tasks_data
-    return []
+    if not isinstance(tasks_data, dict):
+        return []
+
+    data = tasks_data.get("data")
+
+    if not isinstance(data, dict):
+        return []
+
+    return data.get("Result", [])
 
 def normalize_task(task: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize Appsavy task object to internal standard keys"""
@@ -1170,7 +1174,7 @@ async def assign_new_task_tool(
             DESCRIPTION=task_name,
             TASK_NAME=task_name,
             EXPECTED_END_DATE=to_appsavy_datetime(deadline),
-            MOBILE_NUMBER=user["phone"][-10:],
+            MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
             
 
             DETAILS=Details(

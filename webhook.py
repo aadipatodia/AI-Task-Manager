@@ -15,6 +15,7 @@ app = FastAPI()
 
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
+PROCESSED_MESSAGE_IDS = set()
 
 @app.get("/")
 async def home():
@@ -41,6 +42,10 @@ async def handle_webhook(request: Request):
     for entry in data["entry"]:
         for change in entry.get("changes", []):
             value = change.get("value", {})
+            
+            if "statuses" in value:
+                continue
+            
             phone_number_id = value.get("metadata", {}).get("phone_number_id")
             if not phone_number_id:
                 continue
@@ -49,6 +54,18 @@ async def handle_webhook(request: Request):
             for message in messages:
                 if "from" not in message:
                     continue
+                
+                msg_id = message.get("id")
+                if not msg_id:
+                    continue
+                
+                #deduplication guard
+                if msg_id in PROCESSED_MESSAGE_IDS:
+                    print(f"Duplicate message ignored: {msg_id}")
+                    continue
+                
+                PROCESSED_MESSAGE_IDS.add(msg_id)
+                    
                     
                 sender_phone = message["from"]
                 user_command = ""
@@ -72,7 +89,7 @@ async def handle_webhook(request: Request):
                         user_command = doc.get("caption", "").strip()
                         message_data = {"image": doc, "type": "image"}
 
-                if user_command or message_data:
+                if user_command.strip() or message_data:
                     # Circular import risk check: Ensure engine.py does not import from webhook.py
                     await handle_message(user_command, sender_phone, phone_number_id, message=message_data, full_message=message)
 
