@@ -1386,7 +1386,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
             return
     
-        manager_phone = os.getenv("MANAGER_PHONE", "919871536210")
+        manager_phone = os.getenv("MANAGER_PHONE", "919310104458")
         team = load_team()
     
         if sender == manager_phone:
