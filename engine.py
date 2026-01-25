@@ -257,10 +257,18 @@ DOCUMENT HANDLING:
 - Case 2: Employee completes task (Close) with doc. (update_task_status_tool)
 - Case 3: Employee updates task (Work In Progress/Open) with doc. (update_task_status_tool)
 
+### REPORTING & STATUS CLARIFICATION:
+If a manager asks for a "summary," "status," or "report" for a specific employee:
+1. **DO NOT** call any tool immediately.
+2. **Ask the user**: "Would you like a **Detailed Status** (showing Task IDs and descriptions) or a **Performance Report** (showing counts and statistics)?"
+3. Once they choose:
+   - For **Detailed Status** → Use `get_detailed_task_report_tool`.
+   - For **Performance Report** → Use `get_performance_report_tool`.
+
 ### PERFORMANCE REPORTING:
-When user asks about performance, pending tasks, statistics, reports, or task counts:
+When user asks specifically for performance, statistics, or counts (or chooses Performance Report):
 - Use 'get_performance_report_tool'
-- Without name → Report for ALL employees
+- Without name → Report for ALL employees (Managers only)
 - With name → Report for specific employee
 - Format strictly as:
   Name- [Name]
@@ -489,7 +497,7 @@ async def add_user_tool(
                 logger.info(f"Successfully synced {name} to MongoDB with ID {login_code}")
                 
                 type_str = "Created" if is_success else "Synced"
-                return (f"✅ Success: {type_str}!\n\n"
+                return (f" Success: {type_str}!\n\n"
                         f"Name: {name}\n"
                         f"Login ID: {login_code}\n"
                         f"Source: {status_note}")
@@ -519,7 +527,6 @@ async def delete_user_tool(
     if "permission denied" in msg:
         return " Permission denied. You did not add this user."
 
-    # ✅ Success Check
     if str(res.get("result")) == "1" or str(res.get("RESULT")) == "1":
         
         # --- MongoDB se bhi hatane ka logic ---
@@ -577,13 +584,8 @@ def normalize_status_for_report(status: str) -> str:
     return report_status_map.get(status.lower(), status)
 
 def to_appsavy_datetime(iso_dt: str) -> str:
-    """
-    Converts ISO datetime (YYYY-MM-DDTHH:MM:SS)
-    to Appsavy format: YYYY-MM-DD HH:MM:SS.mmm
-    """
     dt = datetime.datetime.fromisoformat(iso_dt)
     return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-
 
 def send_email(to_email: str, subject: str, body: str) -> bool:
     """Send email via Gmail API."""
@@ -922,11 +924,11 @@ async def get_performance_report_tool(
         team = load_team()
         now = ctx.deps.current_time
 
-        # 🔒 Role check
+        # Role check
         if not name and ctx.deps.role != "manager":
             return "Permission Denied: Only managers can view the full team report."
 
-        # 🔹 Decide whose report to show
+        # Decide whose report to show
         if name:
             matched = next(
                 (
@@ -958,7 +960,7 @@ async def get_performance_report_tool(
         results = []
 
         
-        # 🔁 FETCH DATA PER USER (THIS FIXES THE BUG)
+        # FETCH DATA PER USER (THIS FIXES THE BUG)
       
         for member in display_team:
             member_login = member["login_code"]
@@ -1121,6 +1123,69 @@ def extract_multiple_assignees(text: str, team: list) -> list[str]:
         if member["name"].lower() in text:
             found.append(member["name"])
     return list(set(found))
+
+async def get_detailed_task_report_tool(
+    ctx: RunContext[ManagerContext], 
+    employee_name: str
+) -> str:
+    """
+    Returns a detailed list of tasks for a specific employee, 
+    including Task IDs, descriptions, and current status.
+    """
+    try:
+        team = load_team()  #
+        
+        # Resolve employee name to login ID
+        user = next(
+            (u for u in team if employee_name.lower() in u["name"].lower() 
+             or employee_name.lower() == u["login_code"].lower()), 
+            None
+        )
+        
+        if not user:
+            return f"User '{employee_name}' not found in the directory."
+
+        login_code = user["login_code"]
+        status_filter = "Open,Partially Closed,Reported Closed,Closed,Reopened" # Manager view
+
+        # Call the GET_TASKS API (SID 610)
+        raw_tasks_data = await call_appsavy_api(
+            "GET_TASKS",
+            GetTasksRequest(
+                Event="106830",
+                Child=[{
+                    "Control_Id": "106831",
+                    "AC_ID": "110803",
+                    "Parent": [
+                        {"Control_Id": "106825", "Value": status_filter, "Data_Form_Id": ""},
+                        {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
+                        {"Control_Id": "106827", "Value": login_code, "Data_Form_Id": ""},
+                        {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
+                        {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
+                        {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""}
+                    ]
+                }]
+            )
+        )
+
+        tasks = normalize_tasks_response(raw_tasks_data) #
+
+        if not tasks:
+            return f"No tasks found for {user['name'].title()}."
+
+        output = f"Detailed Task Report for {user['name'].title()}:\n\n"
+        for task in tasks:
+            output += (
+                f"Task ID: {task.get('TID')}\n"
+                f"Description: {task.get('COMMENTS')}\n"
+                f"Status: {task.get('STS') or 'Open'}\n"
+                f"Deadline: {task.get('EXPECTED_END_DATE')}\n"
+            )
+
+        return output.strip()
+    except Exception as e:
+        logger.error(f"get_detailed_task_report_tool error: {str(e)}", exc_info=True)
+        return f"Error fetching detailed report for {employee_name}."
 
 async def assign_new_task_tool(
     ctx: RunContext[ManagerContext],
@@ -1362,7 +1427,6 @@ async def update_task_status_tool(
         return f"Error updating task: {str(e)}"
     
 async def handle_message(command, sender, pid, message=None, full_message=None):
-    # 🔥 MANUAL COMMAND (BEFORE GEMINI)
     if command and command.strip().lower() == "delete & add":
         send_whatsapp_message(
             sender,
@@ -1390,7 +1454,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
             return
     
-        manager_phone = os.getenv("MANAGER_PHONE", "919871536210")
+        manager_phone = os.getenv("MANAGER_PHONE", "917428134319")
         team = load_team()
     
         if sender == manager_phone:
@@ -1409,9 +1473,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
     
         if command:
             try:
-                 # 🔹 STEP 1: detect multiple assignees
                 assignees = extract_multiple_assignees(command, team)
-                 # 🔹 STEP 2: MULTI ASSIGNEE CASE
                 if len(assignees) > 1:
                     for name in assignees:
                         await assign_new_task_tool(
@@ -1447,6 +1509,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 current_agent.tool(send_whatsapp_report_tool)
                 current_agent.tool(add_user_tool)
                 current_agent.tool(delete_user_tool)
+                current_agent.tool(get_detailed_task_report_tool) # Register the new tool
             
                 result = await current_agent.run(
                     command,
