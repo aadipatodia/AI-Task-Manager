@@ -1130,12 +1130,15 @@ async def get_detailed_task_report_tool(
 ) -> str:
     """
     Returns a detailed list of tasks for a specific employee,
-    including Task IDs, descriptions, current status, and deadline.
+    including Task IDs, descriptions, status, and deadline.
+
+    IMPORTANT:
+    - Status filter is FORCEFULLY kept empty to avoid Appsavy 50-char limit
+    - Tool is immune to Gemini-injected filters
     """
     try:
         team = load_team()
-
-        # Resolve employee by name or login ID
+        
         user = next(
             (
                 u for u in team
@@ -1149,10 +1152,7 @@ async def get_detailed_task_report_tool(
             return f"User '{employee_name}' not found in the directory."
 
         login_code = user["login_code"]
-
-        # IMPORTANT:
-        # Do NOT pass combined status strings.
-        # Empty value means "ALL STATUSES" (Appsavy default behavior)
+        
         raw_tasks_data = await call_appsavy_api(
             "GET_TASKS",
             GetTasksRequest(
@@ -1161,7 +1161,7 @@ async def get_detailed_task_report_tool(
                     "Control_Id": "106831",
                     "AC_ID": "110803",
                     "Parent": [
-                        {"Control_Id": "106825", "Value": "", "Data_Form_Id": ""},  
+                        {"Control_Id": "106825", "Value": "", "Data_Form_Id": ""},
                         {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
                         {"Control_Id": "106827", "Value": login_code, "Data_Form_Id": ""},
                         {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
@@ -1172,29 +1172,33 @@ async def get_detailed_task_report_tool(
             )
         )
 
-        # 🔹 Handle API-level failure explicitly
+        # 🔹 Explicit API rejection handling
         if isinstance(raw_tasks_data, dict) and raw_tasks_data.get("status") == "0":
-            return f"Unable to fetch tasks: {raw_tasks_data.get('data', 'Unknown API error')}"
+            logger.error(f"GET_TASKS rejected by Appsavy: {raw_tasks_data}")
+            return (
+                "Unable to fetch detailed task list at the moment.\n"
+                "Reason: Internal task service rejected the request."
+            )
 
         tasks = normalize_tasks_response(raw_tasks_data)
 
         if not tasks:
             return f"No tasks found for {user['name'].title()}."
 
-        # 🔹 Format output
-        output_lines = [
+        # 🔹 Build response
+        lines = [
             f"Detailed Task Report for {user['name'].title()}:\n"
         ]
 
         for task in tasks:
-            output_lines.append(
+            lines.append(
                 f"Task ID: {task.get('TID')}\n"
                 f"Description: {task.get('COMMENTS')}\n"
                 f"Status: {task.get('STS') or 'Open'}\n"
                 f"Deadline: {task.get('EXPECTED_END_DATE')}\n"
             )
 
-        return "\n".join(output_lines).strip()
+        return "\n".join(lines).strip()
 
     except Exception as e:
         logger.error(
@@ -1202,6 +1206,7 @@ async def get_detailed_task_report_tool(
             exc_info=True
         )
         return f"Error fetching detailed report for {employee_name}."
+
 
 
 async def assign_new_task_tool(
