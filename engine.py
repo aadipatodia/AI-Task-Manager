@@ -1149,7 +1149,7 @@ async def get_detailed_task_report_tool(
         
         # Combined status filter based on your code (Length: 43 chars)
         # Includes: Open, Work In Progress, Close, Closed, Reopened
-        status_filter = "Open,Work In Progress,Close,Closed,Reopened" 
+        status_filter = "" 
 
         raw_tasks_data = await call_appsavy_api(
             "GET_TASKS",
@@ -1159,7 +1159,7 @@ async def get_detailed_task_report_tool(
                     "Control_Id": "106831",
                     "AC_ID": "110803",
                     "Parent": [
-                        {"Control_Id": "106825", "Value": status_filter, "Data_Form_Id": ""},
+                        {"Control_Id": "106825", "Value": status_filter, "Data_Form_Id": ""}, # Uses ""
                         {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
                         {"Control_Id": "106827", "Value": login_code, "Data_Form_Id": ""},
                         {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
@@ -1168,7 +1168,7 @@ async def get_detailed_task_report_tool(
                     ]
                 }]
             )
-        ) #
+        )
 
         tasks = normalize_tasks_response(raw_tasks_data) #
 
