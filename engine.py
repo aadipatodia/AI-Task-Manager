@@ -1132,15 +1132,11 @@ async def get_detailed_task_report_tool(
     ctx: RunContext[ManagerContext],
     employee_name: str
 ) -> str:
-    """
-    Returns a detailed list of tasks for a specific employee,
-    including Task IDs, descriptions, status, and deadline.
-
-    IMPORTANT:
-    - Status filter is FORCEFULLY kept empty to avoid Appsavy 50-char limit
-    - Tool is immune to Gemini-injected filters
-    """
+    
     try:
+        if ctx.deps.role != "manager":
+            return "Permission Denied: Only managers can view detailed employee task reports."
+
         team = load_team()
         
         user = next(
@@ -1175,8 +1171,7 @@ async def get_detailed_task_report_tool(
                 }]
             )
         )
-
-        # 🔹 Explicit API rejection handling
+        
         if isinstance(raw_tasks_data, dict) and raw_tasks_data.get("status") == "0":
             logger.error(f"GET_TASKS rejected by Appsavy: {raw_tasks_data}")
             return (
@@ -1210,8 +1205,6 @@ async def get_detailed_task_report_tool(
             exc_info=True
         )
         return f"Error fetching detailed report for {employee_name}."
-
-
 
 async def assign_new_task_tool(
     ctx: RunContext[ManagerContext],
