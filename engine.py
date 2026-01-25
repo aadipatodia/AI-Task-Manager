@@ -1137,7 +1137,7 @@ async def get_detailed_task_report_tool(
 ) -> str:
     """
     Returns a detailed list of tasks for a specific employee,
-    including Task IDs, descriptions, status, and deadline.
+    including Task IDs, status, and deadline.
     This tool is for managers to view employees' task status only.
     It does not show the manager's own tasks.
 
@@ -1145,7 +1145,7 @@ async def get_detailed_task_report_tool(
     - Status filter is FORCEFULLY kept empty to avoid Appsavy 50-char limit
     - Tool is immune to Gemini-injected filters
     - Only callable by managers (role check in prompt enforces this)
-    - Statuses are printed exactly as returned from the DB/API, without any normalization or changes
+    - All fields are printed exactly as returned from the DB/API, without any processing, normalization, or changes
     """
     try:
         # Ensure caller is manager
@@ -1208,8 +1208,7 @@ async def get_detailed_task_report_tool(
         for task in tasks:
             lines.append(
                 f"Task ID: {task.get('TID')}\n"
-                f"Description: {task.get('COMMENTS')}\n"
-                f"Status: {task.get('STS') or 'Open'}\n"
+                f"Status: {task.get('STS')}\n"
                 f"Deadline: {task.get('EXPECTED_END_DATE')}\n"
             )
 
