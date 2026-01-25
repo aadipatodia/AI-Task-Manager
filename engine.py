@@ -1131,44 +1131,13 @@ def extract_multiple_assignees(text: str, team: list) -> list[str]:
             found.append(member["name"])
     return list(set(found))
 
-async def get_detailed_task_report_tool(
-    ctx: RunContext[ManagerContext],
-    employee_name: str
-) -> str:
+async def get_task_description(task_id: str) -> str:
     """
-    Returns a detailed list of tasks for a specific employee,
-    including Task IDs, status, and deadline.
-    This tool is for managers to view employees' task status only.
-    It does not show the manager's own tasks.
-
-    IMPORTANT:
-    - Status filter is FORCEFULLY kept empty to avoid Appsavy 50-char limit
-    - Tool is immune to Gemini-injected filters
-    - Only callable by managers (role check in prompt enforces this)
-    - All fields are printed exactly as returned from the DB/API, without any processing, normalization, or changes
+    Fetch task description using GET_TASKS.
+    Returns description or 'N/A' if not found.
     """
     try:
-        # Ensure caller is manager
-        if ctx.deps.role != "manager":
-            return "Permission Denied: Only managers can view detailed employee task reports."
-
-        team = load_team()
-        
-        user = next(
-            (
-                u for u in team
-                if employee_name.lower() in u["name"].lower()
-                or employee_name.lower() == u["login_code"].lower()
-            ),
-            None
-        )
-
-        if not user:
-            return f"User '{employee_name}' not found in the directory."
-
-        login_code = user["login_code"]
-        
-        raw_tasks_data = await call_appsavy_api(
+        res = await call_appsavy_api(
             "GET_TASKS",
             GetTasksRequest(
                 Event="106830",
@@ -1178,8 +1147,8 @@ async def get_detailed_task_report_tool(
                     "Parent": [
                         {"Control_Id": "106825", "Value": "", "Data_Form_Id": ""},
                         {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
-                        {"Control_Id": "106827", "Value": login_code, "Data_Form_Id": ""},
-                        {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
+                        {"Control_Id": "106827", "Value": "", "Data_Form_Id": ""},
+                        {"Control_Id": "106829", "Value": task_id, "Data_Form_Id": ""},
                         {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
                         {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""}
                     ]
@@ -1187,39 +1156,14 @@ async def get_detailed_task_report_tool(
             )
         )
 
-        # 🔹 Explicit API rejection handling
-        if isinstance(raw_tasks_data, dict) and raw_tasks_data.get("status") == "0":
-            logger.error(f"GET_TASKS rejected by Appsavy: {raw_tasks_data}")
-            return (
-                "Unable to fetch detailed task list at the moment.\n"
-                "Reason: Internal task service rejected the request."
-            )
-
-        tasks = normalize_tasks_response(raw_tasks_data)
-
-        if not tasks:
-            return f"No tasks found for {user['name'].title()}."
-
-        # 🔹 Build response
-        lines = [
-            f"Detailed Task Report for {user['name'].title()}:\n"
-        ]
-
-        for task in tasks:
-            lines.append(
-                f"Task ID: {task.get('TID')}\n"
-                f"Status: {task.get('STS')}\n"
-                f"Deadline: {task.get('EXPECTED_END_DATE')}\n"
-            )
-
-        return "\n".join(lines).strip()
+        tasks = normalize_tasks_response(res)
+        if tasks:
+            return tasks[0].get("COMMENTS", "N/A")
 
     except Exception as e:
-        logger.error(
-            f"get_detailed_task_report_tool error for {employee_name}: {str(e)}",
-            exc_info=True
-        )
-        return f"Error fetching detailed report for {employee_name}."
+        logger.error(f"Failed to fetch task description for {task_id}: {e}")
+
+    return "N/A"
 
 async def assign_new_task_tool(
     ctx: RunContext[ManagerContext],
@@ -1386,17 +1330,14 @@ async def update_task_status_tool(
     status: str, 
     remark: Optional[str] = None
 ) -> str:
-    """
-   Status rules:
-    - Employee: Open → Work In Progress → Close (submission)
-    - Manager: Closed (final) or Reopened
-    """
+
     role = ctx.deps.role
     status_key = status.lower().strip()
-    #role enforcement
+
+    # role enforcement
     if role == "employee":
         if status_key not in EMPLOYEE_ALLOWED_STATUSES:
-            return(
+            return (
                 "Invalid status.\n\n"
                 "You can use only:\n"
                 "- Open\n"
@@ -1416,19 +1357,21 @@ async def update_task_status_tool(
         final_status = MANAGER_ALLOWED_STATUSES[status_key]
     else:
         return "Permission denied"
-    # Handle Documents for Cases 2 & 3 (Employee/Manager sending docs with status update)
+
     doc_name = ""
     base64_data = ""
-    
+
     if ctx.deps.document_data:
-        media_type = ctx.deps.document_data.get("type") # 'document' or 'image'
+        media_type = ctx.deps.document_data.get("type")
         media_info = ctx.deps.document_data.get(media_type, {})
-        
         if media_info:
             logger.info(f"Processing attachment for status update on Task {task_id}")
             base64_data = download_and_encode_document(media_info)
             if base64_data:
-                doc_name = media_info.get("filename", f"{media_type}_update.png" if media_type == "image" else "update.pdf")
+                doc_name = media_info.get(
+                    "filename",
+                    f"{media_type}_update.png" if media_type == "image" else "update.pdf"
+                )
 
     try:
         req = UpdateTaskRequest(
@@ -1438,22 +1381,47 @@ async def update_task_status_tool(
             UPLOAD_DOCUMENT=doc_name,
             BASE64=base64_data
         )
-        
+
         api_response = await call_appsavy_api("UPDATE_STATUS", req)
-        
+
         if not api_response:
             return "API failure: No response from server."
-        
+
         if isinstance(api_response, dict):
-            if api_response.get('error'):
+            if api_response.get("error"):
                 return f"API failure: {api_response.get('error')}"
-            
-            # AppSavy SID 607 returns RESULT: 1 on success
-            if api_response.get('RESULT') == 1 or api_response.get('result') == 1:
+
+            # SUCCESS CASE
+            if api_response.get("RESULT") == 1 or api_response.get("result") == 1:
+
+                if role == "employee" and final_status == "Close":
+                    team = load_team()
+                    employee = next(
+                        (u for u in team if u["phone"] == ctx.deps.sender_phone),
+                        None
+                    )
+
+                    manager_phone = os.getenv("MANAGER_PHONE")
+                    phone_id = os.getenv("PHONE_NUMBER_ID")
+
+                    if employee and manager_phone and phone_id:
+                        notification_msg = (
+                            f"Task Submitted for Approval\n\n"
+                            f"Employee: {employee['name'].title()}\n"
+                            f"Task ID: {task_id}\n"
+                            f"Task Description: {remark or 'N/A'}"
+                        )
+
+                        send_whatsapp_message(
+                            manager_phone,
+                            notification_msg,
+                            phone_id
+                        )
+
                 return f"Success: Task {task_id} updated to '{final_status}'."
-            else:
-                return f"API message: {api_response.get('MESSAGE', 'Unexpected response format')}"
-                
+
+            return f"API message: {api_response.get('MESSAGE', 'Unexpected response format')}"
+
         return "API failure: Unexpected response format."
 
     except Exception as e:
@@ -1469,8 +1437,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             pid
         )
         return
-
-
 
     try:
         if len(sender) == 10 and not sender.startswith('91'):
@@ -1527,7 +1493,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                             )
                     return  
 
-
                 current_time = datetime.datetime.now()
                 dynamic_prompt = get_system_prompt(current_time)
             
@@ -1543,7 +1508,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 current_agent.tool(send_whatsapp_report_tool)
                 current_agent.tool(add_user_tool)
                 current_agent.tool(delete_user_tool)
-                current_agent.tool(get_detailed_task_report_tool) # Register the new tool
             
                 result = await current_agent.run(
                     command,
