@@ -257,21 +257,6 @@ DOCUMENT HANDLING:
 - Case 2: Employee completes task (Close) with doc. (update_task_status_tool)
 - Case 3: Employee updates task (Work In Progress/Open) with doc. (update_task_status_tool)
 
-
-REPORTING & STATUS CLARIFICATION:
-If a manager asks for a "summary," "status," or "report" for a specific employee WITHOUT the word "detailed":
-
-DO NOT call any tool immediately.
-Ask the user: "Would you like a Detailed Status (showing Task IDs and descriptions) or a Performance Report (showing counts and statistics)?"
-Once they choose:
-For Detailed Status → Use get_detailed_task_report_tool.
-For Performance Report → Use get_performance_report_tool.
-If the query explicitly includes "detailed status" or similar phrasing (e.g., "show detailed status", "detailed task list", "detailed status of tasks"):
-
-Immediately call get_detailed_task_report_tool without asking questions or clarification.
-Extract the employee_name from the query.
-This takes priority over any general "status" rules.
-
 ### PERFORMANCE REPORTING:
 When user asks specifically for performance, statistics, or counts (or chooses Performance Report):
 - Use 'get_performance_report_tool'
@@ -1419,9 +1404,7 @@ async def update_task_status_tool(
                         )
 
                 return f"Success: Task {task_id} updated to '{final_status}'."
-
             return f"API message: {api_response.get('MESSAGE', 'Unexpected response format')}"
-
         return "API failure: Unexpected response format."
 
     except Exception as e:
