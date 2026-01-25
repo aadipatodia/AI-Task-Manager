@@ -1133,9 +1133,9 @@ async def get_detailed_task_report_tool(
     including Task IDs, descriptions, and current status.
     """
     try:
-        team = load_team()  #
+        team = load_team() #
         
-        # Resolve employee name to login ID
+        # Resolve employee name or login ID
         user = next(
             (u for u in team if employee_name.lower() in u["name"].lower() 
              or employee_name.lower() == u["login_code"].lower()), 
@@ -1146,9 +1146,11 @@ async def get_detailed_task_report_tool(
             return f"User '{employee_name}' not found in the directory."
 
         login_code = user["login_code"]
-        status_filter = "Open,Partially Closed,Reported Closed,Closed,Reopened" # Manager view
+        
+        # Combined status filter based on your code (Length: 43 chars)
+        # Includes: Open, Work In Progress, Close, Closed, Reopened
+        status_filter = "Open,Work In Progress,Close,Closed,Reopened" 
 
-        # Call the GET_TASKS API (SID 610)
         raw_tasks_data = await call_appsavy_api(
             "GET_TASKS",
             GetTasksRequest(
@@ -1166,7 +1168,7 @@ async def get_detailed_task_report_tool(
                     ]
                 }]
             )
-        )
+        ) #
 
         tasks = normalize_tasks_response(raw_tasks_data) #
 
@@ -1175,11 +1177,13 @@ async def get_detailed_task_report_tool(
 
         output = f"Detailed Task Report for {user['name'].title()}:\n\n"
         for task in tasks:
+            # Using TID as the ID manager needs for closing
             output += (
                 f"Task ID: {task.get('TID')}\n"
                 f"Description: {task.get('COMMENTS')}\n"
                 f"Status: {task.get('STS') or 'Open'}\n"
                 f"Deadline: {task.get('EXPECTED_END_DATE')}\n"
+                f"-------------------\n"
             )
 
         return output.strip()
