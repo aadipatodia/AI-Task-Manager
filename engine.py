@@ -264,6 +264,10 @@ If a manager asks for a "summary," "status," or "report" for a specific employee
 3. Once they choose:
    - For **Detailed Status** → Use `get_detailed_task_report_tool`.
    - For **Performance Report** → Use `get_performance_report_tool`.
+   
+When a manager asks for "detailed status" of an employee,
+you MUST call get_detailed_task_report_tool immediately
+without asking follow-up questions.
 
 ### PERFORMANCE REPORTING:
 When user asks specifically for performance, statistics, or counts (or chooses Performance Report):
