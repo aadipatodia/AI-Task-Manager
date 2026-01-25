@@ -1125,32 +1125,34 @@ def extract_multiple_assignees(text: str, team: list) -> list[str]:
     return list(set(found))
 
 async def get_detailed_task_report_tool(
-    ctx: RunContext[ManagerContext], 
+    ctx: RunContext[ManagerContext],
     employee_name: str
 ) -> str:
     """
-    Returns a detailed list of tasks for a specific employee, 
-    including Task IDs, descriptions, and current status.
+    Returns a detailed list of tasks for a specific employee,
+    including Task IDs, descriptions, current status, and deadline.
     """
     try:
-        team = load_team() #
-        
-        # Resolve employee name or login ID
+        team = load_team()
+
+        # Resolve employee by name or login ID
         user = next(
-            (u for u in team if employee_name.lower() in u["name"].lower() 
-             or employee_name.lower() == u["login_code"].lower()), 
+            (
+                u for u in team
+                if employee_name.lower() in u["name"].lower()
+                or employee_name.lower() == u["login_code"].lower()
+            ),
             None
         )
-        
+
         if not user:
             return f"User '{employee_name}' not found in the directory."
 
         login_code = user["login_code"]
-        
-        # Combined status filter based on your code (Length: 43 chars)
-        # Includes: Open, Work In Progress, Close, Closed, Reopened
-        status_filter = "" 
 
+        # IMPORTANT:
+        # Do NOT pass combined status strings.
+        # Empty value means "ALL STATUSES" (Appsavy default behavior)
         raw_tasks_data = await call_appsavy_api(
             "GET_TASKS",
             GetTasksRequest(
@@ -1159,7 +1161,7 @@ async def get_detailed_task_report_tool(
                     "Control_Id": "106831",
                     "AC_ID": "110803",
                     "Parent": [
-                        {"Control_Id": "106825", "Value": status_filter, "Data_Form_Id": ""}, # Uses ""
+                        {"Control_Id": "106825", "Value": "", "Data_Form_Id": ""},  
                         {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
                         {"Control_Id": "106827", "Value": login_code, "Data_Form_Id": ""},
                         {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
@@ -1170,26 +1172,37 @@ async def get_detailed_task_report_tool(
             )
         )
 
-        tasks = normalize_tasks_response(raw_tasks_data) #
+        # 🔹 Handle API-level failure explicitly
+        if isinstance(raw_tasks_data, dict) and raw_tasks_data.get("status") == "0":
+            return f"Unable to fetch tasks: {raw_tasks_data.get('data', 'Unknown API error')}"
+
+        tasks = normalize_tasks_response(raw_tasks_data)
 
         if not tasks:
             return f"No tasks found for {user['name'].title()}."
 
-        output = f"Detailed Task Report for {user['name'].title()}:\n\n"
+        # 🔹 Format output
+        output_lines = [
+            f"Detailed Task Report for {user['name'].title()}:\n"
+        ]
+
         for task in tasks:
-            # Using TID as the ID manager needs for closing
-            output += (
+            output_lines.append(
                 f"Task ID: {task.get('TID')}\n"
                 f"Description: {task.get('COMMENTS')}\n"
                 f"Status: {task.get('STS') or 'Open'}\n"
                 f"Deadline: {task.get('EXPECTED_END_DATE')}\n"
-                f"-------------------\n"
             )
 
-        return output.strip()
+        return "\n".join(output_lines).strip()
+
     except Exception as e:
-        logger.error(f"get_detailed_task_report_tool error: {str(e)}", exc_info=True)
+        logger.error(
+            f"get_detailed_task_report_tool error for {employee_name}: {str(e)}",
+            exc_info=True
+        )
         return f"Error fetching detailed report for {employee_name}."
+
 
 async def assign_new_task_tool(
     ctx: RunContext[ManagerContext],
