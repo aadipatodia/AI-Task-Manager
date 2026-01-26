@@ -240,7 +240,6 @@ This is the completed and corrected **TASK STATUS RULES** section for your syste
 ### ### TASK STATUS RULES (API SID 607)
 
 You must determine the correct `new_status` string by first identifying the **User Role** (Manager or Employee) and then interpreting the **Intent** of their message. Do not look for specific keywords; understand the state the user is describing.
-
 DO NOT ask the user if they are a manager or employee. Use the following logic to determine the role and status automatically:
 Identify Role by Task ID:
 - If the user is the Assignee of the requested Task ID, they are acting as the Employee.
@@ -1174,27 +1173,44 @@ async def assign_new_task_tool(
     task_name: str,
     deadline: str
 ) -> str:
-    """
-    Assigns a new task to a user or group. 
-    Includes document handling if a file was sent with the command.
-    """
     try:
-        # 1. Resolve Assignee from Team Directory
+        # 1. First, check MongoDB (Fast)
         team = load_team()
-        user = next(
-            (u for u in team if name.lower() in u["name"].lower() or name.lower() == u["login_code"].lower()),
-            None
-        )
+        matches = [u for u in team if name.lower() in u["name"].lower()]
 
-        if not user:
-            return f"Error: User or Group '{name}' not found in the authorized directory."
-        
+        # 2. FALLBACK: If not in MongoDB, check Appsavy Database (SID 606)
+        if not matches:
+            logger.info(f"'{name}' not in MongoDB. Checking Appsavy DB...")
+            # Reuse your existing logic for fetching the full list from Appsavy
+            assignee_res = await call_appsavy_api("GET_ASSIGNEE", GetAssigneeRequest(Event="0", Child=[{"Control_Id": "106771", "AC_ID": "111057"}]))
+            
+            appsavy_users = assignee_res.get("data", {}).get("Result", []) if isinstance(assignee_res, dict) else []
+            
+            matches = [
+                {"name": u["NAME"], "login_code": u["ID"], "phone": u.get("MOBILE", "N/A")} 
+                for u in appsavy_users 
+                if name.lower() in u["NAME"].lower()
+            ]
+
+        # 3. Handle matches as before
+        if not matches:
+            return f"Error: '{name}' was not found in MongoDB or Appsavy."
+            
+        if len(matches) > 1:
+            options = "\n".join([f"- {u['name']} (Phone: {u['phone']})" for u in matches])
+            return (
+                f"I found multiple users named '{name}'. Who should I assign this to?\n\n"
+                f"{options}\n\n"
+                "Please provide the specific phone number or full name."
+            )
+
+        # Single Match Found - Proceed
+        user = matches[0]
         login_code = user["login_code"]
 
         # 2. Handle Document Attachment (Case 1: Manager sends doc with task)
         documents_child = []
         if ctx.deps.document_data:
-            # Extract media metadata (supports both 'document' and 'image' types)
             media_type = ctx.deps.document_data.get("type")
             media_info = ctx.deps.document_data.get(media_type)
             
@@ -1203,7 +1219,6 @@ async def assign_new_task_tool(
                 base64_data = download_and_encode_document(media_info)
                 
                 if base64_data:
-                    # Determine filename
                     fname = media_info.get("filename") or (
                         f"task_image_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png" 
                         if media_type == "image" else "task_document.pdf"
@@ -1221,8 +1236,6 @@ async def assign_new_task_tool(
             TASK_NAME=task_name,
             EXPECTED_END_DATE=to_appsavy_datetime(deadline),
             MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
-            
-
             DETAILS=Details(
                 CHILD=[DetailChild(
                     SEL="Y",
@@ -1231,7 +1244,6 @@ async def assign_new_task_tool(
                 )]
             ),
             DOCUMENTS=Documents(CHILD=documents_child)
-
         )
         
         # 4. Execute API Call
@@ -1245,19 +1257,23 @@ async def assign_new_task_tool(
                 return f"API failure: {api_response.get('error')}"
             
             # Check for success (RESULT 1)
-            if str(api_response.get('result'))== "1" or str(api_response.get('RESULT'))=="1":
+            if str(api_response.get('result')) == "1" or str(api_response.get('RESULT')) == "1":
                 # --- Send Notifications ---
                 phone_id = os.getenv("PHONE_NUMBER_ID")
                 whatsapp_msg = f"New Task Assigned:\n\nTask: {task_name}\nDue Date: {deadline}\n\nPlease complete on time."
 
                 if phone_id:
-                    # Send Registration Template
+                    # STEP A: Send Registration/Utility Template to re-open 24h window
                     send_registration_template(
                         recipient_number=user["phone"],
                         user_identifier=user["name"].title(),
                         phone_number_id=phone_id
                     )
-                    # Send Task Details
+                    
+                    # STEP B: Brief delay to ensure Meta registers the new session
+                    await asyncio.sleep(1.5)
+                    
+                    # STEP C: Send free-form Task Details
                     send_whatsapp_message(user["phone"], whatsapp_msg, phone_id)
 
                 # Send Emails
