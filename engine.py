@@ -125,13 +125,13 @@ API_CONFIGS = {
     "GET_USERS_BY_ID": {
         "url": f"{APPSAVY_BASE_URL}/GetDataJSONClient",
         "headers": {
-            "sid": "609",
+            "sid": "609", # Verify if this SID should be different for detail lookup
             "pid": "309",
-            "fid": "10344",
+            "fid": "10344", 
             "cid": "64",
             "uid": "TM_API",
             "roleid": "1627",
-            "TokenKey": "d23e5874-ba53-4490-941f-0c70b25f6f56"
+            "TokenKey": "d23e5874-ba53-4490-941f-0c70b25f6f56" 
         }
     },
     "WHATSAPP_PDF_REPORT": {
@@ -554,19 +554,17 @@ async def delete_user_tool(
 def get_gmail_service():
     try:
         token_json_str = os.getenv("TOKEN_JSON")
-        if not token_json_str:
-            return None
+        if not token_json_str: return None
         
-        cleaned_token = token_json_str.strip().replace('\n', '').replace('\r', '')
+        cleaned_token = "".join(c for c in token_json_str if ord(c) >= 32)
         token_data = json.loads(cleaned_token)
         
         creds = Credentials.from_authorized_user_info(token_data, SCOPES)
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
-        
         return build('gmail', 'v1', credentials=creds)
     except Exception as e:
-        logger.error(f"Gmail service initialization failed: {str(e)}")
+        logger.error(f"Gmail Error: {e}")
         return None
 
 def build_status_filter(role: str) -> str:
@@ -994,15 +992,11 @@ async def get_performance_report_tool(
                 )
 
                 member_tasks = normalize_tasks_response(raw_tasks_data)
-
-                # 🔹 Fetch counts (SID 616)
                 counts = await fetch_task_counts_api(member_login, ctx.deps.role)
-
                 within_time = 0
                 beyond_time = 0
                 closed_count = 0
 
-                # 🔹 Pending / completed logic
                 for task in member_tasks:
                     status = str(task.get("STS", "")).lower()
                     expected_date = task.get("EXPECTED_END_DATE")
@@ -1172,34 +1166,43 @@ async def assign_new_task_tool(
     task_name: str,
     deadline: str
 ) -> str:
+    """
+    Assigns a new task to a user or group.
+    Fixes: Duplicate name resolution, N/A phone numbers, and Meta 24h window blockage.
+    """
     try:
-        # 1. Fetch Candidates from both MongoDB and Appsavy
+        # 1. MERGE SOURCES: Fetch candidates from BOTH MongoDB and Appsavy (SID 606)
         team = load_team()
-        mongo_matches = [u for u in team if name.lower() in u["name"].lower()]
+        mongo_matches = [u for u in team if name.lower() in u["name"].lower() or name.lower() == u["login_code"].lower()]
 
         assignee_res = await call_appsavy_api("GET_ASSIGNEE", GetAssigneeRequest(
             Event="0", 
             Child=[{"Control_Id": "106771", "AC_ID": "111057"}]
         ))
-        appsavy_users = assignee_res.get("data", {}).get("Result", []) if isinstance(assignee_res, dict) else []
         
+        appsavy_users = []
+        if isinstance(assignee_res, dict):
+            appsavy_users = assignee_res.get("data", {}).get("Result", [])
+        elif isinstance(assignee_res, list):
+            appsavy_users = assignee_res
+
         appsavy_matches = [
-            {"name": u["NAME"], "login_code": u["ID"], "phone": u.get("MOBILE", "N/A")} 
-            for u in appsavy_users if name.lower() in u["NAME"].lower()
+            {"name": u.get("NAME") or u.get("PARTICIPANT_NAME"), "login_code": u.get("ID") or u.get("LOGIN_ID"), "phone": "N/A"} 
+            for u in appsavy_users if name.lower() in str(u.get("NAME", "")).lower()
         ]
 
-        # Combine and deduplicate by Login ID
-        combined = {u["login_code"]: u for u in (mongo_matches + appsavy_matches)}.values()
-        matches = list(combined)
+        # Deduplicate using Login ID to ensure we catch every unique instance
+        combined = {u["login_code"]: u for u in (mongo_matches + appsavy_matches)}
+        matches = list(combined.values())
 
         if not matches:
-            return f"Error: '{name}' not found in MongoDB or Appsavy."
+            return f"Error: User or Group '{name}' not found in the authorized directory."
 
-        # 2. DEEP LOOKUP: If multiple matches, fetch actual details (SID 609)
+        # 2. DEEP LOOKUP & HIERARCHY: If multiple matches, fetch REAL details (SID 609)
         if len(matches) > 1:
             final_options = []
             for candidate in matches:
-                # Call SID 609 to get missing phone and office info
+                # Call Detail API (SID 609) to get Mobile + Division + Zone
                 details_res = await call_appsavy_api("GET_USERS_BY_ID", GetUsersByIdRequest(
                     Event="107018",
                     Child=[{
@@ -1209,43 +1212,50 @@ async def assign_new_task_tool(
                     }]
                 ))
                 
-                # Extract the real phone number and division
+                # If API succeeds, extract phone and office data
                 if isinstance(details_res, list) and len(details_res) > 0:
                     detail = details_res[0]
                     candidate["phone"] = detail.get("MOBILE") or detail.get("PHONE") or "N/A"
-                    # Using hierarchy data from your files
-                    candidate["office"] = detail.get("DIVISION_NAME") or detail.get("ZONE_NAME") or "Unknown Office"
+                    # Capture Hierarchy levels
+                    office_parts = [
+                        detail.get("ZONE_NAME"),
+                        detail.get("CIRCLE_NAME"),
+                        detail.get("DIVISION_NAME")
+                    ]
+                    candidate["office"] = " > ".join([p for p in office_parts if p]) or "Office N/A"
+                elif isinstance(details_res, dict) and "data" in details_res:
+                    res_list = details_res.get("data", {}).get("Result", [])
+                    if res_list:
+                        candidate["phone"] = res_list[0].get("MOBILE") or "N/A"
+                        candidate["office"] = res_list[0].get("DIVISION_NAME") or "Office N/A"
                 
                 final_options.append(candidate)
 
-            # 3. Format clarification message with REAL DATA
+            # Format clarification message with Hierarchy and Phone Numbers
             options_text = "\n".join([f"- {u['name']} ({u.get('office', 'Office N/A')}): {u['phone']}" for u in final_options])
             return (
                 f"I found multiple users named '{name}'. Who should I assign this to?\n\n"
                 f"{options_text}\n\n"
-                "Please reply with the 10-digit phone number."
+                "Please reply with the correct 10-digit phone number."
             )
 
-        # 4. Single Match Found - Proceed with CreateTask (SID 604)
+        # 3. SINGLE MATCH FOUND: Proceed with Assignment (SID 604)
         user = matches[0]
         login_code = user["login_code"]
 
-        # 2. Handle Document Attachment (Case 1: Manager sends doc with task)
+        # 2. Handle Document Attachment
         documents_child = []
         if ctx.deps.document_data:
             media_type = ctx.deps.document_data.get("type")
             media_info = ctx.deps.document_data.get(media_type)
-            
             if media_info:
                 logger.info(f"Downloading attachment for new task: {media_type}")
                 base64_data = download_and_encode_document(media_info)
-                
                 if base64_data:
                     fname = media_info.get("filename") or (
                         f"task_image_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png" 
                         if media_type == "image" else "task_document.pdf"
                     )
-                    
                     documents_child.append(DocumentItem(
                         DOCUMENT=DocumentInfo(VALUE=fname, BASE64=base64_data),
                         DOCUMENT_NAME=fname
@@ -1285,17 +1295,18 @@ async def assign_new_task_tool(
                 whatsapp_msg = f"New Task Assigned:\n\nTask: {task_name}\nDue Date: {deadline}\n\nPlease complete on time."
 
                 if phone_id:
-                    # STEP A: Send Registration/Utility Template to re-open 24h window
+                    # FIX: RE-OPEN 24H WINDOW FIRST
+                    # We send the registration template to ensure the conversation session is active
                     send_registration_template(
                         recipient_number=user["phone"],
                         user_identifier=user["name"].title(),
                         phone_number_id=phone_id
                     )
                     
-                    # STEP B: Brief delay to ensure Meta registers the new session
-                    await asyncio.sleep(1.5)
+                    # Wait briefly to let Meta register the new Utility session
+                    await asyncio.sleep(1.8)
                     
-                    # STEP C: Send free-form Task Details
+                    # Now send the free-form Task Details
                     send_whatsapp_message(user["phone"], whatsapp_msg, phone_id)
 
                 # Send Emails
