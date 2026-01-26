@@ -95,18 +95,21 @@ API_CONFIGS = {
             "TokenKey": "e5b4e098-f8b9-47bf-83f1-751582bfe147"
         }
     },
+    # Updated API_CONFIGS entry for UPDATE_STATUS
+
     "UPDATE_STATUS": {
-        "url": f"{APPSAVY_BASE_URL}/PushdataJSONClient",
+        "url": f"{APPSAVY_BASE_URL}/PushdataJSONClient", # [cite: 1]
         "headers": {
-            "sid": "607",
-            "pid": "309",
-            "fid": "10345",
-            "cid": "64",
-            "uid": "TM_API",
-            "roleid": "1627",
-            "TokenKey": "7bf28d4d-c14f-483d-872a-78c9c16bd982"
+            "sid": "607",        # Session ID [cite: 2, 8]
+            "pid": "309",        # Project ID [cite: 3]
+            "fid": "10345",      # Feature ID [cite: 4]
+            "cid": "64",         # Client ID [cite: 4]
+            "uid": "TM_API",     # User ID [cite: 5]
+            "roleid": "1627",    # Role ID [cite: 6]
+            "TokenKey": "7bf28d4d-c14f-483d-872a-78c9c16bd982" # [cite: 6]
         }
     },
+
     "GET_COUNT": {
         "url": f"{APPSAVY_BASE_URL}/GetDataJSONClient",
         "headers": {
@@ -230,39 +233,61 @@ You must determine the correct 'new_status' string by interpreting the user's in
 - Never assume ownership.
 - If ownership information is unavailable, ask for clarification instead of deleting.
 
-Assignees (Employees) - Status Options:
-- "Open": The user acknowledges receipt of the task or indicates it is in their queue.
-- "Work In Progress": The user indicates they have started the task, are currently performing the actions, or are in the middle of the process or that the task is pending.
-- "Close": The user indicates they have finished their portion of the work and are submitting it for the manager's review. 
+This is the completed and corrected **TASK STATUS RULES** section for your system prompt. It is designed to ensure I (as the AI) act as a smart interpreter between natural conversational language and your specific API status requirements.
 
+---
 
-Managers - Status Options:
-- "Closed": The user expresses final satisfaction, gives formal approval, or indicates the task is officially completed and finished.
-- "Reopened": The user expresses dissatisfaction, rejects the submitted work, or indicates that more work is needed on a previously "Close" task.
+### ### TASK STATUS RULES (API SID 607)
 
-CRITICAL LOGIC:
-- Intent Interpretation: Map the intent of "starting/doing" to 'Work In Progress'. Map the intent of "submitting for review" to 'Close'. Map "final approval" to 'Closed'.
-- Role Boundary: Never use "Closed" for an employee's message. Never use "Close" for a manager's final sign-off.
-- Context: If a user says "I'm done with the first part," use 'Work In Progress'. If they say "Here is the final file," use 'Close'.
-- When updating task status, extract any additional text from the user's message as a remark and pass it in the COMMENTS field.
-DOCUMENT HANDLING:
-- If a document/image is received with a command, call the tool; the tool handles the attachment.
-- Case 1: Manager creates task with doc. (assign_new_task_tool)
-- Case 2: Employee completes task (Close) with doc. (update_task_status_tool)
-- Case 3: Employee updates task (Work In Progress/Open) with doc. (update_task_status_tool)
+You must determine the correct `new_status` string by first identifying the **User Role** (Manager or Employee) and then interpreting the **Intent** of their message. Do not look for specific keywords; understand the state the user is describing.
+
+**STEP 1: IDENTIFY USER ROLE**
+
+* **Managers:** Authorized to provide final approval or reject work.
+* **Employees:** Authorized to update progress or submit work for review.
+
+**STEP 2: MAP INTENT TO SYSTEM STATUS**
+
+Employee Intents (The Assignees)
+Status: Open
+Intent: The user acknowledges they have seen the task or added it to their queue.
+Examples: "Acknowledged," "I see it," "Got the task."
+
+Status: Work In Progress
+Intent: The user indicates they have started the action, the task is currently "pending," or they are in the middle of the process.
+Examples: "I'm starting this," "Still working on it," "Task <task_id> is pending," "I've done the first part."
+
+Status: Close
+Intent: The user indicates they have finished their portion of the work and are submitting it for the manager's review.
+Examples: "Task 101 closed," "Task 102 completed," "Here is the final file."
+
+**Manager Intents (The Approvers)**
+
+Status: Closed
+Intent: The manager expresses final satisfaction, gives formal approval, or marks the task as officially finished.
+Examples: "Approved," "Task 102 is finished," "Great job, close this," "Task 102 is finally done."
+
+Status: Reopened
+Intent: The manager expresses dissatisfaction, rejects the work, or indicates more work is required on a task the employee previously tried to "Close".
+Examples: "Redo this," "Task 101 is rejected," "Need more details," "Reopen task 101."
+
+**CRITICAL LOGIC:**
+**Role-Based Mapping:** If an employee says "closed," you must map it to `Close` (submission). If a manager says "close," you must map it to `Closed` (finality).
+**Natural Language Interpretation:** Understand that "completed" and "finished" by an employee always mean they are submitting work for approval, not ending the lifecycle of the task.
+**Remark Extraction:** Always extract the conversational part of the message (e.g., "I found the bug") and pass it into the `COMMENTS` field for the API.
+**Permission Enforcement:** Never allow an Employee to use the status `Closed` or `Reopen`.
+Never allow a Manager to use the status `Work In Progress` or `Close`.
+
+**DOCUMENT HANDLING:**
+**Case 1 (Manager):** If a document/image is sent while creating a task, use `assign_new_task_tool`. 
+**Case 2 (Employee):** If a document/image is sent with a "completed" or "closed" message, use `update_task_status_tool` with status `Close` .
+**Case 3 (Update):** If a document is sent during work, use `update_task_status_tool` with status `Work In Progress`.
 
 ### PERFORMANCE REPORTING:
-When user asks specifically for performance, statistics, or counts (or chooses Performance Report):
+When user asks for performance, statistics, or counts (or chooses Performance Report) or says "show pending tasks for ...":
 - Use 'get_performance_report_tool'
 - Without name → Report for ALL employees (Managers only)
 - With name → Report for specific employee
-- Format strictly as:
-  Name- [Name]
-  Task Assigned- Count of Task [Total] Nos
-  Task Completed- Count of task [Closed Status Only] Nos
-  Task Pending -
-    Within time: [Count]
-    Beyond time: [Count]
 
 ### TASK LISTING:
 When user asks to see tasks, list tasks, pending work:
@@ -652,8 +677,6 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
         return None
 
 async def fetch_task_counts_api(login_code: str, ctx_role: str):
-    """Retrieves aggregate counts via SID 616 - API dependent with robust error handling."""
-    assignment_value = "Assigned To Me"
 
     req = GetCountRequest(Child=[{
         "Control_Id": "108118",
@@ -1309,42 +1332,24 @@ async def update_task_status_tool(
     status: str, 
     remark: Optional[str] = None
 ) -> str:
+    """
+    Updates task status. Gemini maps conversational intent to:
+    'Open', 'Work In Progress', 'Close', 'Reopen', 'Closed'.
+    """
 
     role = ctx.deps.role
-    status_key = status.lower().strip()
-
-    # role enforcement
-    if role == "employee":
-        if status_key not in EMPLOYEE_ALLOWED_STATUSES:
-            return (
-                "Invalid status.\n\n"
-                "You can use only:\n"
-                "- Open\n"
-                "- Work In Progress\n"
-                "- Close (Submit for approval)"
-            )
-        final_status = EMPLOYEE_ALLOWED_STATUSES[status_key]
-
-    elif role == "manager":
-        if status_key not in MANAGER_ALLOWED_STATUSES:
-            return (
-                "Invalid status.\n\n"
-                "Manager can use only:\n"
-                "- Closed(FINAL APPROVAL)\n"
-                "- Reopened"
-            )
-        final_status = MANAGER_ALLOWED_STATUSES[status_key]
-    else:
-        return "Permission denied"
+    # Gemini provides the 'status' based on the mapping rules in the system prompt
+    final_status = status.strip()
 
     doc_name = ""
     base64_data = ""
 
+    # Document Handling logic [Maintained from your original]
     if ctx.deps.document_data:
         media_type = ctx.deps.document_data.get("type")
         media_info = ctx.deps.document_data.get(media_type, {})
         if media_info:
-            logger.info(f"Processing attachment for status update on Task {task_id}")
+            logger.info(f"Processing attachment for Task {task_id}")
             base64_data = download_and_encode_document(media_info)
             if base64_data:
                 doc_name = media_info.get(
@@ -1353,12 +1358,14 @@ async def update_task_status_tool(
                 )
 
     try:
+        # Prepare request using the mandatory fields from your YAML [cite: 8, 10, 12]
         req = UpdateTaskRequest(
-            TASK_ID=task_id,
-            STATUS=final_status,
-            COMMENTS=remark or f"Status updated to {final_status}",
-            UPLOAD_DOCUMENT=doc_name,
-            BASE64=base64_data
+            SID="607",           # Mandatory Service ID [cite: 8]
+            TASK_ID=task_id,     # Mandatory Task ID [cite: 12]
+            STATUS=final_status, # Interpreted status 
+            COMMENTS=remark or f"Status updated to {final_status}", # [cite: 9]
+            UPLOAD_DOCUMENT=doc_name, 
+            BASE64=base64_data 
         )
 
         api_response = await call_appsavy_api("UPDATE_STATUS", req)
@@ -1366,20 +1373,19 @@ async def update_task_status_tool(
         if not api_response:
             return "API failure: No response from server."
 
+        # Handle API Response [cite: 13, 14]
         if isinstance(api_response, dict):
             if api_response.get("error"):
                 return f"API failure: {api_response.get('error')}"
 
-            # SUCCESS CASE
-            if api_response.get("RESULT") == 1 or api_response.get("result") == 1:
-
+            # Success check (RESULT 1)
+            if str(api_response.get("RESULT")) == "1" or str(api_response.get("result")) == "1":
+                
+                # Notification logic for Manager when Employee submits work
                 if role == "employee" and final_status == "Close":
                     team = load_team()
-                    employee = next(
-                        (u for u in team if u["phone"] == ctx.deps.sender_phone),
-                        None
-                    )
-
+                    employee = next((u for u in team if u["phone"] == ctx.deps.sender_phone), None)
+                    
                     manager_phone = os.getenv("MANAGER_PHONE")
                     phone_id = os.getenv("PHONE_NUMBER_ID")
 
@@ -1388,17 +1394,14 @@ async def update_task_status_tool(
                             f"Task Submitted for Approval\n\n"
                             f"Employee: {employee['name'].title()}\n"
                             f"Task ID: {task_id}\n"
-                            f"Task Description: {remark or 'N/A'}"
+                            f"Remark: {remark or 'N/A'}"
                         )
-
-                        send_whatsapp_message(
-                            manager_phone,
-                            notification_msg,
-                            phone_id
-                        )
+                        send_whatsapp_message(manager_phone, notification_msg, phone_id)
 
                 return f"Success: Task {task_id} updated to '{final_status}'."
-            return f"API message: {api_response.get('MESSAGE', 'Unexpected response format')}"
+            
+            return f"API Error: {api_response.get('resultmessage', 'Invalid Request')}"
+        
         return "API failure: Unexpected response format."
 
     except Exception as e:
