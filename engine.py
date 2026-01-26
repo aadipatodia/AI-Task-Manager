@@ -1174,37 +1174,39 @@ async def assign_new_task_tool(
     deadline: str
 ) -> str:
     try:
-        # 1. First, check MongoDB (Fast)
+        # 1. Fetch from MongoDB
         team = load_team()
-        matches = [u for u in team if name.lower() in u["name"].lower()]
+        mongo_matches = [u for u in team if name.lower() in u["name"].lower()]
 
-        # 2. FALLBACK: If not in MongoDB, check Appsavy Database (SID 606)
-        if not matches:
-            logger.info(f"'{name}' not in MongoDB. Checking Appsavy DB...")
-            # Reuse your existing logic for fetching the full list from Appsavy
-            assignee_res = await call_appsavy_api("GET_ASSIGNEE", GetAssigneeRequest(Event="0", Child=[{"Control_Id": "106771", "AC_ID": "111057"}]))
-            
-            appsavy_users = assignee_res.get("data", {}).get("Result", []) if isinstance(assignee_res, dict) else []
-            
-            matches = [
-                {"name": u["NAME"], "login_code": u["ID"], "phone": u.get("MOBILE", "N/A")} 
-                for u in appsavy_users 
-                if name.lower() in u["NAME"].lower()
-            ]
+        # 2. Fetch from Appsavy (SID 606)
+        assignee_res = await call_appsavy_api("GET_ASSIGNEE", GetAssigneeRequest(Event="0", Child=[{"Control_Id": "106771", "AC_ID": "111057"}]))
+        appsavy_users = assignee_res.get("data", {}).get("Result", []) if isinstance(assignee_res, dict) else []
+        
+        appsavy_matches = [
+            {"name": u["NAME"], "login_code": u["ID"], "phone": u.get("MOBILE", "N/A")} 
+            for u in appsavy_users 
+            if name.lower() in u["NAME"].lower()
+        ]
 
-        # 3. Handle matches as before
+        # 3. Combine and Deduplicate (Using Login ID as key)
+        # This ensures we see every Varun across both databases
+        combined_results = {u["login_code"]: u for u in (mongo_matches + appsavy_matches)}.values()
+        matches = list(combined_results)
+
+        # 4. Handle No Match
         if not matches:
             return f"Error: '{name}' was not found in MongoDB or Appsavy."
             
+        # 5. Handle Multiple Matches (FORCE ASKING THE MANAGER)
         if len(matches) > 1:
             options = "\n".join([f"- {u['name']} (Phone: {u['phone']})" for u in matches])
             return (
-                f"I found multiple users named '{name}'. Who should I assign this to?\n\n"
+                f"I found multiple users named '{name}'. To avoid mistakes, who should I assign this to?\n\n"
                 f"{options}\n\n"
-                "Please provide the specific phone number or full name."
+                "Please reply with the specific phone number."
             )
 
-        # Single Match Found - Proceed
+        # 6. Single Match Found - Proceed with assignment
         user = matches[0]
         login_code = user["login_code"]
 
