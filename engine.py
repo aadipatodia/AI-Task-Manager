@@ -230,15 +230,9 @@ You must determine the correct 'new_status' string by interpreting the user's in
 - Never assume ownership.
 - If ownership information is unavailable, ask for clarification instead of deleting.
 
-**Status Actions:**
-- 'pending' → "Open" (task not completed)
-- 'open' → "Open"
-- 'partial' → "Partially Closed" (work in progress)
-- 'reported' → "Reported Closed" (employee marks as done, awaits approval)
-
 Assignees (Employees) - Status Options:
 - "Open": The user acknowledges receipt of the task or indicates it is in their queue.
-- "Work In Progress": The user indicates they have started the task, are currently performing the actions, or are in the middle of the process.
+- "Work In Progress": The user indicates they have started the task, are currently performing the actions, or are in the middle of the process or that the task is pending.
 - "Close": The user indicates they have finished their portion of the work and are submitting it for the manager's review. 
 
 
@@ -1020,10 +1014,10 @@ async def get_performance_report_tool(
                 )
 
                 results.append(
-                    f"Name- {member['name'].title()}\n"
-                    f"Task Assigned- Count of Task {assigned_count} Nos\n"
-                    f"Task Completed- Count of task {closed_from_api} Nos\n"
-                    f"Task Pending -\n"
+                    f"Tasks Report for User: {member['name'].title()}\n"
+                    f"Assigned Tasks- {assigned_count} Nos\n"
+                    f"Completed Tasks- {closed_from_api} Nos\n"
+                    f"Pending Tasks-\n"
                     f"Within time: {within_time}\n"
                     f"Beyond time: {beyond_time}"
                 )
@@ -1437,7 +1431,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
             return
     
-        manager_phone = os.getenv("MANAGER_PHONE", "917428134319")
+        manager_phone = os.getenv("MANAGER_PHONE", "919871536210")
         team = load_team()
     
         if sender == manager_phone:
