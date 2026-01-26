@@ -552,16 +552,15 @@ async def delete_user_tool(
 
 
 def get_gmail_service():
-    """Initialize Gmail API service with OAuth2 credentials from environment variables."""
     try:
         token_json_str = os.getenv("TOKEN_JSON")
         if not token_json_str:
-            logger.error("TOKEN_JSON environment variable not found.")
             return None
         
-        token_data = json.loads(token_json_str)
-        creds = Credentials.from_authorized_user_info(token_data, SCOPES)
+        cleaned_token = token_json_str.strip().replace('\n', '').replace('\r', '')
+        token_data = json.loads(cleaned_token)
         
+        creds = Credentials.from_authorized_user_info(token_data, SCOPES)
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         
@@ -1174,11 +1173,14 @@ async def assign_new_task_tool(
     deadline: str
 ) -> str:
     try:
-        # 1. Fetch Candidates from MongoDB and Appsavy (SID 606)
+        # 1. Fetch Candidates from both MongoDB and Appsavy
         team = load_team()
         mongo_matches = [u for u in team if name.lower() in u["name"].lower()]
 
-        assignee_res = await call_appsavy_api("GET_ASSIGNEE", GetAssigneeRequest(Event="0", Child=[{"Control_Id": "106771", "AC_ID": "111057"}]))
+        assignee_res = await call_appsavy_api("GET_ASSIGNEE", GetAssigneeRequest(
+            Event="0", 
+            Child=[{"Control_Id": "106771", "AC_ID": "111057"}]
+        ))
         appsavy_users = assignee_res.get("data", {}).get("Result", []) if isinstance(assignee_res, dict) else []
         
         appsavy_matches = [
@@ -1186,40 +1188,45 @@ async def assign_new_task_tool(
             for u in appsavy_users if name.lower() in u["NAME"].lower()
         ]
 
-        # Combine and deduplicate
+        # Combine and deduplicate by Login ID
         combined = {u["login_code"]: u for u in (mongo_matches + appsavy_matches)}.values()
         matches = list(combined)
 
         if not matches:
-            return f"Error: '{name}' not found."
+            return f"Error: '{name}' not found in MongoDB or Appsavy."
 
-        # 2. DEEP LOOKUP: If multiple matches, fetch actual phone numbers (SID 609)
+        # 2. DEEP LOOKUP: If multiple matches, fetch actual details (SID 609)
         if len(matches) > 1:
-            detailed_matches = []
+            final_options = []
             for candidate in matches:
-                # If we don't have a phone, ask SID 609
-                if candidate["phone"] == "N/A":
-                    # Reuse your existing get_users_by_id logic
-                    details = await call_appsavy_api("GET_USERS_BY_ID", GetUsersByIdRequest(
-                        Event="107018",
-                        Child=[{"Control_Id": "107019", "AC_ID": "111271", "Parent": [{"Control_Id": "106771", "Value": candidate["login_code"], "Data_Form_Id": ""}]}]
-                    ))
-                    
-                    # Extract phone if found in the detailed response
-                    if isinstance(details, list) and len(details) > 0:
-                        candidate["phone"] = details[0].get("MOBILE") or details[0].get("PHONE") or "N/A"
+                # Call SID 609 to get missing phone and office info
+                details_res = await call_appsavy_api("GET_USERS_BY_ID", GetUsersByIdRequest(
+                    Event="107018",
+                    Child=[{
+                        "Control_Id": "107019",
+                        "AC_ID": "111271",
+                        "Parent": [{"Control_Id": "106771", "Value": candidate["login_code"], "Data_Form_Id": ""}]
+                    }]
+                ))
                 
-                detailed_matches.append(candidate)
+                # Extract the real phone number and division
+                if isinstance(details_res, list) and len(details_res) > 0:
+                    detail = details_res[0]
+                    candidate["phone"] = detail.get("MOBILE") or detail.get("PHONE") or "N/A"
+                    # Using hierarchy data from your files
+                    candidate["office"] = detail.get("DIVISION_NAME") or detail.get("ZONE_NAME") or "Unknown Office"
+                
+                final_options.append(candidate)
 
-            # 3. Format the clarification message with REAL data
-            options = "\n".join([f"- {u['name']} (Phone: {u['phone']})" for u in detailed_matches])
+            # 3. Format clarification message with REAL DATA
+            options_text = "\n".join([f"- {u['name']} ({u.get('office', 'Office N/A')}): {u['phone']}" for u in final_options])
             return (
                 f"I found multiple users named '{name}'. Who should I assign this to?\n\n"
-                f"{options}\n\n"
+                f"{options_text}\n\n"
                 "Please reply with the 10-digit phone number."
             )
 
-        # 4. Single Match - Proceed with existing CreateTask logic
+        # 4. Single Match Found - Proceed with CreateTask (SID 604)
         user = matches[0]
         login_code = user["login_code"]
 
