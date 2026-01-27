@@ -1030,6 +1030,14 @@ async def get_performance_report_tool(
                 member_tasks = normalize_tasks_response(raw_tasks_data)
                 top_10_pending = get_top_10_pending_tasks(member_tasks, now)
                 counts = await fetch_task_counts_api(member_login, ctx.deps.role)
+                if not counts:
+                    assigned_count = str(len(member_tasks))
+                    closed_from_api = str(
+                        sum(1 for t in member_tasks if str(t.get("STS", "")).lower() == "closed")
+                        )
+                else:
+                    assigned_count = counts.get("ASSIGNED_TASK", str(len(member_tasks)))
+                    closed_from_api = counts.get("CLOSED_TASK", "0")
                 within_time = 0
                 beyond_time = 0
                 closed_count = 0
@@ -1106,7 +1114,10 @@ async def get_performance_report_tool(
         if not results:
             return "No team members found for reporting."
 
-        return "\n\n".join(results)
+        if isinstance(results, dict):
+            if results.get("status") == "0":
+                logger.warning(f"GET_COUNT returned empty data")
+                return None
 
     except Exception as e:
         logger.error("get_performance_report_tool error", exc_info=True)
