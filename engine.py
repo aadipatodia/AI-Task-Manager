@@ -634,6 +634,12 @@ def normalize_task(task: Dict[str, Any]) -> Dict[str, Any]:
         "task_type": task.get("TASK_TYPE")
     }
 
+def is_authorized(task_owner) -> bool:
+    try:
+        return int(task_owner) > 0
+    except (TypeError, ValueError):
+        return False
+
 async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
     """Universal wrapper for Appsavy POST requests - 100% API dependency."""
     config = API_CONFIGS[key]
@@ -913,38 +919,55 @@ async def get_performance_report_tool(
     name: Optional[str] = None
 ) -> str:
     """
-    Original logic for counts + additional loop for Top 10 Pending tasks.
+    Generate performance report using API data
+    - SID 616 for counts
+    - SID 610 for task details (per user)
     """
     try:
         team = load_team()
         now = ctx.deps.current_time
 
+        # 🔒 Role check
         if not name and ctx.deps.role != "manager":
             return "Permission Denied: Only managers can view the full team report."
 
+        # 👤 Decide whose report to show
         if name:
             matched = next(
-                (u for u in team if name.lower() in u["name"].lower() or name.lower() == u["login_code"].lower()),
+                (
+                    u for u in team
+                    if name.lower() in u["name"].lower()
+                    or name.lower() == u["login_code"].lower()
+                ),
                 None
             )
             if not matched:
                 return f"User '{name}' not found in directory."
             display_team = [matched]
+
         elif ctx.deps.role == "manager":
             display_team = team
+
         else:
-            self_user = next((u for u in team if u["phone"] == ctx.deps.sender_phone), None)
+            self_user = next(
+                (u for u in team if u["phone"] == ctx.deps.sender_phone),
+                None
+            )
             if not self_user:
                 return "Unable to identify your profile."
             display_team = [self_user]
 
+        # 🔹 Status filter based on role
         status_filter = build_status_filter(ctx.deps.role)
-        results = []
 
+        results: list[str] = []
+
+        # 🔁 Fetch data per user
         for member in display_team:
             member_login = member["login_code"]
 
             try:
+                # 🔹 Fetch tasks (SID 610)
                 raw_tasks_data = await call_appsavy_api(
                     "GET_TASKS",
                     GetTasksRequest(
@@ -965,11 +988,11 @@ async def get_performance_report_tool(
 
                 member_tasks = normalize_tasks_response(raw_tasks_data)
                 counts = await fetch_task_counts_api(member_login, ctx.deps.role)
-                
-                # --- START ORIGINAL UNTOUCHED LOGIC ---
+
                 within_time = 0
                 beyond_time = 0
                 closed_count = 0
+                pending_tasks_list = []
 
                 for task in member_tasks:
                     status = str(task.get("STS", "")).lower()
@@ -981,67 +1004,82 @@ async def get_performance_report_tool(
 
                     if expected_date:
                         try:
-                            expected = datetime.datetime.strptime(
+                            expected_dt = datetime.datetime.strptime(
                                 expected_date,
                                 "%m/%d/%Y %I:%M:%S %p"
                             )
-                            if expected >= now:
+
+                            pending_tasks_list.append({
+                                "id": task.get("TID", "N/A"),
+                                "name": task.get("COMMENTS", "No Title"),
+                                "deadline": expected_date,
+                                "dt_obj": expected_dt
+                            })
+
+                            if expected_dt >= now:
                                 within_time += 1
                             else:
                                 beyond_time += 1
+
                         except Exception:
                             within_time += 1
+                    else:
+                        within_time += 1
 
-                assigned_count = counts.get("ASSIGNED_TASK", str(len(member_tasks)))
-                closed_from_api = counts.get("CLOSED_TASK", str(closed_count))
-                # --- END ORIGINAL UNTOUCHED LOGIC ---
+                # 🔹 Top 10 pending (only for single user view)
+                pending_list_str = ""
+                if len(display_team) == 1:
+                    pending_tasks_list.sort(key=lambda x: x["dt_obj"])
+                    top_10 = pending_tasks_list[:10]
 
-                # --- NEW PASS: TOP 10 PENDING BY DEADLINE ---
-                pending_tasks_for_sorting = []
-                for task in member_tasks:
-                    if str(task.get("STS", "")).lower() != "closed":
-                        t_id = task.get("TID")
-                        t_name = task.get("COMMENTS", "No Description")
-                        date_str = task.get("EXPECTED_END_DATE")
-                        
-                        sort_dt = datetime.datetime.max
-                        if date_str:
-                            try:
-                                sort_dt = datetime.datetime.strptime(date_str, "%m/%d/%Y %I:%M:%S %p")
-                            except: pass
-                        
-                        pending_tasks_for_sorting.append({
-                            "display": f"• [{t_id}] {t_name} (Due: {date_str.split(' ')[0] if date_str else 'N/A'})",
-                            "date": sort_dt
-                        })
-                
-                pending_tasks_for_sorting.sort(key=lambda x: x["date"])
-                top_10 = [t["display"] for t in pending_tasks_for_sorting[:10]]
-                # --- END NEW PASS ---
+                    pending_list_str = "\n\nTop 10 Pending Tasks:"
+                    if not top_10:
+                        pending_list_str += "\n- No pending tasks found."
+                    else:
+                        for t in top_10:
+                            pending_list_str += (
+                                f"\n- [{t['id']}] {t['name']} (Due: {t['deadline']})"
+                            )
 
-                report = (
+                assigned_count = counts.get(
+                    "ASSIGNED_TASK",
+                    str(len(member_tasks))
+                )
+
+                closed_from_api = counts.get(
+                    "CLOSED_TASK",
+                    str(closed_count)
+                )
+
+                results.append(
                     f"Tasks Report for User: {member['name'].title()}\n"
                     f"Assigned Tasks- {assigned_count} Nos\n"
                     f"Completed Tasks- {closed_from_api} Nos\n"
                     f"Pending Tasks-\n"
                     f"Within time: {within_time}\n"
                     f"Beyond time: {beyond_time}"
+                    f"{pending_list_str}"
                 )
 
-                if top_10:
-                    report += "\n\n*Top 10 Pending Tasks:*\n" + "\n".join(top_10)
-
-                results.append(report)
-
             except Exception:
-                logger.error(f"Error for {member['name']}", exc_info=True)
-                results.append(f"Name- {member['name'].title()}\nError: Unable to fetch report data")
+                logger.error(
+                    f"Error processing report for {member['name']}",
+                    exc_info=True
+                )
+                results.append(
+                    f"Name- {member['name'].title()}\n"
+                    f"Error: Unable to fetch report data"
+                )
+
+        if not results:
+            return "No team members found for reporting."
 
         return "\n\n".join(results)
 
     except Exception as e:
         logger.error("get_performance_report_tool error", exc_info=True)
         return f"Error generating performance report: {str(e)}"
+
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
     try:
@@ -1392,9 +1430,12 @@ async def update_task_status_tool(
         ownership_res = await call_appsavy_api("CHECK_OWNERSHIP", RootModel(ownership_payload))
         
         # Determine RESULT from SID 632
-        result_data = ownership_res.get("data", {}).get("Result", []) if isinstance(ownership_res, dict) else []
-        # API instruction: 0 means don't allow update
-        if not result_data or str(result_data[0].get("RESULT", "0")) == "0":
+        result_data = ownership_res.get("data", {}).get("Result", [])
+        if not result_data:
+            return f"Permission Denied: You are not authorized to update Task {task_id}."
+        
+        task_owner = result_data[0].get("TASK_OWNER", "0")
+        if not is_authorized(task_owner):
             return f"Permission Denied: You are not authorized to update Task {task_id}."
             
     except Exception as e:
