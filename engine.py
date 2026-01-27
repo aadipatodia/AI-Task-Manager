@@ -243,30 +243,56 @@ You must determine the correct 'new_status' string by interpreting the user's in
 - Never assume ownership.
 - If ownership information is unavailable, ask for clarification instead of deleting.
 
-### TASK STATUS RULES (API SID 607)
-You must determine the correct **new_status** string by identifying the user's role relative to the specific **Task ID** provided in the request. The user's identity is established by their **10-digit mobile number** (the sender), which must be passed in the `WHATSAPP_MOBILE_NUMBER` field.
-**Role Identification Logic**
-* **Employee (The Assignee):** This role applies if the sender's mobile number matches the **Assignee** field of the requested `task_id`.
-* **Manager (The Creator):** This role applies if the sender's mobile number matches the **Reporter/Creator** field of the requested `task_id`.
+You are a task workflow interpreter for a backend system.
 
----
-**Status Mapping for Employees (Assignees)**
-* **Work In Progress:** Use this when the intent is "Start work," "In progress," "Still working," or "Task is pending."
-* **Close:** Use this when the intent is "Finish," "Done," "Task completed," or "I've finished my part." Note that for an employee, this is a **submission for approval**, not the final end of the task lifecycle.
----
-**Status Mapping for Managers (Creators)**
-* **Closed:** Use this when the intent is "Approve," "Task is finished," "Final close," or "Looks good." This marks the task as **officially finished**.
-* **Reopened:** Use this when the intent is "Redo this," "Reject," "Work not satisfactory," or "Need more changes."
----
+Your job is to understand the user's intent and determine the correct
+new_status value for API SID 607 based on:
+- The user's role relative to the specific task
+- The meaning of their message
 
-**Critical Operational Logic**
-* **Dual Identity Awareness:** A user may be an Employee on Task A and a Manager on Task B. You must verify the role against the specific `task_id` using the sender's phone number before determining the status.
-**Status Precision:** Strictly distinguish between **`Close`** (Employee submission) and **`Closed`** (Manager finality).
-* **Unauthorized Actions:** If an Employee attempts a manager-only status (like `Closed` or `Reopened`), or if a Manager attempts an employee-only status (like `Work In Progress`), deny the request professionally.
-**Comment Extraction:** Always extract the conversational part of the message and pass it into the **`COMMENTS`** field for the API.
-**Natural Language Interpretation:** Understand that "completed" and "finished" by an employee always mean they are submitting work for approval, not ending the lifecycle of the task.
-**Permission Enforcement:** Never allow an Employee to use the status `Closed` or `Reopen`.
-Never allow a Manager to use the status `Work In Progress` or `Close`.
+You MUST follow these rules strictly:
+
+1. Determine the user's role ONLY from the provided context.
+   - Employee = Assignee of the task
+   - Manager = Reporter/Creator of the task
+
+2. Strictly distinguish between:
+   - "Close"  → employee submission for approval
+   - "Closed" → manager final closure
+
+3. Never allow:
+   - Employees to use: Closed, Reopened
+   - Managers to use: Work In Progress, Close
+
+4. Interpret natural language correctly:
+   - "done", "finished", "completed" by an employee means submission, not final closure
+   - "approve", "looks good", "final close" by a manager means final closure
+
+5. Do NOT ask the user any questions.
+6. Do NOT explain rules.
+7. Do NOT include anything outside valid JSON.
+🔹 USER PROMPT (DYNAMIC)
+User message:
+"{user_message}"
+
+Context:
+- Task ID: {task_id}
+- Sender mobile number: {sender_mobile}
+- Sender role for this task: {task_relationship}
+  (ASSIGNEE or REPORTER)
+
+Your task:
+- Identify the user's intent.
+- Determine the correct new_status string for API SID 607.
+- Extract the conversational part of the message as comments.
+
+Return JSON ONLY in this exact format:
+
+{
+  "intent": "...",
+  "new_status": "...",
+  "comments": "..."
+}
 
 **DOCUMENT HANDLING:**
 **Case 1 (Manager):** If a document/image is sent while creating a task, use `assign_new_task_tool`. 
@@ -918,58 +944,46 @@ async def get_performance_report_tool(
     ctx: RunContext[ManagerContext],
     name: Optional[str] = None
 ) -> str:
-    """
-    Generate performance report using API data
-    - SID 616 for counts
-    - SID 610 for task details (PER USER)
-    """
     try:
         team = load_team()
         now = ctx.deps.current_time
 
-        # 🔐 Role check
+        # Role check
         if not name and ctx.deps.role != "manager":
             return "Permission Denied: Only managers can view the full team report."
 
-        # 👤 Decide whose report to show
+        # Decide whose report to show
         if name:
             matched_user = next(
-                (
-                    u for u in team
-                    if name.lower() in u["name"].lower()
-                    or name.lower() == u["login_code"].lower()
-                ),
+                (u for u in team if name.lower() in u["name"].lower() 
+                 or name.lower() == u["login_code"].lower()),
                 None
             )
             if not matched_user:
                 return f"User '{name}' not found in directory."
-
             display_team = [matched_user]
-
         elif ctx.deps.role == "manager":
             display_team = team
-
         else:
             self_user = next(
-                (u for u in team if u["phone"] == ctx.deps.sender_phone),
-                None
+                (u for u in team if u["phone"] == ctx.deps.sender_phone), None
             )
             if not self_user:
                 return "Unable to identify your profile."
-
             display_team = [self_user]
 
-        # 🔎 Status filter based on role
         status_filter = build_status_filter(ctx.deps.role)
-
         results = []
 
-        # 🔁 FETCH DATA PER USER (FIXED LOGIC)
+        # MAIN LOOP: Per user data fetch
         for member in display_team:
             member_login = member["login_code"]
-
+            
             try:
-                # 📡 Fetch tasks for THIS USER ONLY
+                # ✅ STEP 1: Fetch API counts FIRST
+                counts = await fetch_task_counts_api(member_login, ctx.deps.role)
+                
+                # ✅ STEP 2: Fetch task details
                 raw_tasks_data = await call_appsavy_api(
                     "GET_TASKS",
                     GetTasksRequest(
@@ -987,27 +1001,47 @@ async def get_performance_report_tool(
                         }]
                     )
                 )
-
+                
                 member_tasks = normalize_tasks_response(raw_tasks_data)
-                counts = await fetch_task_counts_api(member_login, ctx.deps.role)
-
+                
+                # ✅ STEP 3: Process pending tasks
                 within_time = 0
                 beyond_time = 0
                 closed_count = 0
-
+                pending_tasks = []
+                
                 for task in member_tasks:
                     status = str(task.get("STS", "")).lower()
                     expected_date = task.get("EXPECTED_END_DATE")
-
+                    
                     if status == "closed":
                         closed_count += 1
                         continue
-
+                    
+                    # Build pending task details
+                    task_id = task.get("TID", "N/A")
+                    task_name = task.get("COMMENTS", "N/A")
+                    due_date = "N/A"
+                    
+                    if expected_date:
+                        try:
+                            due_date = datetime.datetime.strptime(
+                                expected_date, "%m/%d/%Y %I:%M:%S %p"
+                            ).strftime("%d-%b-%Y %I:%M %p")
+                        except Exception:
+                            due_date = expected_date
+                    
+                    pending_tasks.append(
+                        f"{len(pending_tasks)+1}. Task ID: {task_id}\n"
+                        f"   Task: {task_name}\n"
+                        f"   Due: {due_date}"
+                    )
+                    
+                    # Calculate timing
                     if expected_date:
                         try:
                             expected = datetime.datetime.strptime(
-                                expected_date,
-                                "%m/%d/%Y %I:%M:%S %p"
+                                expected_date, "%m/%d/%Y %I:%M:%S %p"
                             )
                             if expected >= now:
                                 within_time += 1
@@ -1017,45 +1051,44 @@ async def get_performance_report_tool(
                             within_time += 1
                     else:
                         within_time += 1
-
-                assigned_count = counts.get(
-                    "ASSIGNED_TASK",
-                    str(len(member_tasks))
+                
+                # ✅ STEP 4: Extract counts (BEFORE using them)
+                assigned_count = counts.get("ASSIGNED_TASK", str(len(member_tasks)))
+                closed_from_api = counts.get("CLOSED_TASK", str(closed_count))
+                
+                # Format pending tasks block
+                pending_block = (
+                    "Pending Tasks:\n" + "\n\n".join(pending_tasks)
+                    if pending_tasks
+                    else "Pending Tasks:\nNone"
                 )
-
-                closed_from_api = counts.get(
-                    "CLOSED_TASK",
-                    str(closed_count)
-                )
-
+                
+                # ✅ STEP 5: Build output (NOW variables are defined)
                 results.append(
-                    f"Tasks Report for User: {member['name'].title()}\n"
-                    f"Assigned Tasks- {assigned_count} Nos\n"
-                    f"Completed Tasks- {closed_from_api} Nos\n"
-                    f"Pending Tasks-\n"
-                    f"Within time: {within_time}\n"
-                    f"Beyond time: {beyond_time}"
+                    f"Name: {member['name'].title()}\n"
+                    f"Task Assigned: Count of Task {assigned_count} Nos\n"
+                    f"Task Completed: Count of Task {closed_from_api} Nos\n\n"
+                    f"{pending_block}"
                 )
-
-            except Exception:
+                
+            except Exception as e:
                 logger.error(
-                    f"Error processing report for {member['name']}",
+                    f"Error processing report for {member['name']}: {e}",
                     exc_info=True
                 )
                 results.append(
-                    f"Name- {member['name'].title()}\n"
+                    f"Name: {member['name'].title()}\n"
                     f"Error: Unable to fetch report data"
                 )
-
+        
         if not results:
             return "No team members found for reporting."
-
+        
         return "\n\n".join(results)
-
+        
     except Exception as e:
         logger.error("get_performance_report_tool error", exc_info=True)
         return f"Error generating performance report: {str(e)}"
-
 
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
@@ -1379,72 +1412,113 @@ MANAGER_ALLOWED_STATUSES = {
     "reject": "Reopened"
 }
 
+def resolve_final_status(intent: str, relationship: str, role: str) -> Optional[str]:
+    if intent == "CLOSE_TASK":
+        if role == "manager":
+            return "Closed"
+        if relationship in ["REPORTER", "ASSIGNEE"]:
+            return "Close"
+
+    if intent == "REOPEN_TASK":
+        return "Reopened"
+
+    return None
+
+
 async def update_task_status_tool(
-    ctx: RunContext[ManagerContext], 
-    task_id: str, 
-    status: str, 
+    ctx: RunContext[ManagerContext],
+    task_id: str,
+    status: str,
     remark: Optional[str] = None
 ) -> str:
+  
+    # --- BASIC VALIDATION ---
     if not task_id or task_id.lower() in ["", "none", "null"]:
         return "Please mention the Task ID you want to update."
-    
-    sender_mobile = ctx.deps.sender_phone[-10:]
-    incoming = status.strip().lower()
 
-    # --- AUTOMATIC OWNERSHIP CHECK (SID 632) ---
+    if not status:
+        return "System Error: Final task status could not be determined."
+
+    sender_mobile = ctx.deps.sender_phone[-10:]
+
+    # --- OWNERSHIP CHECK (SID 632) ---
     ownership_payload = {
         "Event": "146560",
-        "Child": [{
-            "Control_Id": "146561", "AC_ID": "201877",
-            "Parent": [
-                {"Control_Id": "146559", "Value": task_id, "Data_Form_Id": ""},
-                {"Control_Id": "146562", "Value": sender_mobile, "Data_Form_Id": ""}
-            ]
-        }]
+        "Child": [
+            {
+                "Control_Id": "146561",
+                "AC_ID": "201877",
+                "Parent": [
+                    {
+                        "Control_Id": "146559",
+                        "Value": task_id,
+                        "Data_Form_Id": ""
+                    },
+                    {
+                        "Control_Id": "146562",
+                        "Value": sender_mobile,
+                        "Data_Form_Id": ""
+                    }
+                ]
+            }
+        ]
     }
 
     try:
-        ownership_res = await call_appsavy_api("CHECK_OWNERSHIP", RootModel(ownership_payload))
-        
-        # Determine RESULT from SID 632
+        ownership_res = await call_appsavy_api(
+            "CHECK_OWNERSHIP",
+            RootModel(ownership_payload)
+        )
+
         result_data = ownership_res.get("data", {}).get("Result", [])
         if not result_data:
             return f"Permission Denied: You are not authorized to update Task {task_id}."
-        
-        task_owner = result_data[0].get("TASK_OWNER", "0")
+
+        task_owner = result_data[0].get("TASK_OWNER")
         if not is_authorized(task_owner):
             return f"Permission Denied: You are not authorized to update Task {task_id}."
-            
+
     except Exception as e:
         logger.error(f"Ownership check failed: {e}")
-        return "System Error: Could not verify authorization."
+        return "System Error: Could not verify task ownership."
 
-    # --- MAP STATUS BASED ON ROLE ---
-    # We now know they are authorized. If sender is Manager, use Manager map; else Employee.
-    # (Checking ctx.deps.role as assigned during message handling)
-    if ctx.deps.role == "employee":
-        final_status = EMPLOYEE_ALLOWED_STATUSES.get(incoming)
-    else:
-        final_status = MANAGER_ALLOWED_STATUSES.get(incoming)
-
-    if not final_status:
-        return f"Invalid status '{status}' for your current role."
+    # --- ROLE SAFETY CHECK (FINAL GUARD) ---
+    if ctx.deps.role == "employee" and status == "Closed":
+        return (
+            "You have submitted the task, but final closure "
+            "requires manager approval."
+        )
 
     # --- PROCEED WITH UPDATE (SID 607) ---
     try:
         req = UpdateTaskRequest(
-            TASK_ID=task_id, STATUS=final_status,
-            COMMENTS=remark or f"Updated to {final_status}",
+            TASK_ID=task_id,
+            STATUS=status,
+            COMMENTS=remark or f"Task updated to {status}",
             WHATSAPP_MOBILE_NUMBER=sender_mobile
         )
-        # Keep existing document handling if present...
+
         api_response = await call_appsavy_api("UPDATE_STATUS", req)
-        
-        if api_response and (str(api_response.get("RESULT")) == "1" or str(api_response.get("result")) == "1"):
-            return f"Success: Task {task_id} updated to '{final_status}'."
+
+        if api_response and str(api_response.get("RESULT")) == "1":
+            if status == "Close":
+                return (
+                    f" Task {task_id} has been marked as completed "
+                    "and sent for manager closure."
+                )
+            if status == "Closed":
+                return f" Task {task_id} has been closed successfully."
+            if status == "Reopened":
+                return f" Task {task_id} has been reopened."
+
+            return f" Task {task_id} updated to '{status}'."
+
         return f"API Error: {api_response.get('resultmessage', 'Update failed')}"
+
     except Exception as e:
-        return f"Error: {str(e)}"
+        logger.error(f"Task update failed: {e}")
+        return "System Error: Could not update task status."
+
     
 async def handle_message(command, sender, pid, message=None, full_message=None):
     if command and command.strip().lower() == "delete & add":
