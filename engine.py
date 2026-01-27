@@ -207,7 +207,6 @@ Current Time: {current_time_str}
 ### TASK STATUS RULES (API SID 607):
 You must determine the correct 'new_status' string by interpreting the user's intent and role within the conversation context. Do not look for specific keywords; understand the "state" the user is describing.
 
-
 ### USER MANAGEMENT RULES (ADD / DELETE USERS):
 
 - Any authorized user can ADD a new user.
@@ -233,48 +232,28 @@ You must determine the correct 'new_status' string by interpreting the user's in
 - Never assume ownership.
 - If ownership information is unavailable, ask for clarification instead of deleting.
 
-This is the completed and corrected **TASK STATUS RULES** section for your system prompt. It is designed to ensure I (as the AI) act as a smart interpreter between natural conversational language and your specific API status requirements.
+### TASK STATUS RULES (API SID 607)
+You must determine the correct **new_status** string by identifying the user's role relative to the specific **Task ID** provided in the request. The user's identity is established by their **10-digit mobile number** (the sender), which must be passed in the `WHATSAPP_MOBILE_NUMBER` field.
+**Role Identification Logic**
+* **Employee (The Assignee):** This role applies if the sender's mobile number matches the **Assignee** field of the requested `task_id`.
+* **Manager (The Creator):** This role applies if the sender's mobile number matches the **Reporter/Creator** field of the requested `task_id`.
 
 ---
+**Status Mapping for Employees (Assignees)**
+* **Work In Progress:** Use this when the intent is "Start work," "In progress," "Still working," or "Task is pending."
+* **Close:** Use this when the intent is "Finish," "Done," "Task completed," or "I've finished my part." Note that for an employee, this is a **submission for approval**, not the final end of the task lifecycle.
+---
+**Status Mapping for Managers (Creators)**
+* **Closed:** Use this when the intent is "Approve," "Task is finished," "Final close," or "Looks good." This marks the task as **officially finished**.
+* **Reopened:** Use this when the intent is "Redo this," "Reject," "Work not satisfactory," or "Need more changes."
+---
 
-### ### TASK STATUS RULES (API SID 607)
-
-You must determine the correct `new_status` string by first identifying the **User Role** (Manager or Employee) and then interpreting the **Intent** of their message. Do not look for specific keywords; understand the state the user is describing.
-DO NOT ask the user if they are a manager or employee. Use the following logic to determine the role and status automatically:
-Identify Role by Task ID:
-- If the user is the Assignee of the requested Task ID, they are acting as the Employee.
-- If the user was the Creator/Reporter of the requested Task ID, they are acting as the Manager.
-**Managers:** Authorized to provide final approval or reject work.
-**Employees:** Authorized to update progress or submit work for review.
-
-MAP INTENT TO SYSTEM STATUS
-Employee Intents (The Assignees)
-Status: Open
-Intent: The user acknowledges they have seen the task or added it to their queue.
-Examples: "Acknowledged," "I see it," "Got the task."
-
-Status: Work In Progress
-Intent: The user indicates they have started the action, the task is currently "pending," or they are in the middle of the process.
-Examples: "I'm starting this," "Still working on it," "Task <task_id> is pending," "I've done the first part."
-
-Status: Close
-Intent: The user indicates they have finished their portion of the work and are submitting it for the manager's review.
-Examples: "Task 101 closed," "Task 102 completed," "Here is the final file."
-
-**Manager Intents (The Approvers)**
-
-Status: Closed
-Intent: The manager expresses final satisfaction, gives formal approval, or marks the task as officially finished.
-Examples: "Approved," "Task 102 is finished," "Great job, close this," "Task 102 is finally done."
-
-Status: Reopened
-Intent: The manager expresses dissatisfaction, rejects the work, or indicates more work is required on a task the employee previously tried to "Close".
-Examples: "Redo this," "Task 101 is rejected," "Need more details," "Reopen task 101."
-
-**CRITICAL LOGIC:**
-**Role-Based Mapping:** If an employee says "closed," you must map it to `Close` (submission). If a manager says "close," you must map it to `Closed` (finality).
+**Critical Operational Logic**
+* **Dual Identity Awareness:** A user may be an Employee on Task A and a Manager on Task B. You must verify the role against the specific `task_id` using the sender's phone number before determining the status.
+**Status Precision:** Strictly distinguish between **`Close`** (Employee submission) and **`Closed`** (Manager finality).
+* **Unauthorized Actions:** If an Employee attempts a manager-only status (like `Closed` or `Reopened`), or if a Manager attempts an employee-only status (like `Work In Progress`), deny the request professionally.
+**Comment Extraction:** Always extract the conversational part of the message and pass it into the **`COMMENTS`** field for the API.
 **Natural Language Interpretation:** Understand that "completed" and "finished" by an employee always mean they are submitting work for approval, not ending the lifecycle of the task.
-**Remark Extraction:** Always extract the conversational part of the message (e.g., "I found the bug") and pass it into the `COMMENTS` field for the API.
 **Permission Enforcement:** Never allow an Employee to use the status `Closed` or `Reopen`.
 Never allow a Manager to use the status `Work In Progress` or `Close`.
 
@@ -409,12 +388,13 @@ class GetTasksRequest(BaseModel):
     Child: List[Dict]
 
 class UpdateTaskRequest(BaseModel):
-    SID: str = "607"
-    TASK_ID: str
-    STATUS: str
-    COMMENTS: str = "STATUS_UPDATE"
-    UPLOAD_DOCUMENT: str = ""
-    BASE64: str = ""
+    SID: str = "607"                 
+    TASK_ID: str                    
+    STATUS: str                      
+    COMMENTS: str = "STATUS_UPDATE" 
+    UPLOAD_DOCUMENT: str = ""     
+    BASE64: str = ""      
+    WHATSAPP_MOBILE_NUMBER: str 
 
 class GetCountRequest(BaseModel):
     Event: str = "107567"
@@ -430,7 +410,7 @@ class GetUsersByIdRequest(BaseModel):
 
 class AddDeleteUserRequest(BaseModel):
     SID: str = "629"
-    ACTION: str            # "Add" or "Delete"
+    ACTION: str            
     CREATOR_MOBILE_NUMBER: str
     EMAIL: str
     MOBILE_NUMBER: str
@@ -1385,33 +1365,38 @@ async def update_task_status_tool(
     remark: Optional[str] = None
 ) -> str:
     """
-    Updates task status. Gemini maps conversational intent to:
-    'Open', 'Work In Progress', 'Close', 'Reopen', 'Closed'.
+    Updates task status using SID 607.
+    Identifies the user via WHATSAPP_MOBILE_NUMBER to verify permissions[cite: 8, 11].
     """
     if not task_id or task_id.lower() in ["", "none", "null"]:
         return "Please mention the Task ID you want to update."
+    
     role = ctx.deps.role
-    # Gemini provides the 'status' based on the mapping rules in the system prompt
     incoming = status.strip().lower()
     
+    # Extract the 10-digit mobile number from the sender 
+    sender_mobile = ctx.deps.sender_phone[-10:]
 
+    # Map conversational intent to system statuses 
+    # Logic: Assignee (Employee) -> "Close"; Creator (Manager) -> "Closed"
     if role == "employee":
         if incoming in EMPLOYEE_ALLOWED_STATUSES:
             final_status = EMPLOYEE_ALLOWED_STATUSES[incoming]
         else:
-            return "Invalid status update."
+            return "Invalid status update for employee."
     elif role == "manager":
         if incoming in MANAGER_ALLOWED_STATUSES:
             final_status = MANAGER_ALLOWED_STATUSES[incoming]
         else:
-            return "Invalid status update."
+            return "Invalid status update for manager."
+    else:
+        return "Unauthorized role."
         
-     
     final_status = final_status.strip()
     doc_name = ""
     base64_data = ""
 
-    # Document Handling logic [Maintained from your original]
+    # Document Handling
     if ctx.deps.document_data:
         media_type = ctx.deps.document_data.get("type")
         media_info = ctx.deps.document_data.get(media_type, {})
@@ -1425,14 +1410,14 @@ async def update_task_status_tool(
                 )
 
     try:
-        # Prepare request using the mandatory fields from your YAML [cite: 8, 10, 12]
         req = UpdateTaskRequest(
-            SID="607",           # Mandatory Service ID [cite: 8]
-            TASK_ID=task_id,     # Mandatory Task ID [cite: 12]
-            STATUS=final_status, # Interpreted status 
-            COMMENTS=remark or f"Status updated to {final_status}", # [cite: 9]
+            SID="607",           
+            TASK_ID=task_id,     
+            STATUS=final_status, 
+            COMMENTS=remark or f"Status updated to {final_status}", 
             UPLOAD_DOCUMENT=doc_name, 
-            BASE64=base64_data 
+            BASE64=base64_data,
+            WHATSAPP_MOBILE_NUMBER=sender_mobile # Identifying parameter 
         )
 
         api_response = await call_appsavy_api("UPDATE_STATUS", req)
@@ -1445,24 +1430,13 @@ async def update_task_status_tool(
             if api_response.get("error"):
                 return f"API failure: {api_response.get('error')}"
 
-            # Success check (RESULT 1)
             if str(api_response.get("RESULT")) == "1" or str(api_response.get("result")) == "1":
-                
-                # Notification logic for Manager when Employee submits work
+                # Success notification logic for Manager
                 if role == "employee" and final_status == "Close":
-                    team = load_team()
-                    employee = next((u for u in team if u["phone"] == ctx.deps.sender_phone), None)
-                    
                     manager_phone = os.getenv("MANAGER_PHONE")
                     phone_id = os.getenv("PHONE_NUMBER_ID")
-
-                    if employee and manager_phone and phone_id:
-                        notification_msg = (
-                            f"Task Submitted for Approval\n\n"
-                            f"Employee: {employee['name'].title()}\n"
-                            f"Task ID: {task_id}\n"
-                            f"Remark: {remark or 'N/A'}"
-                        )
+                    if manager_phone and phone_id:
+                        notification_msg = f"Task {task_id} submitted for approval by {sender_mobile}."
                         send_whatsapp_message(manager_phone, notification_msg, phone_id)
 
                 return f"Success: Task {task_id} updated to '{final_status}'."
