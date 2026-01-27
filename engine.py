@@ -918,6 +918,45 @@ async def get_users_by_id_tool(ctx: RunContext[ManagerContext], id_value: str) -
         logger.error(f"get_users_by_id_tool error: {str(e)}", exc_info=True)
         return f"Error fetching user information: {str(e)}"
 
+def get_top_10_pending_tasks(tasks: list, now: datetime.datetime) -> list:
+    """
+    Filters non-closed tasks and returns top 10 pending tasks
+    sorted by expected end date (earliest first).
+    """
+    pending = []
+
+    for task in tasks:
+        status = str(task.get("STS", "")).lower()
+        if status == "closed":
+            continue
+
+        expected_raw = task.get("EXPECTED_END_DATE")
+        expected_dt = None
+
+        if expected_raw:
+            try:
+                expected_dt = datetime.datetime.strptime(
+                    expected_raw, "%m/%d/%Y %I:%M:%S %p"
+                )
+            except Exception:
+                pass
+
+        pending.append({
+            "task_id": task.get("TID"),
+            "task_name": task.get("COMMENTS"),
+            "status": task.get("STS"),
+            "expected_dt": expected_dt,
+            "expected_raw": expected_raw or "N/A"
+        })
+
+    # Sort: earliest deadline first, unknown dates last
+    pending.sort(
+        key=lambda x: x["expected_dt"] if x["expected_dt"] else datetime.datetime.max
+    )
+
+    return pending[:10]
+
+
 async def get_performance_report_tool(
     ctx: RunContext[ManagerContext],
     name: Optional[str] = None
@@ -961,13 +1000,9 @@ async def get_performance_report_tool(
                 return "Unable to identify your profile."
             display_team = [self_user]
 
-        # 🔹 Status filter
         status_filter = build_status_filter(ctx.deps.role)
 
         results = []
-
-        
-        # FETCH DATA PER USER (THIS FIXES THE BUG)
       
         for member in display_team:
             member_login = member["login_code"]
@@ -993,6 +1028,7 @@ async def get_performance_report_tool(
                 )
 
                 member_tasks = normalize_tasks_response(raw_tasks_data)
+                top_10_pending = get_top_10_pending_tasks(member_tasks, now)
                 counts = await fetch_task_counts_api(member_login, ctx.deps.role)
                 within_time = 0
                 beyond_time = 0
@@ -1030,7 +1066,7 @@ async def get_performance_report_tool(
                     str(closed_count)
                 )
 
-                results.append(
+                report_text = (
                     f"Tasks Report for User: {member['name'].title()}\n"
                     f"Assigned Tasks- {assigned_count} Nos\n"
                     f"Completed Tasks- {closed_from_api} Nos\n"
@@ -1038,6 +1074,24 @@ async def get_performance_report_tool(
                     f"Within time: {within_time}\n"
                     f"Beyond time: {beyond_time}"
                 )
+
+                if name:
+                    report_text += "\n\nTop 10 Pending Tasks:\n"
+
+                    if not top_10_pending:
+                        report_text += "No pending tasks found."
+                    else:
+                        for idx, task in enumerate(top_10_pending, start=1):
+                            deadline_display = task["expected_raw"]
+                            report_text += (
+                                f"\n{idx}. ID: {task['task_id']}\n"
+                                f"   Task: {task['task_name']}\n"
+                                f"   Deadline: {deadline_display}\n"
+                                f"   Status: {task['status']}\n"
+                            )
+
+                results.append(report_text)
+
 
             except Exception:
                 logger.error(
