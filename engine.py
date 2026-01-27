@@ -956,7 +956,6 @@ def get_top_10_pending_tasks(tasks: list, now: datetime.datetime) -> list:
 
     return pending[:10]
 
-
 async def get_performance_report_tool(
     ctx: RunContext[ManagerContext],
     name: Optional[str] = None
@@ -1000,9 +999,13 @@ async def get_performance_report_tool(
                 return "Unable to identify your profile."
             display_team = [self_user]
 
+        # 🔹 Status filter
         status_filter = build_status_filter(ctx.deps.role)
 
         results = []
+
+        
+        # FETCH DATA PER USER (THIS FIXES THE BUG)
       
         for member in display_team:
             member_login = member["login_code"]
@@ -1028,16 +1031,7 @@ async def get_performance_report_tool(
                 )
 
                 member_tasks = normalize_tasks_response(raw_tasks_data)
-                top_10_pending = get_top_10_pending_tasks(member_tasks, now)
                 counts = await fetch_task_counts_api(member_login, ctx.deps.role)
-                if not counts:
-                    assigned_count = str(len(member_tasks))
-                    closed_from_api = str(
-                        sum(1 for t in member_tasks if str(t.get("STS", "")).lower() == "closed")
-                        )
-                else:
-                    assigned_count = counts.get("ASSIGNED_TASK", str(len(member_tasks)))
-                    closed_from_api = counts.get("CLOSED_TASK", "0")
                 within_time = 0
                 beyond_time = 0
                 closed_count = 0
@@ -1074,7 +1068,7 @@ async def get_performance_report_tool(
                     str(closed_count)
                 )
 
-                report_text = (
+                results.append(
                     f"Tasks Report for User: {member['name'].title()}\n"
                     f"Assigned Tasks- {assigned_count} Nos\n"
                     f"Completed Tasks- {closed_from_api} Nos\n"
@@ -1082,24 +1076,6 @@ async def get_performance_report_tool(
                     f"Within time: {within_time}\n"
                     f"Beyond time: {beyond_time}"
                 )
-
-                if name:
-                    report_text += "\n\nTop 10 Pending Tasks:\n"
-
-                    if not top_10_pending:
-                        report_text += "No pending tasks found."
-                    else:
-                        for idx, task in enumerate(top_10_pending, start=1):
-                            deadline_display = task["expected_raw"]
-                            report_text += (
-                                f"\n{idx}. ID: {task['task_id']}\n"
-                                f"   Task: {task['task_name']}\n"
-                                f"   Deadline: {deadline_display}\n"
-                                f"   Status: {task['status']}\n"
-                            )
-
-                results.append(report_text)
-
 
             except Exception:
                 logger.error(
@@ -1114,15 +1090,11 @@ async def get_performance_report_tool(
         if not results:
             return "No team members found for reporting."
 
-        if isinstance(results, dict):
-            if results.get("status") == "0":
-                logger.warning(f"GET_COUNT returned empty data")
-                return None
+        return "\n\n".join(results)
 
     except Exception as e:
         logger.error("get_performance_report_tool error", exc_info=True)
         return f"Error generating performance report: {str(e)}"
-
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
     try:
