@@ -271,22 +271,6 @@ You MUST follow these rules strictly:
 5. Do NOT ask the user any questions.
 6. Do NOT explain rules.
 7. Do NOT include anything outside valid JSON.
-🔹 USER PROMPT (DYNAMIC)
-User message:
-"{user_message}"
-
-Context:
-- Task ID: {task_id}
-- Sender mobile number: {sender_mobile}
-- Sender role for this task: {task_relationship}
-  (ASSIGNEE or REPORTER)
-
-Your task:
-- Identify the user's intent.
-- Determine the correct new_status string for API SID 607.
-- Extract the conversational part of the message as comments.
-
-Return JSON ONLY in this exact format:
 
 {
   "intent": "...",
