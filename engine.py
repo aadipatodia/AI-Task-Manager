@@ -902,112 +902,141 @@ async def get_performance_report_tool(
     name: Optional[str] = None
 ) -> str:
     """
-    Generates a consolidated performance report for a specific user or team.
-    Includes high-level counts and Top 10 Pending Tasks sorted by deadline.
+    Generate performance report using API data
+    - SID 616 for counts
+    - SID 610 for task details (PER USER)
     """
     try:
         team = load_team()
         now = ctx.deps.current_time
 
-        # 1. Resolve Name to a Single User
+        # Role check
+        if not name and ctx.deps.role != "manager":
+            return "Permission Denied: Only managers can view the full team report."
+
+        # Decide whose report to show
         if name:
-            # Look for exact or partial name matches in the authorized directory
-            matched = [u for u in team if name.lower() in u["name"].lower() or name.lower() == u["login_code"].lower()]
-            
+            matched = next(
+                (
+                    u for u in team
+                    if name.lower() in u["name"].lower()
+                    or name.lower() == u["login_code"].lower()
+                ),
+                None
+            )
             if not matched:
-                return f"User '{name}' not found in the authorized directory."
-            
-            # If multiple Raj's/Ankita's exist, we pick the first or ask for ID (simple logic for now)
-            display_team = [matched[0]]
-        else:
-            # Manager-only full team summary logic
-            if ctx.deps.role != "manager":
-                return "Permission Denied: Only managers can view the full team report."
+                return f"User '{name}' not found in directory."
+            display_team = [matched]
+
+        elif ctx.deps.role == "manager":
             display_team = team
 
+        else:
+            self_user = next(
+                (u for u in team if u["phone"] == ctx.deps.sender_phone),
+                None
+            )
+            if not self_user:
+                return "Unable to identify your profile."
+            display_team = [self_user]
+
+        # 🔹 Status filter
         status_filter = build_status_filter(ctx.deps.role)
+
         results = []
 
+        
+        # FETCH DATA PER USER (THIS FIXES THE BUG)
+      
         for member in display_team:
             member_login = member["login_code"]
-            
-            # 2. Fetch High-Level Statistics (SID 616)
-            counts = await fetch_task_counts_api(member_login, ctx.deps.role)
-            
-            # 3. Fetch Detailed Task List (SID 610)
-            raw_tasks_data = await call_appsavy_api(
-                "GET_TASKS",
-                GetTasksRequest(
-                    Child=[{
-                        "Control_Id": "106831",
-                        "AC_ID": "110803",
-                        "Parent": [
-                            {"Control_Id": "106825", "Value": status_filter, "Data_Form_Id": ""},
-                            {"Control_Id": "106827", "Value": member_login, "Data_Form_Id": ""},
-                            {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""}
-                        ]
-                    }]
+
+            try:
+                # 🔹 Fetch task list for THIS USER ONLY (SID 610)
+                raw_tasks_data = await call_appsavy_api(
+                    "GET_TASKS",
+                    GetTasksRequest(
+                        Child=[{
+                            "Control_Id": "106831",
+                            "AC_ID": "110803",
+                            "Parent": [
+                                {"Control_Id": "106825", "Value": status_filter, "Data_Form_Id": ""},
+                                {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
+                                {"Control_Id": "106827", "Value": member_login, "Data_Form_Id": ""},
+                                {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
+                                {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
+                                {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""}
+                            ]
+                        }]
+                    )
                 )
-            )
 
-            member_tasks = normalize_tasks_response(raw_tasks_data)
-            pending_tasks_list = []
-            within_time = 0
-            beyond_time = 0
+                member_tasks = normalize_tasks_response(raw_tasks_data)
+                counts = await fetch_task_counts_api(member_login, ctx.deps.role)
+                within_time = 0
+                beyond_time = 0
+                closed_count = 0
 
-            # 4. Process Tasks for Deadlines
-            for task in member_tasks:
-                status = str(task.get("STS", "")).lower()
-                expected_date_str = task.get("EXPECTED_END_DATE")
+                for task in member_tasks:
+                    status = str(task.get("STS", "")).lower()
+                    expected_date = task.get("EXPECTED_END_DATE")
 
-                # We only show 'Pending' (Non-Closed) tasks in the breakdown
-                if status != "closed":
-                    try:
-                        # Parsing the standard Appsavy date format
-                        expected_dt = datetime.datetime.strptime(expected_date_str, "%m/%d/%Y %I:%M:%S %p")
-                        
-                        if expected_dt >= now:
+                    if status == "closed":
+                        closed_count += 1
+                        continue
+
+                    if expected_date:
+                        try:
+                            expected = datetime.datetime.strptime(
+                                expected_date,
+                                "%m/%d/%Y %I:%M:%S %p"
+                            )
+                            if expected >= now:
+                                within_time += 1
+                            else:
+                                beyond_time += 1
+                        except Exception:
+                            # fallback: treat as within time
                             within_time += 1
-                        else:
-                            beyond_time += 1
-                        
-                        pending_tasks_list.append({
-                            "id": task.get("TID"),
-                            "desc": task.get("COMMENTS"),
-                            "deadline": expected_dt
-                        })
-                    except:
-                        within_time += 1 # Fallback for missing/bad dates
 
-            # 5. Sort by Most Urgent (Earliest Deadline)
-            pending_tasks_list.sort(key=lambda x: x["deadline"])
-            top_10 = pending_tasks_list[:10]
+                assigned_count = counts.get(
+                    "ASSIGNED_TASK",
+                    str(len(member_tasks))
+                )
 
-            # 6. Format the Single Message Output
-            report_msg = (
-                f"*Performance Report: {member['name'].title()}*\n"
-                f"*Assigned Tasks:* {counts.get('ASSIGNED_TASK', '0')}\n"
-                f"*Completed Tasks:* {counts.get('CLOSED_TASK', '0')}\n"
-                f"*Within Time:* {within_time}\n"
-                f"*Beyond Time:* {beyond_time}\n"
-            )
+                closed_from_api = counts.get(
+                    "CLOSED_TASK",
+                    str(closed_count)
+                )
 
-            # Only append Top 10 if we are looking at a specific person
-            if name and top_10:
-                report_msg += f"\n*Top 10 Pending Tasks:*\n"
-                for t in top_10:
-                    deadline_fmt = t["deadline"].strftime("%d-%b %I:%M %p")
-                    report_msg += f"[{t['id']}] {t['desc']} (Due: {deadline_fmt})\n"
-            elif name and not top_10:
-                report_msg += "\n*No pending tasks found!*"
-            
-            results.append(report_msg)
+                results.append(
+                    f"Tasks Report for User: {member['name'].title()}\n"
+                    f"Assigned Tasks- {assigned_count} Nos\n"
+                    f"Completed Tasks- {closed_from_api} Nos\n"
+                    f"Pending Tasks-\n"
+                    f"Within time: {within_time}\n"
+                    f"Beyond time: {beyond_time}"
+                )
+
+            except Exception:
+                logger.error(
+                    f"Error processing report for {member['name']}",
+                    exc_info=True
+                )
+                results.append(
+                    f"Name- {member['name'].title()}\n"
+                    f"Error: Unable to fetch report data"
+                )
+
+        if not results:
+            return "No team members found for reporting."
 
         return "\n\n".join(results)
 
     except Exception as e:
-        logger.error(f"get_performance_report_tool error: {str(e)}", exc_info=True)
-        return "Error generating performance report. Please check if the user name is correct."
+        logger.error("get_performance_report_tool error", exc_info=True)
+        return f"Error generating performance report: {str(e)}"
+
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
     try:
         team = load_team()
@@ -1108,6 +1137,7 @@ async def get_task_description(task_id: str) -> str:
 
     except Exception as e:
         logger.error(f"Failed to fetch task description for {task_id}: {e}")
+
     return "N/A"
 
 async def assign_new_task_tool(
@@ -1117,11 +1147,11 @@ async def assign_new_task_tool(
     deadline: str
 ) -> str:
     """
-    Assigns a new task to a user or group.
-    Fixes: KeyError: 'email', and Meta phone number format validation.
+    Assigns a new task and forwards attached documents.
+    Backend Feedback: DETAILS part empty rakha gaya hai aur documents Base64 mein hain.
     """
     try:
-        # 1. MERGE SOURCES: Fetch candidates from BOTH MongoDB and Appsavy (SID 606)
+        # 1. Team directory lookup (MongoDB + Appsavy)
         team = load_team()
         mongo_matches = [u for u in team if name.lower() in u["name"].lower() or name.lower() == u["login_code"].lower()]
 
@@ -1141,135 +1171,102 @@ async def assign_new_task_tool(
             for u in appsavy_users if name.lower() in str(u.get("NAME", "")).lower()
         ]
 
-        # Deduplicate using Login ID to ensure we catch every unique instance
         combined = {u["login_code"]: u for u in (mongo_matches + appsavy_matches)}
         matches = list(combined.values())
 
         if not matches:
-            return f"Error: User or Group '{name}' not found in the authorized directory."
+            return f"Error: User or Group '{name}' not found."
 
-        # 2. DEEP LOOKUP & HIERARCHY: If multiple matches, fetch REAL details (SID 609)
+        # 2. Handle Duplicate Matches
         if len(matches) > 1:
             final_options = []
             for candidate in matches:
                 details_res = await call_appsavy_api("GET_USERS_BY_ID", GetUsersByIdRequest(
                     Event="107018",
-                    Child=[{
-                        "Control_Id": "107019",
-                        "AC_ID": "111271",
-                        "Parent": [{"Control_Id": "106771", "Value": candidate["login_code"], "Data_Form_Id": ""}]
-                    }]
+                    Child=[{"Control_Id": "107019", "AC_ID": "111271", "Parent": [{"Control_Id": "106771", "Value": candidate["login_code"], "Data_Form_Id": ""}]}]
                 ))
-                
                 if isinstance(details_res, list) and len(details_res) > 0:
                     detail = details_res[0]
                     candidate["phone"] = detail.get("MOBILE") or detail.get("PHONE") or "N/A"
-                    office_parts = [
-                        detail.get("ZONE_NAME"),
-                        detail.get("CIRCLE_NAME"),
-                        detail.get("DIVISION_NAME")
-                    ]
-                    candidate["office"] = " > ".join([p for p in office_parts if p]) or "Office N/A"
-                elif isinstance(details_res, dict) and "data" in details_res:
-                    res_list = details_res.get("data", {}).get("Result", [])
-                    if res_list:
-                        candidate["phone"] = res_list[0].get("MOBILE") or "N/A"
-                        candidate["office"] = res_list[0].get("DIVISION_NAME") or "Office N/A"
-                
+                    candidate["office"] = detail.get("DIVISION_NAME") or "Office N/A"
                 final_options.append(candidate)
 
             options_text = "\n".join([f"- {u['name']} ({u.get('office', 'Office N/A')}): {u['phone']}" for u in final_options])
-            return (
-                f"I found multiple users named '{name}'. Who should I assign this to?\n\n"
-                f"{options_text}\n\n"
-                "Please reply with the correct 10-digit phone number."
-            )
+            return f"Multiple users named '{name}' found:\n\n{options_text}\n\nReply with 10-digit phone number."
 
-        # 3. SINGLE MATCH FOUND: Proceed with Assignment (SID 604)
+        # 3. Single Match: Prepare payload
         user = matches[0]
         login_code = user["login_code"]
         
-        # FIX 1: Sanitize phone number for Meta API (+)
-        recipient_phone = user.get("phone", "")
-        if recipient_phone and not recipient_phone.startswith("+"):
-            recipient_phone = f"+{recipient_phone}"
+        # Phone Sanitization for Meta API
+        recipient_phone = str(user.get("phone", ""))
+        if recipient_phone != "N/A":
+            if not recipient_phone.startswith("+"):
+                recipient_phone = f"+91{recipient_phone[-10:]}"
 
-        # 4. Handle Document Attachment
+        # 4. Documents Handling (Base64)
         documents_child = []
+        media_id_to_forward = None
+        media_filename = "task_file"
+        
         if ctx.deps.document_data:
             media_type = ctx.deps.document_data.get("type")
             media_info = ctx.deps.document_data.get(media_type)
             if media_info:
-                logger.info(f"Downloading attachment for new task: {media_type}")
+                media_id_to_forward = media_info.get("id")
+                media_filename = media_info.get("filename") or (f"task_media_{datetime.datetime.now().strftime('%H%M%S')}.png" if media_type == "image" else "task_doc.pdf")
+                
                 base64_data = download_and_encode_document(media_info)
                 if base64_data:
-                    fname = media_info.get("filename") or (
-                        f"task_image_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png" 
-                        if media_type == "image" else "task_document.pdf"
-                    )
                     documents_child.append(DocumentItem(
-                        DOCUMENT=DocumentInfo(VALUE=fname, BASE64=base64_data),
-                        DOCUMENT_NAME=fname
+                        DOCUMENT=DocumentInfo(VALUE=media_filename, BASE64=base64_data),
+                        DOCUMENT_NAME=media_filename
                     ))
 
-        # 5. Prepare the CreateTaskRequest (SID 604)
+        # 5. Create Task Payload
+        # Backend Instruction: DETAILS part mein kuch mat bhejo, sirf ASSIGNEE
         req = CreateTaskRequest(
             ASSIGNEE=login_code,
             DESCRIPTION=task_name,
             TASK_NAME=task_name,
             EXPECTED_END_DATE=to_appsavy_datetime(deadline),
             MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
-            DETAILS=Details(
-                CHILD=[DetailChild(
-                    SEL="Y",
-                    LOGIN=login_code,
-                    PARTICIPANTS=user["name"].upper()
-                )]
-            ),
+            DETAILS=Details(CHILD=[]), # Mandatory Empty for this API flow
             DOCUMENTS=Documents(CHILD=documents_child)
         )
         
-        # 6. Execute API Call
         api_response = await call_appsavy_api("CREATE_TASK", req)
         
-        if not api_response:
-            return "API failure: No response from server during task creation."
-        
-        if isinstance(api_response, dict):
-            if api_response.get('error'):
-                return f"API failure: {api_response.get('error')}"
-            
-            if str(api_response.get('result')) == "1" or str(api_response.get('RESULT')) == "1":
-                # --- Send Notifications ---
-                phone_id = os.getenv("PHONE_NUMBER_ID")
-                whatsapp_msg = f"New Task Assigned:\n\nTask: {task_name}\nDue Date: {deadline}\n\nPlease complete on time."
+        if isinstance(api_response, dict) and (str(api_response.get('result')) == "1" or str(api_response.get('RESULT')) == "1"):
+            # 6. Notifications Sequence
+            phone_id = os.getenv("PHONE_NUMBER_ID")
+            whatsapp_msg = f"New Task Assigned:\n\nTask: {task_name}\nDue Date: {deadline}"
 
-                # Use sanitized phone for WhatsApp
-                if phone_id and recipient_phone != "N/A":
-                    send_registration_template(
-                        recipient_number=recipient_phone,
-                        user_identifier=user["name"].title(),
-                        phone_number_id=phone_id
-                    )
-                    
-                    await asyncio.sleep(1.8)
-                    send_whatsapp_message(recipient_phone, whatsapp_msg, phone_id)
-
-                # FIX 2: Safety check for email key to prevent KeyError
-                email_subject = f"New Task Assigned: {task_name}"
-                if user.get("email"):
-                    send_email(user["email"], email_subject, whatsapp_msg)
+            if phone_id and recipient_phone != "N/A":
+                # Registration/Session Refresh
+                send_registration_template(recipient_phone, user["name"].title(), phone_id)
+                await asyncio.sleep(1.8)
                 
-                # Notification for Manager
-                send_email(MANAGER_EMAIL, f"Task Confirmed: {task_name}", f"Assigned to {user['name']}.")
+                # Text notification
+                send_whatsapp_message(recipient_phone, whatsapp_msg, phone_id)
+                
+                # Image/PDF Forwarding
+                if media_id_to_forward:
+                    await asyncio.sleep(1.0)
+                    send_whatsapp_document(recipient_phone, media_id_to_forward, media_filename, phone_id)
 
-                return f"Task successfully assigned to {user['name'].title()} (ID: {login_code})."
+            # Email notifications with KeyError protection
+            if user.get("email"):
+                send_email(user["email"], f"New Task: {task_name}", whatsapp_msg)
+            send_email(MANAGER_EMAIL, f"Confirmed: {task_name}", f"Assigned to {user['name']}.")
 
-        return f"API Error: {api_response.get('resultmessage', 'Unexpected response format')}"
+            return f"Task assigned to {user['name'].title()} (ID: {login_code})."
+
+        return f"API Error: {api_response.get('resultmessage', 'Server rejected request')}"
         
     except Exception as e:
         logger.error(f"assign_new_task_tool error: {str(e)}", exc_info=True)
-        return f"System Error: Unable to assign task ({str(e)})""
+        return f"System Error: Unable to assign task ({str(e)})"
 
 async def assign_task_by_phone_tool(
     ctx: RunContext[ManagerContext],
