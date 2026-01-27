@@ -243,28 +243,34 @@ You must determine the correct 'new_status' string by interpreting the user's in
 - Never assume ownership.
 - If ownership information is unavailable, ask for clarification instead of deleting.
 
-### UPDATE TASK STATUS
 You are a task workflow interpreter for a backend system.
+
 Your job is to understand the user's intent and determine the correct
 new_status value for API SID 607 based on:
 - The user's role relative to the specific task
 - The meaning of their message
+
 You MUST follow these rules strictly:
 
 1. Determine the user's role ONLY from the provided context.
    - Employee = Assignee of the task
    - Manager = Reporter/Creator of the task
+
 2. Strictly distinguish between:
    - "Close"  → employee submission for approval
    - "Closed" → manager final closure
+
 3. Never allow:
    - Employees to use: Closed, Reopened
    - Managers to use: Work In Progress, Close
+
 4. Interpret natural language correctly:
    - "done", "finished", "completed" by an employee means submission, not final closure
    - "approve", "looks good", "final close" by a manager means final closure
+
 5. Do NOT ask the user any questions.
 6. Do NOT explain rules.
+7. Do NOT include anything outside valid JSON.
 
 **DOCUMENT HANDLING:**
 **Case 1 (Manager):** If a document/image is sent while creating a task, use `assign_new_task_tool`. 
@@ -916,6 +922,11 @@ async def get_performance_report_tool(
     ctx: RunContext[ManagerContext],
     name: Optional[str] = None
 ) -> str:
+    """
+    Generate performance report using API data
+    - SID 616 for counts
+    - SID 610 for task details (PER USER)
+    """
     try:
         team = load_team()
         now = ctx.deps.current_time
@@ -926,36 +937,43 @@ async def get_performance_report_tool(
 
         # Decide whose report to show
         if name:
-            matched_user = next(
-                (u for u in team if name.lower() in u["name"].lower() 
-                 or name.lower() == u["login_code"].lower()),
+            matched = next(
+                (
+                    u for u in team
+                    if name.lower() in u["name"].lower()
+                    or name.lower() == u["login_code"].lower()
+                ),
                 None
             )
-            if not matched_user:
+            if not matched:
                 return f"User '{name}' not found in directory."
-            display_team = [matched_user]
+            display_team = [matched]
+
         elif ctx.deps.role == "manager":
             display_team = team
+
         else:
             self_user = next(
-                (u for u in team if u["phone"] == ctx.deps.sender_phone), None
+                (u for u in team if u["phone"] == ctx.deps.sender_phone),
+                None
             )
             if not self_user:
                 return "Unable to identify your profile."
             display_team = [self_user]
 
+        # 🔹 Status filter
         status_filter = build_status_filter(ctx.deps.role)
+
         results = []
 
-        # MAIN LOOP: Per user data fetch
+        
+        # FETCH DATA PER USER (THIS FIXES THE BUG)
+      
         for member in display_team:
             member_login = member["login_code"]
-            
+
             try:
-                # ✅ STEP 1: Fetch API counts FIRST
-                counts = await fetch_task_counts_api(member_login, ctx.deps.role)
-                
-                # ✅ STEP 2: Fetch task details
+                # 🔹 Fetch task list for THIS USER ONLY (SID 610)
                 raw_tasks_data = await call_appsavy_api(
                     "GET_TASKS",
                     GetTasksRequest(
@@ -973,91 +991,69 @@ async def get_performance_report_tool(
                         }]
                     )
                 )
-                
+
                 member_tasks = normalize_tasks_response(raw_tasks_data)
-                
-                # ✅ STEP 3: Process pending tasks
+                counts = await fetch_task_counts_api(member_login, ctx.deps.role)
                 within_time = 0
                 beyond_time = 0
                 closed_count = 0
-                pending_tasks = []
-                
+
                 for task in member_tasks:
                     status = str(task.get("STS", "")).lower()
                     expected_date = task.get("EXPECTED_END_DATE")
-                    
+
                     if status == "closed":
                         closed_count += 1
                         continue
-                    
-                    # Build pending task details
-                    task_id = task.get("TID", "N/A")
-                    task_name = task.get("COMMENTS", "N/A")
-                    due_date = "N/A"
-                    
-                    if expected_date:
-                        try:
-                            due_date = datetime.datetime.strptime(
-                                expected_date, "%m/%d/%Y %I:%M:%S %p"
-                            ).strftime("%d-%b-%Y %I:%M %p")
-                        except Exception:
-                            due_date = expected_date
-                    
-                    pending_tasks.append(
-                        f"{len(pending_tasks)+1}. Task ID: {task_id}\n"
-                        f"   Task: {task_name}\n"
-                        f"   Due: {due_date}"
-                    )
-                    
-                    # Calculate timing
+
                     if expected_date:
                         try:
                             expected = datetime.datetime.strptime(
-                                expected_date, "%m/%d/%Y %I:%M:%S %p"
+                                expected_date,
+                                "%m/%d/%Y %I:%M:%S %p"
                             )
                             if expected >= now:
                                 within_time += 1
                             else:
                                 beyond_time += 1
                         except Exception:
+                            # fallback: treat as within time
                             within_time += 1
-                    else:
-                        within_time += 1
-                
-                # ✅ STEP 4: Extract counts (BEFORE using them)
-                assigned_count = counts.get("ASSIGNED_TASK", str(len(member_tasks)))
-                closed_from_api = counts.get("CLOSED_TASK", str(closed_count))
-                
-                # Format pending tasks block
-                pending_block = (
-                    "Pending Tasks:\n" + "\n\n".join(pending_tasks)
-                    if pending_tasks
-                    else "Pending Tasks:\nNone"
+
+                assigned_count = counts.get(
+                    "ASSIGNED_TASK",
+                    str(len(member_tasks))
                 )
-                
-                # ✅ STEP 5: Build output (NOW variables are defined)
+
+                closed_from_api = counts.get(
+                    "CLOSED_TASK",
+                    str(closed_count)
+                )
+
                 results.append(
-                    f"Name: {member['name'].title()}\n"
-                    f"Task Assigned: Count of Task {assigned_count} Nos\n"
-                    f"Task Completed: Count of Task {closed_from_api} Nos\n\n"
-                    f"{pending_block}"
+                    f"Tasks Report for User: {member['name'].title()}\n"
+                    f"Assigned Tasks- {assigned_count} Nos\n"
+                    f"Completed Tasks- {closed_from_api} Nos\n"
+                    f"Pending Tasks-\n"
+                    f"Within time: {within_time}\n"
+                    f"Beyond time: {beyond_time}"
                 )
-                
-            except Exception as e:
+
+            except Exception:
                 logger.error(
-                    f"Error processing report for {member['name']}: {e}",
+                    f"Error processing report for {member['name']}",
                     exc_info=True
                 )
                 results.append(
-                    f"Name: {member['name'].title()}\n"
+                    f"Name- {member['name'].title()}\n"
                     f"Error: Unable to fetch report data"
                 )
-        
+
         if not results:
             return "No team members found for reporting."
-        
+
         return "\n\n".join(results)
-        
+
     except Exception as e:
         logger.error("get_performance_report_tool error", exc_info=True)
         return f"Error generating performance report: {str(e)}"
