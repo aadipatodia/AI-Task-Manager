@@ -902,140 +902,106 @@ async def get_performance_report_tool(
     name: Optional[str] = None
 ) -> str:
     """
-    Generate performance report using API data
-    - SID 616 for counts
-    - SID 610 for task details (PER USER)
+    Generates a consolidated performance report.
+    Fetches counts (SID 616) and top 10 pending tasks (SID 610) in a single response.
     """
     try:
         team = load_team()
         now = ctx.deps.current_time
 
-        # Role check
-        if not name and ctx.deps.role != "manager":
-            return "Permission Denied: Only managers can view the full team report."
-
-        # Decide whose report to show
+        # Identify target user
         if name:
             matched = next(
-                (
-                    u for u in team
-                    if name.lower() in u["name"].lower()
-                    or name.lower() == u["login_code"].lower()
-                ),
+                (u for u in team if name.lower() in u["name"].lower() or name.lower() == u["login_code"].lower()),
                 None
             )
             if not matched:
-                return f"User '{name}' not found in directory."
+                return f"User '{name}' not found in the directory."
             display_team = [matched]
-
-        elif ctx.deps.role == "manager":
+        else:
+            if ctx.deps.role != "manager":
+                return "Permission Denied: Only managers can view the full team report."
             display_team = team
 
-        else:
-            self_user = next(
-                (u for u in team if u["phone"] == ctx.deps.sender_phone),
-                None
-            )
-            if not self_user:
-                return "Unable to identify your profile."
-            display_team = [self_user]
-
-        # 🔹 Status filter
         status_filter = build_status_filter(ctx.deps.role)
-
         results = []
 
-        
-        # FETCH DATA PER USER (THIS FIXES THE BUG)
-      
         for member in display_team:
             member_login = member["login_code"]
-
-            try:
-                # 🔹 Fetch task list for THIS USER ONLY (SID 610)
-                raw_tasks_data = await call_appsavy_api(
-                    "GET_TASKS",
-                    GetTasksRequest(
-                        Child=[{
-                            "Control_Id": "106831",
-                            "AC_ID": "110803",
-                            "Parent": [
-                                {"Control_Id": "106825", "Value": status_filter, "Data_Form_Id": ""},
-                                {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
-                                {"Control_Id": "106827", "Value": member_login, "Data_Form_Id": ""},
-                                {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
-                                {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
-                                {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""}
-                            ]
-                        }]
-                    )
+            
+            # 1. Fetch Task List for Breakdown (SID 610)
+            raw_tasks_data = await call_appsavy_api(
+                "GET_TASKS",
+                GetTasksRequest(
+                    Child=[{
+                        "Control_Id": "106831",
+                        "AC_ID": "110803",
+                        "Parent": [
+                            {"Control_Id": "106825", "Value": status_filter, "Data_Form_Id": ""},
+                            {"Control_Id": "106827", "Value": member_login, "Data_Form_Id": ""},
+                            {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""}
+                        ]
+                    }]
                 )
+            )
 
-                member_tasks = normalize_tasks_response(raw_tasks_data)
-                counts = await fetch_task_counts_api(member_login, ctx.deps.role)
-                within_time = 0
-                beyond_time = 0
-                closed_count = 0
+            # 2. Fetch High-Level Statistics (SID 616)
+            counts = await fetch_task_counts_api(member_login, ctx.deps.role)
+            
+            member_tasks = normalize_tasks_response(raw_tasks_data)
+            pending_tasks_list = []
+            within_time = 0
+            beyond_time = 0
 
-                for task in member_tasks:
-                    status = str(task.get("STS", "")).lower()
-                    expected_date = task.get("EXPECTED_END_DATE")
+            for task in member_tasks:
+                status = str(task.get("STS", "")).lower()
+                expected_date_str = task.get("EXPECTED_END_DATE")
 
-                    if status == "closed":
-                        closed_count += 1
-                        continue
-
-                    if expected_date:
-                        try:
-                            expected = datetime.datetime.strptime(
-                                expected_date,
-                                "%m/%d/%Y %I:%M:%S %p"
-                            )
-                            if expected >= now:
-                                within_time += 1
-                            else:
-                                beyond_time += 1
-                        except Exception:
-                            # fallback: treat as within time
+                if status != "closed":
+                    try:
+                        expected_dt = datetime.datetime.strptime(expected_date_str, "%m/%d/%Y %I:%M:%S %p")
+                        
+                        if expected_dt >= now:
                             within_time += 1
+                        else:
+                            beyond_time += 1
+                        
+                        pending_tasks_list.append({
+                            "id": task.get("TID"),
+                            "desc": task.get("COMMENTS"),
+                            "deadline": expected_dt
+                        })
+                    except:
+                        # Fallback for unparseable dates
+                        within_time += 1
 
-                assigned_count = counts.get(
-                    "ASSIGNED_TASK",
-                    str(len(member_tasks))
-                )
+            # Sort by deadline (Earliest/Most Urgent first)
+            pending_tasks_list.sort(key=lambda x: x["deadline"])
+            top_10 = pending_tasks_list[:10]
 
-                closed_from_api = counts.get(
-                    "CLOSED_TASK",
-                    str(closed_count)
-                )
+            # 3. Construct Single Message Output
+            report = (
+                f"*Performance Report: {member['name'].title()}*\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"*Assigned Tasks:* {counts.get('ASSIGNED_TASK', '0')}\n"
+                f"*Completed Tasks:* {counts.get('CLOSED_TASK', '0')}\n"
+                f"*Pending (Within Time):* {within_time}\n"
+                f"*Pending (Beyond Time):* {beyond_time}\n"
+            )
 
-                results.append(
-                    f"Tasks Report for User: {member['name'].title()}\n"
-                    f"Assigned Tasks- {assigned_count} Nos\n"
-                    f"Completed Tasks- {closed_from_api} Nos\n"
-                    f"Pending Tasks-\n"
-                    f"Within time: {within_time}\n"
-                    f"Beyond time: {beyond_time}"
-                )
-
-            except Exception:
-                logger.error(
-                    f"Error processing report for {member['name']}",
-                    exc_info=True
-                )
-                results.append(
-                    f"Name- {member['name'].title()}\n"
-                    f"Error: Unable to fetch report data"
-                )
-
-        if not results:
-            return "No team members found for reporting."
+            if name and top_10:
+                report += f"\n *Top 10 Pending Tasks:*\n"
+                for t in top_10:
+                    deadline_fmt = t["deadline"].strftime("%d-%b %I:%M %p")
+                    report += f"• [{t['id']}] {t['desc']} (Due: {deadline_fmt})\n"
+            
+            results.append(report)
 
         return "\n\n".join(results)
 
     except Exception as e:
-        logger.error("get_performance_report_tool error", exc_info=True)
-        return f"Error generating performance report: {str(e)}"
+        logger.error(f"Performance report failed: {str(e)}")
+        return "System Error: Unable to generate report at this time."
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
     try:
@@ -1137,7 +1103,6 @@ async def get_task_description(task_id: str) -> str:
 
     except Exception as e:
         logger.error(f"Failed to fetch task description for {task_id}: {e}")
-
     return "N/A"
 
 async def assign_new_task_tool(
