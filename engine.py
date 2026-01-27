@@ -494,7 +494,7 @@ async def add_user_tool(
         if login_code:
             new_user = {
                 "name": name.lower().strip(),
-                "phone": "91" + mobile[-10:],
+                "phone": "+91" + mobile[-10:],
                 "email": email,
                 "login_code": login_code
             }
@@ -543,7 +543,7 @@ async def delete_user_tool(
         # --- MongoDB se bhi hatane ka logic ---
         if users_collection is not None:
             # Phone number ke base par document delete karein
-            users_collection.delete_one({"phone": "91" + mobile[-10:]})
+            users_collection.delete_one({"phone": "+91" + mobile[-10:]})
             logger.info(f"User with mobile {mobile[-10:]} removed from MongoDB.")
 
         return "User deleted successfully from system and database."
