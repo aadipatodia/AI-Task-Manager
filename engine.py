@@ -1367,32 +1367,34 @@ async def update_task_status_tool(
     # Extract the 10-digit mobile number from the sender 
     sender_mobile = ctx.deps.sender_phone[-10:]
 
-    # --- STEP 1: OWNERSHIP VALIDATION (SID 632) --- [cite: 5]
+    # --- STEP 1: OWNERSHIP VALIDATION (SID 632) ---
     try:
-        # Construct payload for SID 632 [cite: 13, 14, 15]
-        ownership_payload = GetUsersByIdRequest(
-            Event="146560", [cite: 14]
-            Child=[{
-                "Control_Id": "146561", [cite: 17]
-                "AC_ID": "201877", [cite: 18]
+        # Prepare the payload for the ownership check API
+        ownership_payload = {
+            "Event": "146560",
+            "Child": [{
+                "Control_Id": "146561",
+                "AC_ID": "201877",
                 "Parent": [
-                    {"Control_Id": "146559", "Value": task_id, "Data_Form_Id": ""}, [cite: 21, 22]
-                    {"Control_Id": "146562", "Value": sender_mobile, "Data_Form_Id": ""} [cite: 25, 27]
+                    {"Control_Id": "146559", "Value": task_id, "Data_Form_Id": ""},
+                    {"Control_Id": "146562", "Value": sender_mobile, "Data_Form_Id": ""}
                 ]
             }]
-        )
+        }
 
-        # Call the ownership API [cite: 3, 4]
-        ownership_res = await call_appsavy_api("CHECK_OWNERSHIP", ownership_payload)
+        # We use a placeholder class to wrap the dict for call_appsavy_api compatibility
+        from pydantic import RootModel
+        ownership_res = await call_appsavy_api("CHECK_OWNERSHIP", RootModel(ownership_payload))
         
-        # Result logic: 0 means unauthorized, >0 means authorized
+        # Determine authorization based on the RESULT value
         result_list = []
         if isinstance(ownership_res, dict):
+            # Checking both possible response nesting styles
             result_list = ownership_res.get("data", {}).get("Result", [])
         elif isinstance(ownership_res, list):
             result_list = ownership_res
 
-        # Extract RESULT value from the response
+        # RESULT 0 means unauthorized, >0 means authorized
         validation_result = "0"
         if result_list and len(result_list) > 0:
             validation_result = str(result_list[0].get("RESULT", "0"))
@@ -1401,11 +1403,10 @@ async def update_task_status_tool(
             return f"Permission Denied: You are not authorized to update Task {task_id}."
 
     except Exception as e:
-        logger.error(f"Ownership validation failed: {str(e)}")
+        logger.error(f"Ownership validation failed for Task {task_id}: {str(e)}")
         return "Verification Error: Could not verify task ownership at this time."
 
     # --- STEP 2: STATUS MAPPING & PERMISSION CHECK ---
-    # Map conversational intent to system statuses 
     if role == "employee":
         if incoming in EMPLOYEE_ALLOWED_STATUSES:
             final_status = EMPLOYEE_ALLOWED_STATUSES[incoming]
@@ -1457,8 +1458,9 @@ async def update_task_status_tool(
             if api_response.get("error"):
                 return f"API failure: {api_response.get('error')}"
 
+            # Success check for RESULT 1
             if str(api_response.get("RESULT")) == "1" or str(api_response.get("result")) == "1":
-                # Success notification logic for Manager
+                # Success notification for Manager if an employee submits work
                 if role == "employee" and final_status == "Close":
                     manager_phone = os.getenv("MANAGER_PHONE")
                     phone_id = os.getenv("PHONE_NUMBER_ID")
