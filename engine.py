@@ -902,23 +902,25 @@ async def get_performance_report_tool(
     name: Optional[str] = None
 ) -> str:
     """
-    Generates a consolidated performance report.
-    Fetches counts (SID 616) and top 10 pending tasks (SID 610) in a single response.
+    Generates a consolidated performance report for a specific user or team.
+    Includes high-level counts and Top 10 Pending Tasks sorted by deadline.
     """
     try:
         team = load_team()
         now = ctx.deps.current_time
 
-        # Identify target user
+        # 1. Resolve Name to a Single User
         if name:
-            matched = next(
-                (u for u in team if name.lower() in u["name"].lower() or name.lower() == u["login_code"].lower()),
-                None
-            )
+            # Look for exact or partial name matches in the authorized directory
+            matched = [u for u in team if name.lower() in u["name"].lower() or name.lower() == u["login_code"].lower()]
+            
             if not matched:
-                return f"User '{name}' not found in the directory."
-            display_team = [matched]
+                return f"User '{name}' not found in the authorized directory."
+            
+            # If multiple Raj's/Ankita's exist, we pick the first or ask for ID (simple logic for now)
+            display_team = [matched[0]]
         else:
+            # Manager-only full team summary logic
             if ctx.deps.role != "manager":
                 return "Permission Denied: Only managers can view the full team report."
             display_team = team
@@ -929,7 +931,10 @@ async def get_performance_report_tool(
         for member in display_team:
             member_login = member["login_code"]
             
-            # 1. Fetch Task List for Breakdown (SID 610)
+            # 2. Fetch High-Level Statistics (SID 616)
+            counts = await fetch_task_counts_api(member_login, ctx.deps.role)
+            
+            # 3. Fetch Detailed Task List (SID 610)
             raw_tasks_data = await call_appsavy_api(
                 "GET_TASKS",
                 GetTasksRequest(
@@ -945,20 +950,20 @@ async def get_performance_report_tool(
                 )
             )
 
-            # 2. Fetch High-Level Statistics (SID 616)
-            counts = await fetch_task_counts_api(member_login, ctx.deps.role)
-            
             member_tasks = normalize_tasks_response(raw_tasks_data)
             pending_tasks_list = []
             within_time = 0
             beyond_time = 0
 
+            # 4. Process Tasks for Deadlines
             for task in member_tasks:
                 status = str(task.get("STS", "")).lower()
                 expected_date_str = task.get("EXPECTED_END_DATE")
 
+                # We only show 'Pending' (Non-Closed) tasks in the breakdown
                 if status != "closed":
                     try:
+                        # Parsing the standard Appsavy date format
                         expected_dt = datetime.datetime.strptime(expected_date_str, "%m/%d/%Y %I:%M:%S %p")
                         
                         if expected_dt >= now:
@@ -972,37 +977,37 @@ async def get_performance_report_tool(
                             "deadline": expected_dt
                         })
                     except:
-                        # Fallback for unparseable dates
-                        within_time += 1
+                        within_time += 1 # Fallback for missing/bad dates
 
-            # Sort by deadline (Earliest/Most Urgent first)
+            # 5. Sort by Most Urgent (Earliest Deadline)
             pending_tasks_list.sort(key=lambda x: x["deadline"])
             top_10 = pending_tasks_list[:10]
 
-            # 3. Construct Single Message Output
-            report = (
+            # 6. Format the Single Message Output
+            report_msg = (
                 f"*Performance Report: {member['name'].title()}*\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
                 f"*Assigned Tasks:* {counts.get('ASSIGNED_TASK', '0')}\n"
                 f"*Completed Tasks:* {counts.get('CLOSED_TASK', '0')}\n"
-                f"*Pending (Within Time):* {within_time}\n"
-                f"*Pending (Beyond Time):* {beyond_time}\n"
+                f"*Within Time:* {within_time}\n"
+                f"*Beyond Time:* {beyond_time}\n"
             )
 
+            # Only append Top 10 if we are looking at a specific person
             if name and top_10:
-                report += f"\n *Top 10 Pending Tasks:*\n"
+                report_msg += f"\n*Top 10 Pending Tasks:*\n"
                 for t in top_10:
                     deadline_fmt = t["deadline"].strftime("%d-%b %I:%M %p")
-                    report += f"• [{t['id']}] {t['desc']} (Due: {deadline_fmt})\n"
+                    report_msg += f"[{t['id']}] {t['desc']} (Due: {deadline_fmt})\n"
+            elif name and not top_10:
+                report_msg += "\n*No pending tasks found!*"
             
-            results.append(report)
+            results.append(report_msg)
 
         return "\n\n".join(results)
 
     except Exception as e:
-        logger.error(f"Performance report failed: {str(e)}")
-        return "System Error: Unable to generate report at this time."
-
+        logger.error(f"get_performance_report_tool error: {str(e)}", exc_info=True)
+        return "Error generating performance report. Please check if the user name is correct."
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
     try:
         team = load_team()
