@@ -1359,7 +1359,9 @@ EMPLOYEE_ALLOWED_STATUSES = {
     "close": "Close",
     "done": "Close",
     "completed": "Close",
-    "submit": "Close"
+    "submit": "Close",
+    "submitted": "Close"
+
 }
 
 MANAGER_ALLOWED_STATUSES = {
@@ -1386,11 +1388,26 @@ async def update_task_status_tool(
     Updates task status. Gemini maps conversational intent to:
     'Open', 'Work In Progress', 'Close', 'Reopen', 'Closed'.
     """
-
+    if not task_id or task_id.lower() in ["", "none", "null"]:
+        return "Please mention the Task ID you want to update."
     role = ctx.deps.role
     # Gemini provides the 'status' based on the mapping rules in the system prompt
-    final_status = status.strip()
+    incoming = status.strip().lower()
+    
 
+    if role == "employee":
+        if incoming in EMPLOYEE_ALLOWED_STATUSES:
+            final_status = EMPLOYEE_ALLOWED_STATUSES[incoming]
+        else:
+            return "Invalid status update."
+    elif role == "manager":
+        if incoming in MANAGER_ALLOWED_STATUSES:
+            final_status = MANAGER_ALLOWED_STATUSES[incoming]
+        else:
+            return "Invalid status update."
+        
+     
+    final_status = final_status.strip()
     doc_name = ""
     base64_data = ""
 
