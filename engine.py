@@ -1113,7 +1113,7 @@ async def assign_new_task_tool(
 ) -> str:
     """
     Assigns a new task to a user or group.
-    Fixes: Duplicate name resolution, N/A phone numbers, and Meta 24h window blockage.
+    Fixes: KeyError: 'email', and Meta phone number format validation.
     """
     try:
         # 1. MERGE SOURCES: Fetch candidates from BOTH MongoDB and Appsavy (SID 606)
@@ -1147,7 +1147,6 @@ async def assign_new_task_tool(
         if len(matches) > 1:
             final_options = []
             for candidate in matches:
-                # Call Detail API (SID 609) to get Mobile + Division + Zone
                 details_res = await call_appsavy_api("GET_USERS_BY_ID", GetUsersByIdRequest(
                     Event="107018",
                     Child=[{
@@ -1157,11 +1156,9 @@ async def assign_new_task_tool(
                     }]
                 ))
                 
-                # If API succeeds, extract phone and office data
                 if isinstance(details_res, list) and len(details_res) > 0:
                     detail = details_res[0]
                     candidate["phone"] = detail.get("MOBILE") or detail.get("PHONE") or "N/A"
-                    # Capture Hierarchy levels
                     office_parts = [
                         detail.get("ZONE_NAME"),
                         detail.get("CIRCLE_NAME"),
@@ -1176,7 +1173,6 @@ async def assign_new_task_tool(
                 
                 final_options.append(candidate)
 
-            # Format clarification message with Hierarchy and Phone Numbers
             options_text = "\n".join([f"- {u['name']} ({u.get('office', 'Office N/A')}): {u['phone']}" for u in final_options])
             return (
                 f"I found multiple users named '{name}'. Who should I assign this to?\n\n"
@@ -1187,8 +1183,13 @@ async def assign_new_task_tool(
         # 3. SINGLE MATCH FOUND: Proceed with Assignment (SID 604)
         user = matches[0]
         login_code = user["login_code"]
+        
+        # FIX 1: Sanitize phone number for Meta API (+)
+        recipient_phone = user.get("phone", "")
+        if recipient_phone and not recipient_phone.startswith("+"):
+            recipient_phone = f"+{recipient_phone}"
 
-        # 2. Handle Document Attachment
+        # 4. Handle Document Attachment
         documents_child = []
         if ctx.deps.document_data:
             media_type = ctx.deps.document_data.get("type")
@@ -1206,7 +1207,7 @@ async def assign_new_task_tool(
                         DOCUMENT_NAME=fname
                     ))
 
-        # 3. Prepare the CreateTaskRequest (SID 604)
+        # 5. Prepare the CreateTaskRequest (SID 604)
         req = CreateTaskRequest(
             ASSIGNEE=login_code,
             DESCRIPTION=task_name,
@@ -1223,7 +1224,7 @@ async def assign_new_task_tool(
             DOCUMENTS=Documents(CHILD=documents_child)
         )
         
-        # 4. Execute API Call
+        # 6. Execute API Call
         api_response = await call_appsavy_api("CREATE_TASK", req)
         
         if not api_response:
@@ -1233,30 +1234,28 @@ async def assign_new_task_tool(
             if api_response.get('error'):
                 return f"API failure: {api_response.get('error')}"
             
-            # Check for success (RESULT 1)
             if str(api_response.get('result')) == "1" or str(api_response.get('RESULT')) == "1":
                 # --- Send Notifications ---
                 phone_id = os.getenv("PHONE_NUMBER_ID")
                 whatsapp_msg = f"New Task Assigned:\n\nTask: {task_name}\nDue Date: {deadline}\n\nPlease complete on time."
 
-                if phone_id:
-                    # FIX: RE-OPEN 24H WINDOW FIRST
-                    # We send the registration template to ensure the conversation session is active
+                # Use sanitized phone for WhatsApp
+                if phone_id and recipient_phone != "N/A":
                     send_registration_template(
-                        recipient_number=user["phone"],
+                        recipient_number=recipient_phone,
                         user_identifier=user["name"].title(),
                         phone_number_id=phone_id
                     )
                     
-                    # Wait briefly to let Meta register the new Utility session
                     await asyncio.sleep(1.8)
-                    
-                    # Now send the free-form Task Details
-                    send_whatsapp_message(user["phone"], whatsapp_msg, phone_id)
+                    send_whatsapp_message(recipient_phone, whatsapp_msg, phone_id)
 
-                # Send Emails
+                # FIX 2: Safety check for email key to prevent KeyError
                 email_subject = f"New Task Assigned: {task_name}"
-                send_email(user["email"], email_subject, whatsapp_msg)
+                if user.get("email"):
+                    send_email(user["email"], email_subject, whatsapp_msg)
+                
+                # Notification for Manager
                 send_email(MANAGER_EMAIL, f"Task Confirmed: {task_name}", f"Assigned to {user['name']}.")
 
                 return f"Task successfully assigned to {user['name'].title()} (ID: {login_code})."
@@ -1265,7 +1264,7 @@ async def assign_new_task_tool(
         
     except Exception as e:
         logger.error(f"assign_new_task_tool error: {str(e)}", exc_info=True)
-        return f"System Error: Unable to assign task ({str(e)})"
+        return f"System Error: Unable to assign task ({str(e)})""
 
 async def assign_task_by_phone_tool(
     ctx: RunContext[ManagerContext],
