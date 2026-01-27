@@ -921,19 +921,19 @@ async def get_performance_report_tool(
     """
     Generate performance report using API data
     - SID 616 for counts
-    - SID 610 for task details (per user)
+    - SID 610 for task details (PER USER)
     """
     try:
         team = load_team()
         now = ctx.deps.current_time
 
-        # 🔒 Role check
+        # 🔐 Role check
         if not name and ctx.deps.role != "manager":
             return "Permission Denied: Only managers can view the full team report."
 
         # 👤 Decide whose report to show
         if name:
-            matched = next(
+            matched_user = next(
                 (
                     u for u in team
                     if name.lower() in u["name"].lower()
@@ -941,9 +941,10 @@ async def get_performance_report_tool(
                 ),
                 None
             )
-            if not matched:
+            if not matched_user:
                 return f"User '{name}' not found in directory."
-            display_team = [matched]
+
+            display_team = [matched_user]
 
         elif ctx.deps.role == "manager":
             display_team = team
@@ -955,19 +956,20 @@ async def get_performance_report_tool(
             )
             if not self_user:
                 return "Unable to identify your profile."
+
             display_team = [self_user]
 
-        # 🔹 Status filter based on role
+        # 🔎 Status filter based on role
         status_filter = build_status_filter(ctx.deps.role)
 
-        results: list[str] = []
+        results = []
 
-        # 🔁 Fetch data per user
+        # 🔁 FETCH DATA PER USER (FIXED LOGIC)
         for member in display_team:
             member_login = member["login_code"]
 
             try:
-                # 🔹 Fetch tasks (SID 610)
+                # 📡 Fetch tasks for THIS USER ONLY
                 raw_tasks_data = await call_appsavy_api(
                     "GET_TASKS",
                     GetTasksRequest(
@@ -992,7 +994,6 @@ async def get_performance_report_tool(
                 within_time = 0
                 beyond_time = 0
                 closed_count = 0
-                pending_tasks_list = []
 
                 for task in member_tasks:
                     status = str(task.get("STS", "")).lower()
@@ -1004,42 +1005,18 @@ async def get_performance_report_tool(
 
                     if expected_date:
                         try:
-                            expected_dt = datetime.datetime.strptime(
+                            expected = datetime.datetime.strptime(
                                 expected_date,
                                 "%m/%d/%Y %I:%M:%S %p"
                             )
-
-                            pending_tasks_list.append({
-                                "id": task.get("TID", "N/A"),
-                                "name": task.get("COMMENTS", "No Title"),
-                                "deadline": expected_date,
-                                "dt_obj": expected_dt
-                            })
-
-                            if expected_dt >= now:
+                            if expected >= now:
                                 within_time += 1
                             else:
                                 beyond_time += 1
-
                         except Exception:
                             within_time += 1
                     else:
                         within_time += 1
-
-                # 🔹 Top 10 pending (only for single user view)
-                pending_list_str = ""
-                if len(display_team) == 1:
-                    pending_tasks_list.sort(key=lambda x: x["dt_obj"])
-                    top_10 = pending_tasks_list[:10]
-
-                    pending_list_str = "\n\nTop 10 Pending Tasks:"
-                    if not top_10:
-                        pending_list_str += "\n- No pending tasks found."
-                    else:
-                        for t in top_10:
-                            pending_list_str += (
-                                f"\n- [{t['id']}] {t['name']} (Due: {t['deadline']})"
-                            )
 
                 assigned_count = counts.get(
                     "ASSIGNED_TASK",
@@ -1058,7 +1035,6 @@ async def get_performance_report_tool(
                     f"Pending Tasks-\n"
                     f"Within time: {within_time}\n"
                     f"Beyond time: {beyond_time}"
-                    f"{pending_list_str}"
                 )
 
             except Exception:
@@ -1079,6 +1055,7 @@ async def get_performance_report_tool(
     except Exception as e:
         logger.error("get_performance_report_tool error", exc_info=True)
         return f"Error generating performance report: {str(e)}"
+
 
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
