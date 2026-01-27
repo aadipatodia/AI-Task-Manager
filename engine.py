@@ -272,11 +272,7 @@ You MUST follow these rules strictly:
 6. Do NOT explain rules.
 7. Do NOT include anything outside valid JSON.
 
-{
-  "intent": "...",
-  "new_status": "...",
-  "comments": "..."
-}
+
 
 **DOCUMENT HANDLING:**
 **Case 1 (Manager):** If a document/image is sent while creating a task, use `assign_new_task_tool`. 
