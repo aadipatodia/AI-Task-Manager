@@ -1496,7 +1496,7 @@ def resolve_final_status(intent: str, relationship: str, role: str) -> Optional[
 APPSAVY_STATUS_MAP = {
     "Open": "P",
     "Work In Progress": "P",
-    "Close": "S",
+    "Close": "C",
     "Closed": "C",
     "Reopened": "R"
 }
