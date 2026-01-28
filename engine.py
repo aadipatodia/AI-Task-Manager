@@ -1139,6 +1139,63 @@ async def get_task_description(task_id: str) -> str:
 
     return "N/A"
 
+
+def extract_task_id(text: str):
+    match = re.search(r"\btask\s*(\d+)\b", text.lower())
+    return match.group(1) if match else None
+
+
+def resolve_status(text: str, role: str):
+    t = text.lower()
+
+    # Future / pending → Work In Progress
+    if any(x in t for x in [
+        "pending",
+        "in progress",
+        "working",
+        "will be completed",
+        "by "
+    ]):
+        return "Work In Progress"
+
+    # Done / completed → Close or Closed
+    if any(x in t for x in [
+        "done",
+        "completed",
+        "finished"
+    ]):
+        return "Closed" if role == "manager" else "Close"
+
+    # Reopen
+    if "reopen" in t:
+        return "Reopened"
+
+    return None
+
+
+def extract_remark(text: str, task_id: str):
+    t = text.lower()
+
+    # task id hatao
+    t = re.sub(rf"task\s*{task_id}", "", t)
+
+    # status words hatao
+    for w in [
+        "is pending",
+        "pending",
+        "in progress",
+        "will be completed",
+        "completed",
+        "done",
+        "finished"
+    ]:
+        t = t.replace(w, "")
+
+    t = re.sub(r"\s+", " ", t).strip(" .,")
+
+    return t.capitalize() if t else ""
+
+
 async def assign_new_task_tool(
     ctx: RunContext[ManagerContext],
     name: str,
@@ -1566,44 +1623,39 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                     conversation_history[sender] = conversation_history[sender][-10:]
             
                 output_text = result.output
-                if output_text.strip().startswith("{"):
-                    try:
-                        data = json.loads(output_text)
-                        if "task_id" in data and "status" in data:
-                            status = data["status"]
-                            task_id = data["task_id"]
-                            remark = data.get("remark") or None
+
+                # 🔥 BACKEND-DRIVEN TASK STATUS HANDLING
+                task_id = extract_task_id(command)
 
 
-                            final_response = await update_task_status_tool(
-                                ctx = ManagerContext(
-                                    sender_phone = sender,
-                                    role = role,
-                                    current_time=current_time
-                                ),
-                                task_id=task_id,
-                                status=status,
-                                remark=remark
-                            )
-                            output_text = final_response
+                if task_id:
+                    status = resolve_status(command, role)
 
-                    except Exception:
-                        pass
-                                
-                                
-
-                if output_text and output_text.strip().startswith("{"):
-                    logger.error("Blocked raw JSON from being sent to WhatsApp")
-                    output_text = "Your request has been processed successfully."
-
-                send_whatsapp_message(sender, output_text, pid)
-                return
+                
+                    if status:
+                        remark = extract_remark(command, task_id)
 
 
-            
-            except Exception as e:
-                logger.error(f"Agent execution failed: {str(e)}", exc_info=True)
-                send_whatsapp_message(sender, f"System Error: Unable to process request. Please try again.", pid)
+                        await update_task_status_tool(
+                            ctx=ManagerContext(
+                            sender_phone=sender,
+                            role=role,
+                            current_time=current_time
+                            ),
+                        task_id=task_id,
+                        status=status,
+                        remark=remark
+                        )
+
+        # ✅ USER-FRIENDLY TEXT OUTPUT (NO JSON)
+                        output_text = (
+                            f"Task ID: {task_id}\n"
+                            f"Status: {status}\n"
+                            f"Remark: {remark if remark else '—'}"
+                        )
+                        send_whatsapp_message(sender, output_text, pid)
+                        return
+
             
     except Exception as e:
         logger.error(f"handle_message error: {str(e)}", exc_info=True)
