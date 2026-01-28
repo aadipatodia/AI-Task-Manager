@@ -1017,7 +1017,6 @@ async def get_pending_tasks(login_code: str) -> List[str]:
             "work in progress",
             "in progress"
         ):
-            pending.append(title)
             title = t.get("COMMENTS")
             if title:
                 pending.append(title)
@@ -1096,12 +1095,8 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
                     "Control_Id": "106831",
                     "AC_ID": "110803",
                     "Parent": [
-                        {"Control_Id": "106825", "Value": "", "Data_Form_Id": ""},
-                        {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
                         {"Control_Id": "106825", "Value": login_code, "Data_Form_Id": ""},
-                        {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
-                        {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
-                        {"Control_Id": "107809", "Value": "", "Data_Form_Id": ""}
+                        {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""}
                     ]
                 }]
             )
