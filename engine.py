@@ -315,13 +315,21 @@ Return:
 {{
   "task_id": "123",
   "status": "Close",
-  "remark": ""
+  "remark": " "
 }}
 
+User: "Pending task 123 will be completed by 6pm"
+Return:
+{{
+  "task_id": "123",
+  "status": "Work in Progress",
+  "remark": "will be completed by 6pm"
+}}
 IMPORTANT:
 - Do NOT invent remarks
 - Do NOT repeat task ID or status inside remark
 - Keep remarks short and factual
+- Incase there are no comments take remarks to be an " ", i.e a spacebar 
 
 ### PERFORMANCE REPORTING:
 When the user asks for performance, statistics, counts, or a performance report:
@@ -1014,14 +1022,19 @@ async def get_performance_report_tool(
     ctx: RunContext[ManagerContext],
     name: Optional[str] = None
 ) -> str:
+    # 🔒 Prevent Gemini from chaining multiple tools
+    ctx.deps.document_data = None
+
     team = load_team()
 
-    # ---------- NO NAME → PDF ----------
+    # =====================================================
+    # CASE 1: NO NAME → PDF REPORT (MANAGERS ONLY)
+    # =====================================================
     if not name:
         if ctx.deps.role != "manager":
             return "Permission Denied: Only managers can view full performance reports."
 
-        # PDF is sent ONLY to requester
+        # PDF is sent ONLY to the requester
         await send_whatsapp_report_tool(
             ctx,
             report_type="Detail",
@@ -1031,23 +1044,38 @@ async def get_performance_report_tool(
 
         return "Performance report PDF has been sent on WhatsApp."
 
-    # ---------- NAME PRESENT → TEXT ----------
-    # ---------- NAME PRESENT → TEXT (SID 627 COUNT) ----------
-    user = next(
-        (u for u in team
-        if name.lower() in u["name"].lower()
-         or name.lower() == u["login_code"].lower()),
-        None
-    )
+    # =====================================================
+    # CASE 2: NAME PRESENT → TEXT REPORT ONLY
+    # =====================================================
+    name_norm = name.lower().strip()
 
-    if not user:
+    # ✅ STRICT MATCH (NO partial match, NO fallback)
+    matches = [
+        u for u in team
+        if u["name"].lower().strip() == name_norm
+        or u["login_code"].lower() == name_norm
+    ]
+
+    if not matches:
         return f"User '{name}' not found."
 
+    if len(matches) > 1:
+        options = ", ".join(u["name"].title() for u in matches)
+        return f"Multiple users found for '{name}'. Please specify: {options}"
+
+    user = matches[0]
+
+    # =====================================================
+    # FETCH COUNTS + PENDING TASKS
+    # =====================================================
     counts = await get_performance_count_via_627(ctx, user["login_code"])
     pending_tasks = await get_pending_tasks(user["login_code"])
 
+    # =====================================================
+    # FORMAT OUTPUT
+    # =====================================================
     output = (
-        f"Tasks Report for User: {user['login_code']}\n"
+        f"Tasks Report for User: \n"
         f"Assign Task: {counts['ASSIGNED_TASK']}\n"
         f"Open Task: {counts['OPEN_TASK']}\n"
         f"Delayed Open Tasks: {counts['DELAYED_OPEN_TASK']}\n"
@@ -1057,10 +1085,11 @@ async def get_performance_report_tool(
 
     if pending_tasks:
         output += "Pending Tasks:\n"
-        for i, t in enumerate(pending_tasks, 1):
-            output += f"{i}. {t}\n"
+        for i, task in enumerate(pending_tasks, 1):
+            output += f"{i}. {task}\n"
 
     return output.strip()
+
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
     try:
@@ -1699,9 +1728,20 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         current_agent.tool(assign_task_by_phone_tool)
         current_agent.tool(get_assignee_list_tool)
         current_agent.tool(get_users_by_id_tool)
-        current_agent.tool(send_whatsapp_report_tool)
         current_agent.tool(add_user_tool)
         current_agent.tool(delete_user_tool)
+        # Register PDF tool ONLY if no specific employee name is mentioned
+        if "report" in command.lower():
+            team = load_team()
+            name_mentioned = any(
+                u["name"].lower() in command.lower()
+                or u["login_code"].lower() in command.lower()
+                for u in team
+            )
+
+            if not name_mentioned:
+                current_agent.tool(send_whatsapp_report_tool)
+
 
         try:
             result = await current_agent.run(
