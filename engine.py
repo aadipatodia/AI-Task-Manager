@@ -1480,17 +1480,11 @@ async def update_task_status_tool(
             "requires manager approval."
         )
 
-    # ------------------------------------------------------------
-    # NORMALIZE COMMENTS (CRITICAL)
-    # ------------------------------------------------------------
     if not remark or not remark.strip():
         remark = f"Task updated to {status}"
 
     remark = remark.strip()
-
-    # ------------------------------------------------------------
-    # OWNERSHIP CHECK (SID 632)
-    # ------------------------------------------------------------
+    
     ownership_payload = {
         "Event": "146560",
         "Child": [
@@ -1635,7 +1629,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         # ---------------------------------------------------------
         # Role detection
         # ---------------------------------------------------------
-        manager_phone = os.getenv("MANAGER_PHONE", "919871536210")
+        manager_phone = os.getenv("MANAGER_PHONE", "917428134319")
         team = load_team()
 
         if sender == manager_phone:
@@ -1662,51 +1656,11 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         if not command:
             return
 
-        # ---------------------------------------------------------
-        # Build Agent
-        # ---------------------------------------------------------
         current_time = datetime.datetime.now()
-        dynamic_prompt = get_system_prompt(current_time)
 
-        current_agent = Agent(
-            ai_model,
-            deps_type=ManagerContext,
-            system_prompt=dynamic_prompt
-        )
-
-        # ---------------------------------------------------------
-        # Register tools
-        # ---------------------------------------------------------
-        current_agent.tool(get_performance_report_tool)   # uses SID 627 internally
-        current_agent.tool(get_task_list_tool)
-        current_agent.tool(assign_new_task_tool)
-        current_agent.tool(assign_task_by_phone_tool)
-        current_agent.tool(get_assignee_list_tool)
-        current_agent.tool(get_users_by_id_tool)
-        current_agent.tool(send_whatsapp_report_tool)
-        current_agent.tool(add_user_tool)
-        current_agent.tool(delete_user_tool)
-
-        # ---------------------------------------------------------
-        # Run agent
-        # ---------------------------------------------------------
-        result = await current_agent.run(
-            command,
-            message_history=conversation_history[sender],
-            deps=ManagerContext(
-                sender_phone=sender,
-                role=role,
-                current_time=current_time,
-                document_data=message
-            )
-        )
-
-        conversation_history[sender] = result.all_messages()[-10:]
-        agent_output = result.output
-
-        # ---------------------------------------------------------
-        # HARD OVERRIDE: Task status update (highest priority)
-        # ---------------------------------------------------------
+        # =========================================================
+        # HARD OVERRIDE — TASK STATUS UPDATE (RUN FIRST)
+        # =========================================================
         task_id = extract_task_id(command)
         if task_id:
             status = resolve_status(command, role)
@@ -1727,15 +1681,56 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 send_whatsapp_message(sender, final_response, pid)
                 return
 
-        # ---------------------------------------------------------
-        # Normal agent response
-        # ---------------------------------------------------------
+        # =========================================================
+        # SAFE AGENT EXECUTION (NON-DESTRUCTIVE FLOWS ONLY)
+        # =========================================================
+        dynamic_prompt = get_system_prompt(current_time)
+
+        current_agent = Agent(
+            ai_model,
+            deps_type=ManagerContext,
+            system_prompt=dynamic_prompt
+        )
+
+        # Register tools
+        current_agent.tool(get_performance_report_tool)
+        current_agent.tool(get_task_list_tool)
+        current_agent.tool(assign_new_task_tool)
+        current_agent.tool(assign_task_by_phone_tool)
+        current_agent.tool(get_assignee_list_tool)
+        current_agent.tool(get_users_by_id_tool)
+        current_agent.tool(send_whatsapp_report_tool)
+        current_agent.tool(add_user_tool)
+        current_agent.tool(delete_user_tool)
+
+        try:
+            result = await current_agent.run(
+                command,
+                message_history=conversation_history[sender],
+                deps=ManagerContext(
+                    sender_phone=sender,
+                    role=role,
+                    current_time=current_time,
+                    document_data=message
+                )
+            )
+
+            conversation_history[sender] = result.all_messages()[-10:]
+            agent_output = result.output
+
+        except Exception as llm_error:
+            logger.error("LLM execution failed", exc_info=True)
+            agent_output = (
+                "I understood your request, but couldn't process it completely. "
+                "Please try rephrasing or try again."
+            )
+
         send_whatsapp_message(sender, agent_output, pid)
 
     except Exception as e:
-        logger.error(f"handle_message error: {str(e)}", exc_info=True)
+        logger.error(f"handle_message fatal error: {str(e)}", exc_info=True)
         send_whatsapp_message(
             sender,
-            "An unexpected error occurred. Please try again.",
+            "An unexpected system error occurred. Please try again shortly.",
             pid
         )
