@@ -1665,14 +1665,14 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             
                 result = await current_agent.run(
                     command,
-                    message_history=conversation_history[sender],
                     deps=ManagerContext(
-                        sender_phone=sender, 
-                        role=role, 
+                        sender_phone=sender,
+                        role=role,
                         current_time=current_time,
-                        document_data=message  
+                        document_data=message
                     )
                 )
+
             
                 conversation_history[sender] = result.all_messages()
             
