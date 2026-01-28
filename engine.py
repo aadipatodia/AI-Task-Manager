@@ -1582,6 +1582,7 @@ async def update_task_status_tool(
     except Exception as e:
         logger.error(f"Task update failed: {e}")
         return "System Error: Could not update task status."
+
 async def handle_message(command, sender, pid, message=None, full_message=None):
     if command and command.strip().lower() == "delete & add":
         send_whatsapp_message(
