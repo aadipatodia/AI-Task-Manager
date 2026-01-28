@@ -1000,14 +1000,11 @@ async def get_task_summary_from_tasks(login_code: str) -> Dict[str, int]:
     }
 
     for t in tasks:
-        sts = t.get("STS")
-        if sts == "Open":
+        sts = str(t.get("STS", "")).lower()
+        if sts in ("open", "wip", "work in progress", "in progress"):
             summary["OPEN_TASK"] += 1
-        elif sts == "Work In Progress":
-            summary["OPEN_TASK"] += 1
-        elif sts == "Closed":
+        elif sts == "closed":
             summary["CLOSED_TASK"] += 1
-
     return summary
 
 async def get_pending_tasks(login_code: str) -> List[str]:
@@ -1035,7 +1032,14 @@ async def get_pending_tasks(login_code: str) -> List[str]:
 
     pending = []
     for t in tasks:
-        if t.get("STS") in ("Open", "Work In Progress"):
+        sts = str(t.get("STS", "")).lower()
+        if sts in (
+            "open",
+            "wip",
+            "work in progress",
+            "in progress"
+        ):
+            pending.append(title)
             title = t.get("COMMENTS")
             if title:
                 pending.append(title)
