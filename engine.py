@@ -83,6 +83,7 @@ API_CONFIGS = {
             "TokenKey": "17bce718-18fb-43c4-90bb-910b19ffb34b"
         }
     },
+    
     "GET_ASSIGNEE": {
         "url": f"{APPSAVY_BASE_URL}/GetDataJSONClient",
         "headers": {
@@ -95,6 +96,7 @@ API_CONFIGS = {
             "TokenKey": "d23e5874-ba53-4490-941f-0c70b25f6f56"
         }
     },
+    
     "GET_TASKS": {
         "url": f"{APPSAVY_BASE_URL}/GetDataJSONClient",
         "headers": {
@@ -133,6 +135,7 @@ API_CONFIGS = {
             "TokenKey": "75c6ec2e-9f9c-48fa-be24-d8eb612f4c03"
         }
     },
+    
     "GET_USERS_BY_ID": {
         "url": f"{APPSAVY_BASE_URL}/GetDataJSONClient",
         "headers": {
@@ -145,6 +148,7 @@ API_CONFIGS = {
             "TokenKey": "d23e5874-ba53-4490-941f-0c70b25f6f56" 
         }
     },
+    
     "WHATSAPP_PDF_REPORT": {
         "url": f"{APPSAVY_BASE_URL}/PushdataJSONClient",
         "headers": {
@@ -266,31 +270,36 @@ You MUST:
 - Never assume ownership.
 - If ownership information is unavailable, ask for clarification instead of deleting.
 
-You are a task workflow interpreter for a backend system.
+### TASK LISTING:
+When user asks to see tasks, list tasks, pending work:
+- Use 'get_task_list_tool'
+- Without name → Show tasks for the requesting user
+- With name (managers only) → Show tasks for specified employee
+- Show the tasks exactly as returned by the API without applying additional sorting
+- IMPORTANT:
+When responding with task lists, return the tool output EXACTLY as-is.
+Do not summarize, rephrase, or omit any fields.
 
+### UPDATE TASK STATUS
+You are a task workflow interpreter for a backend system.
 Your job is to understand the user's intent and determine the correct
 new_status value for API SID 607 based on:
 - The user's role relative to the specific task
 - The meaning of their message
 
 You MUST follow these rules strictly:
-
 1. Determine the user's role ONLY from the provided context.
    - Employee = Assignee of the task
    - Manager = Reporter/Creator of the task
-
 2. Strictly distinguish between:
    - "Close"  → employee submission for approval
    - "Closed" → manager final closure
-
 3. Never allow:
    - Employees to use: Closed, Reopened
    - Managers to use: Work In Progress, Close
-
 4. Interpret natural language correctly:
    - "done", "finished", "completed", "close", "closed", "submit" by an employee means submission, not final closure, i.e close tag
    - "approve", "looks good", "final close", "close", "closed" by a manager means final closure, i.e closed tag
-
 5. Do NOT ask the user any questions.
 6. Do NOT explain rules.
 7. Do NOT include anything outside valid JSON.
@@ -299,36 +308,6 @@ You MUST follow these rules strictly:
 **Case 1 (Manager):** If a document/image is sent while creating a task, use `assign_new_task_tool`. 
 **Case 2 (Employee):** If a document/image is sent with a "completed" or "closed" message, use `update_task_status_tool` with status `Close` .
 **Case 3 (Update):** If a document is sent during work, use `update_task_status_tool` with status `Work In Progress`.
-
-### TASK STATUS OUTPUT FORMAT (MANDATORY):
-You are a task workflow interpreter for a backend system.
-
-Your job is to understand the user's intent and determine the correct
-new_status value for API SID 607 based on:
-- The user's role relative to the specific task
-- The meaning of their message
-
-You MUST follow these rules strictly:
-
-1. Determine the user's role ONLY from the provided context.
-   - Employee = Assignee of the task
-   - Manager = Reporter/Creator of the task
-
-2. Strictly distinguish between:
-   - "Close"  → employee submission for approval
-   - "Closed" → manager final closure
-
-3. Never allow:
-   - Employees to use: Closed, Reopened
-   - Managers to use: Work In Progress, Close
-
-4. Interpret natural language correctly:
-   - "done", "finished", "completed" by an employee means submission, not final closure
-   - "approve", "looks good", "final close" by a manager means final closure
-
-5. Do NOT ask the user any questions.
-6. Do NOT explain rules.
-7. Do NOT include anything outside valid JSON.
 
 ### PERFORMANCE REPORTING:
 When the user asks for performance, statistics, counts, or a performance report:
@@ -340,7 +319,6 @@ Performance reporting rules:
   - Use GET_COUNT (SID 616)
   - Show text summary to the requester
   - Do NOT send WhatsApp to the employee
-
 
 Interpretation rules:
 1. If the user does not mention any employee name:
