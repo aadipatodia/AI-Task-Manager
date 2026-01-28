@@ -484,14 +484,18 @@ class GetTasksRequest(BaseModel):
     Event: str = "106830"
     Child: List[Dict]
 
+class UploadDocument(BaseModel):
+    VALUE: str = ""
+    BASE64: str = ""
+
 class UpdateTaskRequest(BaseModel):
-    SID: str = "607"                 
-    TASK_ID: str                    
-    STATUS: str                      
-    COMMENTS: str = "STATUS_UPDATE" 
-    UPLOAD_DOCUMENT: str = ""     
-    BASE64: str = ""      
-    WHATSAPP_MOBILE_NUMBER: str 
+    SID: str = "607"
+    TASK_ID: str
+    STATUS: str
+    COMMENTS: str
+    UPLOAD_DOCUMENT: UploadDocument
+    WHATSAPP_MOBILE_NUMBER: str
+
 
 class GetCountRequest(BaseModel):
     Event: str = "107567"
@@ -1492,14 +1496,8 @@ def resolve_final_status(intent: str, relationship: str, role: str) -> Optional[
 APPSAVY_STATUS_MAP = {
     "Open": "P",
     "Work In Progress": "P",
-
-    # employee submission
     "Close": "S",
-
-    # manager final closure
     "Closed": "C",
-
-    # rejection
     "Reopened": "R"
 }
 
@@ -1510,99 +1508,66 @@ async def update_task_status_tool(
     remark: Optional[str] = None
 ) -> str:
 
-    # ---------- BASIC VALIDATION ----------
-    if not task_id or task_id.lower() in ["", "none", "null"]:
+    if not task_id:
         return "Please mention the Task ID you want to update."
-
-    if not status:
-        return "System Error: Final task status could not be determined."
 
     sender_mobile = ctx.deps.sender_phone[-10:]
 
-    # ---------- OWNERSHIP CHECK (SID 632) ----------
+    # ---- Ownership check (SID 632) ----
     ownership_payload = {
         "Event": "146560",
-        "Child": [
-            {
-                "Control_Id": "146561",
-                "AC_ID": "201877",
-                "Parent": [
-                    {
-                        "Control_Id": "146559",
-                        "Value": task_id,
-                        "Data_Form_Id": ""
-                    },
-                    {
-                        "Control_Id": "146562",
-                        "Value": sender_mobile,
-                        "Data_Form_Id": ""
-                    }
-                ]
-            }
-        ]
+        "Child": [{
+            "Control_Id": "146561",
+            "AC_ID": "201877",
+            "Parent": [
+                {"Control_Id": "146559", "Value": task_id, "Data_Form_Id": ""},
+                {"Control_Id": "146562", "Value": sender_mobile, "Data_Form_Id": ""}
+            ]
+        }]
     }
 
-    try:
-        ownership_res = await call_appsavy_api(
-            "CHECK_OWNERSHIP",
-            RootModel(ownership_payload)
-        )
+    ownership_res = await call_appsavy_api(
+        "CHECK_OWNERSHIP",
+        RootModel(ownership_payload)
+    )
 
-        result_data = ownership_res.get("data", {}).get("Result", [])
-        if not result_data:
-            return f"Permission Denied: You are not authorized to update Task {task_id}."
+    result = ownership_res.get("data", {}).get("Result", [])
+    if not result or not is_authorized(result[0].get("TASK_OWNER")):
+        return f"Permission Denied: You are not authorized to update Task {task_id}."
 
-        task_owner = result_data[0].get("TASK_OWNER")
-        if not is_authorized(task_owner):
-            return f"Permission Denied: You are not authorized to update Task {task_id}."
-
-    except Exception as e:
-        logger.error(f"Ownership check failed: {e}")
-        return "System Error: Could not verify task ownership."
-
-    # ---------- ROLE SAFETY CHECK ----------
+    # ---- Role guard ----
     if ctx.deps.role == "employee" and status == "Closed":
-        return (
-            "You have submitted the task, but final closure "
-            "requires manager approval."
-        )
+        return "Final closure requires manager approval."
 
-    # ---------- STATUS MAPPING (🔥 CRITICAL FIX 🔥) ----------
+    # ---- STATUS MAPPING ----
     appsavy_status = APPSAVY_STATUS_MAP.get(status)
-
     if not appsavy_status:
-        logger.error(f"Invalid Appsavy status mapping: {status}")
-        return f"System Error: Unsupported status '{status}'."
+        return f"Unsupported status '{status}'."
 
-    # ---------- UPDATE STATUS (SID 607) ----------
-    try:
-        req = UpdateTaskRequest(
-            TASK_ID=task_id,
-            STATUS=appsavy_status,  # ✅ INTERNAL CODE ONLY
-            COMMENTS=remark or f"Task updated to {status}",
-            WHATSAPP_MOBILE_NUMBER=sender_mobile
-        )
+    # ---- FINAL PAYLOAD (EXACT FORMAT) ----
+    req = UpdateTaskRequest(
+        TASK_ID=task_id,
+        STATUS=appsavy_status,               # internal code
+        COMMENTS=remark or "Terminal Test",
+        UPLOAD_DOCUMENT={
+            "VALUE": "",
+            "BASE64": ""
+        },
+        WHATSAPP_MOBILE_NUMBER=sender_mobile
+    )
 
-        api_response = await call_appsavy_api("UPDATE_STATUS", req)
+    api_response = await call_appsavy_api("UPDATE_STATUS", req)
 
-        if api_response and str(api_response.get("RESULT")) == "1":
-            if status == "Close":
-                return (
-                    f"Task {task_id} has been marked as completed "
-                    "and sent for manager approval."
-                )
-            if status == "Closed":
-                return f"Task {task_id} has been closed successfully."
-            if status == "Reopened":
-                return f"Task {task_id} has been reopened."
+    if api_response and str(api_response.get("RESULT")) == "1":
+        if status == "Close":
+            return f"Task {task_id} submitted for manager approval."
+        if status == "Closed":
+            return f"Task {task_id} closed successfully."
+        if status == "Reopened":
+            return f"Task {task_id} reopened."
+        return f"Task {task_id} updated."
 
-            return f"Task {task_id} updated to '{status}'."
-
-        return f"API Error: {api_response.get('resultmessage', 'Update failed')}"
-
-    except Exception as e:
-        logger.error(f"Task update failed: {e}", exc_info=True)
-        return "System Error: Could not update task status."
+    return f"API Error: {api_response.get('resultmessage', 'Update failed')}"
 
 async def handle_message(command, sender, pid, message=None, full_message=None):
     if command and command.strip().lower() == "delete & add":
