@@ -1284,7 +1284,14 @@ async def assign_new_task_tool(
         ]
 
         # Deduplicate using Login ID to ensure we catch every unique instance
-        combined = {u["login_code"]: u for u in (mongo_matches + appsavy_matches)}
+        combined = {}
+        for u in mongo_matches:
+            combined[u["login_code"]] = u
+
+        for u in appsavy_matches:
+            if u["login_code"] not in combined:
+                combined[u["login_code"]] = u
+
         matches = list(combined.values())
 
         if not matches:
