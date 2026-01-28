@@ -934,16 +934,23 @@ async def get_performance_count_tool(
     ctx: RunContext[ManagerContext],
     login_code: str
 ) -> Dict[str, Any]:
-    req = WhatsAppPdfReportRequest(
-        ASSIGNED_TO=login_code,
-        REPORT_TYPE="Count",
-        STATUS="",
-        MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
-        ASSIGNED_BY="Assigned By Me",
-        REFERENCE="PERFORMANCE_COUNT"
+    req = GetCountRequest(
+        Child=[{
+            "Control_Id": "108118",
+            "AC_ID": "113229",
+            "Parent": [
+                {"Control_Id": "111548", "Value": "1", "Data_Form_Id": ""},
+                {"Control_Id": "107566", "Value": login_code, "Data_Form_Id": ""},
+                {"Control_Id": "107568", "Value": "", "Data_Form_Id": ""},
+                {"Control_Id": "107569", "Value": "", "Data_Form_Id": ""},
+                {"Control_Id": "107599", "Value": "Assigned To Me", "Data_Form_Id": ""},
+                {"Control_Id": "109599", "Value": "", "Data_Form_Id": ""},
+                {"Control_Id": "108512", "Value": "", "Data_Form_Id": ""}
+            ]
+        }]
     )
 
-    res = await call_appsavy_api("WHATSAPP_PDF_REPORT", req)
+    res = await call_appsavy_api("GET_COUNT", req)
 
     default_response = {
         "ASSIGNED_TASK": 0,
@@ -951,41 +958,29 @@ async def get_performance_count_tool(
         "DELAYED_OPEN_TASK": 0,
         "CLOSED_TASK": 0,
         "DELAYED_CLOSED_TASK": 0,
-        "PENDING_TASKS": []
     }
 
     if not isinstance(res, dict):
         return default_response
 
-    data = res.get("data")
-    if not isinstance(data, dict):
+    data = res.get("data", {}).get("Result", [])
+    if not data:
         return default_response
 
-    result_list = data.get("Result")
-    if not isinstance(result_list, list) or not result_list:
-        return default_response
-
-    result = result_list[0]
-    if not isinstance(result, dict):
-        return default_response
+    row = data[0]
 
     def safe_int(v):
         try:
-            return int(str(v).strip())
+            return int(v)
         except Exception:
             return 0
 
     return {
-        "ASSIGNED_TASK": safe_int(result.get("Assign Task")),
-        "OPEN_TASK": safe_int(result.get("Open Task")),
-        "DELAYED_OPEN_TASK": safe_int(result.get("Delayed Open Tasks")),
-        "CLOSED_TASK": safe_int(result.get("Closed Tasks")),
-        "DELAYED_CLOSED_TASK": safe_int(result.get("Delayed Closed Tasks")),
-        "PENDING_TASKS": (
-            result.get("Pending Tasks")
-            if isinstance(result.get("Pending Tasks"), list)
-            else []
-        )
+        "ASSIGNED_TASK": safe_int(row.get("ASSIGNED_TASK")),
+        "OPEN_TASK": safe_int(row.get("OPEN_TASK")),
+        "DELAYED_OPEN_TASK": safe_int(row.get("DELAYED_OPEN_TASK")),
+        "CLOSED_TASK": safe_int(row.get("CLOSED_TASK")),
+        "DELAYED_CLOSED_TASK": safe_int(row.get("DELAYED_CLOSED_TASK")),
     }
 
 async def get_performance_report_tool(
@@ -994,22 +989,22 @@ async def get_performance_report_tool(
 ) -> str:
     team = load_team()
 
-    # -------- NO NAME → PDF --------
+    # ---------- NO NAME → PDF ----------
     if not name:
         if ctx.deps.role != "manager":
             return "Permission Denied: Only managers can view full performance reports."
 
-        for user in team:
-            await send_whatsapp_report_tool(
-                ctx,
-                report_type="Detail",
-                status="",
-                assigned_to=user["login_code"]
-            )
+        # PDF is sent ONLY to requester
+        await send_whatsapp_report_tool(
+            ctx,
+            report_type="Detail",
+            status="",
+            assigned_to=None
+        )
 
         return "Performance report PDF has been sent on WhatsApp."
 
-    # -------- NAME PRESENT --------
+    # ---------- NAME PRESENT → TEXT ----------
     user = next(
         (u for u in team
          if name.lower() in u["name"].lower()
@@ -1020,15 +1015,17 @@ async def get_performance_report_tool(
     if not user:
         return f"User '{name}' not found."
 
-    # JUST TRIGGER SID 627 COUNT
-    await send_whatsapp_report_tool(
-        ctx,
-        report_type="Count",
-        status="",
-        assigned_to=user["login_code"]
-    )
+    counts = await get_performance_count_tool(ctx, user["login_code"])
 
-    return "Performance report has been sent on WhatsApp."
+    output = (
+        f"Tasks Report for User: {user['name'].upper()}\n"
+        f"Assign Task: {counts['ASSIGNED_TASK']}\n"
+        f"Open Task: {counts['OPEN_TASK']}\n"
+        f"Delayed Open Tasks: {counts['DELAYED_OPEN_TASK']}\n"
+        f"Closed Tasks: {counts['CLOSED_TASK']}\n"
+        f"Delayed Closed Tasks: {counts['DELAYED_CLOSED_TASK']}"
+    )
+    return output
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
     try:
