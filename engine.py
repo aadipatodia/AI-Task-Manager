@@ -178,6 +178,12 @@ class WhatsAppPdfReportRequest(BaseModel):
     ASSIGNED_BY: str = ""
     REFERENCE: str = ""
 
+class PerformanceCountResult(BaseModel):
+    ASSIGNED_TASK: int = 0
+    OPEN_TASK: int = 0
+    DELAYED_OPEN_TASK: int = 0
+    CLOSED_TASK: int = 0
+    DELAYED_CLOSED_TASK: int = 0
 
 def get_system_prompt(current_time: datetime.datetime) -> str:
     team = load_team()
@@ -318,10 +324,33 @@ IMPORTANT:
 - Keep remarks short and factual
 
 ### PERFORMANCE REPORTING:
-When user asks for performance, statistics, or counts (or chooses Performance Report) or says "show pending tasks for ...":
-- Use 'get_performance_report_tool'
-- Without name → Report for ALL employees (Managers only)
-- With name → Report for specific employee
+When the user asks for performance, statistics, counts, or a performance report:
+Always use SID 627 as the only data source.
+Do not use any other APIs for performance reporting.
+
+Interpretation rules:
+1. If the user does not mention any employee name:
+- Treat the request as a general performance report.
+- Generate the report for all employees (Managers only).
+- Use SID 627 with REPORT_TYPE = "Detail".
+- Send the PDF report on WhatsApp.
+- The user does not need to explicitly say “PDF”.
+
+2. If the user mentions a specific employee name or login code:
+- Use SID 627 with REPORT_TYPE = "Count".
+- Show the count summary AND pending tasks in text format.
+- Do not generate or send a PDF.
+
+3. Do not infer PDF intent from keywords.
+- PDF is implied automatically for general (no-name) performance requests.
+- Text summary is implied automatically for named employee requests.
+
+4. Employees may only view their own performance.
+- Managers may view performance for all employees.
+
+5. Return results exactly as provided by SID 627.
+- Do not calculate, derive, or modify counts.
+- Missing values must be treated as zero.
 
 ### TASK LISTING:
 When user asks to see tasks, list tasks, pending work:
@@ -437,7 +466,6 @@ class CreateTaskRequest(BaseModel):
     DETAILS: Details = Details(CHILD=[])
     DOCUMENTS: Documents = Documents(CHILD=[])
 
-
 class GetTasksRequest(BaseModel):
     Event: str = "106830"
     Child: List[Dict]
@@ -549,6 +577,7 @@ async def add_user_tool(
                         f"Source: {status_note}")
 
     return f"Failed: I could not find a Login ID for '{name}' in the message or the system list. Please check if the name matches exactly."
+
 async def delete_user_tool(
     ctx: RunContext[ManagerContext],
     name: str,
@@ -585,7 +614,6 @@ async def delete_user_tool(
     
     return f"Failed to delete user: {res.get('resultmessage')}"
 
-
 def get_gmail_service():
     try:
         token_json_str = os.getenv("TOKEN_JSON")
@@ -601,12 +629,6 @@ def get_gmail_service():
     except Exception as e:
         logger.error(f"Gmail Error: {e}")
         return None
-
-def build_status_filter(role: str) -> str:
-    if role == "manager":
-        return "Open,Closed,Reopened"
-    else:
-        return "Open,Partially Closed,Reported Closed"
 
 def normalize_status_for_report(status: str) -> str:
     report_status_map = {
@@ -714,48 +736,6 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
         logger.error(f"Exception calling API {key}: {str(e)}")
         return None
 
-async def fetch_task_counts_api(login_code: str, ctx_role: str):
-
-    req = GetCountRequest(Child=[{
-        "Control_Id": "108118",
-        "AC_ID": "113229", # Updated from YAML source [cite: 13]
-        "Parent": [
-            {"Control_Id": "111548", "Value": "1", "Data_Form_Id": ""},
-            {"Control_Id": "107566", "Value": login_code, "Data_Form_Id": ""},
-            {"Control_Id": "107568", "Value": "", "Data_Form_Id": ""},
-            {"Control_Id": "107569", "Value": "", "Data_Form_Id": ""},
-            {"Control_Id": "107599", "Value": "Assigned To Me", "Data_Form_Id": ""},
-            {"Control_Id": "109599", "Value": "", "Data_Form_Id": ""},
-            {"Control_Id": "108512", "Value": "", "Data_Form_Id": ""}
-        ]
-    }])
-    
-    try:
-        res = await call_appsavy_api("GET_COUNT", req)
-        logger.info(f"API Count Response for {login_code}: {res}")
-        
-        if not res:
-            logger.warning(f"GET_COUNT returned None for {login_code}")
-            return {"ASSIGNED_TASK": "0", "CLOSED_TASK": "0"}
-        
-        if isinstance(res, dict) and "error" in res:
-            logger.error(f"GET_COUNT API error for {login_code}: {res['error']}")
-            return {"ASSIGNED_TASK": "0", "CLOSED_TASK": "0"}
-        
-        if isinstance(res, list) and len(res) > 0:
-            logger.info(f"GET_COUNT returned list with {len(res)} items for {login_code}")
-            return res[0]
-        elif isinstance(res, dict):
-            logger.info(f"GET_COUNT returned dict for {login_code}")
-            return res
-        else:
-            logger.warning(f"GET_COUNT returned unexpected format for {login_code}: {type(res)}")
-            return {"ASSIGNED_TASK": "0", "CLOSED_TASK": "0"}
-            
-    except Exception as e:
-        logger.error(f"fetch_task_counts_api error for {login_code}: {str(e)}", exc_info=True)
-        return {"ASSIGNED_TASK": "0", "CLOSED_TASK": "0"}
-
 def download_and_encode_document(document_data: Dict):
     """Downloads media from Meta and returns base64 string."""
     try:
@@ -797,10 +777,10 @@ async def send_whatsapp_report_tool(
         # Resolve user
         if assigned_to:
             user = next(
-                (u for u in team if assigned_to.lower() in u["name"].lower()
-                 or assigned_to == u["login_code"]),
+                (u for u in team if assigned_to == u["login_code"]),
                 None
             )
+
             if not user:
                 return f"User '{assigned_to}' not found."
         else:
@@ -879,15 +859,7 @@ async def get_assignee_list_tool(ctx: RunContext[ManagerContext]) -> str:
         return f"Error fetching assignee list: {str(e)}"
 
 async def get_users_by_id_tool(ctx: RunContext[ManagerContext], id_value: str) -> str:
-    """
-    Retrieves user information by Group ID (G-XXXX-XX) or User ID (D-XXXX-XXXX).
-    
-    Args:
-        id_value: Group ID starting with 'G-' or User ID starting with 'D-'
-    
-    Returns:
-        Formatted user information
-    """
+
     try:
         if not (id_value.startswith('G-') or id_value.startswith('D-')):
             return "Error: ID must start with 'G-' (Group) or 'D-' (User). Example: G-10343-41 or D-3514-1001"
@@ -931,6 +903,7 @@ async def get_users_by_id_tool(ctx: RunContext[ManagerContext], id_value: str) -
                         user_info += f"\nPhone: {phone}"
                     
                     users.append(user_info)
+                    
         elif isinstance(api_response, dict):
             user_id = api_response.get("USER_ID") or api_response.get("LOGIN_ID")
             name = api_response.get("name") or api_response.get("USER_NAME")
@@ -944,7 +917,6 @@ async def get_users_by_id_tool(ctx: RunContext[ManagerContext], id_value: str) -
                 user_info += f"\nEmail: {email}"
             if phone:
                 user_info += f"\nPhone: {phone}"
-            
             users.append(user_info)
         
         if not users:
@@ -958,183 +930,111 @@ async def get_users_by_id_tool(ctx: RunContext[ManagerContext], id_value: str) -
         logger.error(f"get_users_by_id_tool error: {str(e)}", exc_info=True)
         return f"Error fetching user information: {str(e)}"
 
-def get_top_10_pending_tasks(tasks: list, now: datetime.datetime) -> list:
-    """
-    Filters non-closed tasks and returns top 10 pending tasks
-    sorted by expected end date (earliest first).
-    """
-    pending = []
-
-    for task in tasks:
-        status = str(task.get("STS", "")).lower()
-        if status == "closed":
-            continue
-
-        expected_raw = task.get("EXPECTED_END_DATE")
-        expected_dt = None
-
-        if expected_raw:
-            try:
-                expected_dt = datetime.datetime.strptime(
-                    expected_raw, "%m/%d/%Y %I:%M:%S %p"
-                )
-            except Exception:
-                pass
-
-        pending.append({
-            "task_id": task.get("TID"),
-            "task_name": task.get("COMMENTS"),
-            "status": task.get("STS"),
-            "expected_dt": expected_dt,
-            "expected_raw": expected_raw or "N/A"
-        })
-
-    # Sort: earliest deadline first, unknown dates last
-    pending.sort(
-        key=lambda x: x["expected_dt"] if x["expected_dt"] else datetime.datetime.max
+async def get_performance_count_tool(
+    ctx: RunContext[ManagerContext],
+    login_code: str
+) -> Dict[str, Any]:
+    req = WhatsAppPdfReportRequest(
+        ASSIGNED_TO=login_code,
+        REPORT_TYPE="Count",
+        STATUS="",
+        MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
+        ASSIGNED_BY="Assigned By Me",
+        REFERENCE="PERFORMANCE_COUNT"
     )
 
-    return pending[:10]
+    res = await call_appsavy_api("WHATSAPP_PDF_REPORT", req)
+
+    default_response = {
+        "ASSIGNED_TASK": 0,
+        "OPEN_TASK": 0,
+        "DELAYED_OPEN_TASK": 0,
+        "CLOSED_TASK": 0,
+        "DELAYED_CLOSED_TASK": 0,
+        "PENDING_TASKS": []
+    }
+
+    if not isinstance(res, dict):
+        return default_response
+
+    data = res.get("data")
+    if not isinstance(data, dict):
+        return default_response
+
+    result_list = data.get("Result")
+    if not isinstance(result_list, list) or not result_list:
+        return default_response
+
+    result = result_list[0]
+    if not isinstance(result, dict):
+        return default_response
+
+    def safe_int(v):
+        try:
+            return int(str(v).strip())
+        except Exception:
+            return 0
+
+    return {
+        "ASSIGNED_TASK": safe_int(result.get("Assign Task")),
+        "OPEN_TASK": safe_int(result.get("Open Task")),
+        "DELAYED_OPEN_TASK": safe_int(result.get("Delayed Open Tasks")),
+        "CLOSED_TASK": safe_int(result.get("Closed Tasks")),
+        "DELAYED_CLOSED_TASK": safe_int(result.get("Delayed Closed Tasks")),
+        "PENDING_TASKS": (
+            result.get("Pending Tasks")
+            if isinstance(result.get("Pending Tasks"), list)
+            else []
+        )
+    }
 
 async def get_performance_report_tool(
     ctx: RunContext[ManagerContext],
     name: Optional[str] = None
 ) -> str:
-    """
-    Generate performance report using API data
-    - SID 616 for counts
-    - SID 610 for task details (PER USER)
-    """
-    try:
-        team = load_team()
-        now = ctx.deps.current_time
+    team = load_team()
 
-        # Role check
-        if not name and ctx.deps.role != "manager":
-            return "Permission Denied: Only managers can view the full team report."
+    if not name:
+        if ctx.deps.role != "manager":
+            return "Permission Denied: Only managers can view full performance reports."
 
-        # Decide whose report to show
-        if name:
-            matched = next(
-                (
-                    u for u in team
-                    if name.lower() in u["name"].lower()
-                    or name.lower() == u["login_code"].lower()
-                ),
-                None
+        for user in team:
+            await send_whatsapp_report_tool(
+                ctx,
+                report_type="Detail",
+                status="",
+                assigned_to=user["login_code"]
             )
-            if not matched:
-                return f"User '{name}' not found in directory."
-            display_team = [matched]
 
-        elif ctx.deps.role == "manager":
-            display_team = team
+        return "Performance report PDF has been sent on WhatsApp."
 
-        else:
-            self_user = next(
-                (u for u in team if u["phone"] == ctx.deps.sender_phone),
-                None
-            )
-            if not self_user:
-                return "Unable to identify your profile."
-            display_team = [self_user]
+    user = next(
+        (u for u in team
+         if name.lower() in u["name"].lower()
+         or name.lower() == u["login_code"].lower()),
+        None
+    )
 
-        # 🔹 Status filter
-        status_filter = build_status_filter(ctx.deps.role)
+    if not user:
+        return f"User '{name}' not found."
 
-        results = []
+    counts = await get_performance_count_tool(ctx, user["login_code"])
 
-        
-        # FETCH DATA PER USER (THIS FIXES THE BUG)
-      
-        for member in display_team:
-            member_login = member["login_code"]
+    output = (
+        f"Tasks Report for User: {user['name'].upper()}\n"
+        f"Assign Task: {counts['ASSIGNED_TASK']}\n"
+        f"Open Task: {counts['OPEN_TASK']}\n"
+        f"Delayed Open Tasks: {counts['DELAYED_OPEN_TASK']}\n"
+        f"Closed Tasks: {counts['CLOSED_TASK']}\n"
+        f"Delayed Closed Tasks: {counts['DELAYED_CLOSED_TASK']}"
+    )
 
-            try:
-                # 🔹 Fetch task list for THIS USER ONLY (SID 610)
-                raw_tasks_data = await call_appsavy_api(
-                    "GET_TASKS",
-                    GetTasksRequest(
-                        Child=[{
-                            "Control_Id": "106831",
-                            "AC_ID": "110803",
-                            "Parent": [
-                                {"Control_Id": "106825", "Value": status_filter, "Data_Form_Id": ""},
-                                {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
-                                {"Control_Id": "106827", "Value": member_login, "Data_Form_Id": ""},
-                                {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
-                                {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
-                                {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""}
-                            ]
-                        }]
-                    )
-                )
+    if counts["PENDING_TASKS"]:
+        output += "\n\nPending Tasks:\n"
+        for i, task in enumerate(counts["PENDING_TASKS"], start=1):
+            output += f"{i}. {task}\n"
 
-                member_tasks = normalize_tasks_response(raw_tasks_data)
-                counts = await fetch_task_counts_api(member_login, ctx.deps.role)
-                within_time = 0
-                beyond_time = 0
-                closed_count = 0
-
-                for task in member_tasks:
-                    status = str(task.get("STS", "")).lower()
-                    expected_date = task.get("EXPECTED_END_DATE")
-
-                    if status == "closed":
-                        closed_count += 1
-                        continue
-
-                    if expected_date:
-                        try:
-                            expected = datetime.datetime.strptime(
-                                expected_date,
-                                "%m/%d/%Y %I:%M:%S %p"
-                            )
-                            if expected >= now:
-                                within_time += 1
-                            else:
-                                beyond_time += 1
-                        except Exception:
-                            # fallback: treat as within time
-                            within_time += 1
-
-                assigned_count = counts.get(
-                    "ASSIGNED_TASK",
-                    str(len(member_tasks))
-                )
-
-                closed_from_api = counts.get(
-                    "CLOSED_TASK",
-                    str(closed_count)
-                )
-
-                results.append(
-                    f"Tasks Report for User: {member['name'].title()}\n"
-                    f"Assigned Tasks- {assigned_count} Nos\n"
-                    f"Completed Tasks- {closed_from_api} Nos\n"
-                    f"Pending Tasks-\n"
-                    f"Within time: {within_time}\n"
-                    f"Beyond time: {beyond_time}"
-                )
-
-            except Exception:
-                logger.error(
-                    f"Error processing report for {member['name']}",
-                    exc_info=True
-                )
-                results.append(
-                    f"Name- {member['name'].title()}\n"
-                    f"Error: Unable to fetch report data"
-                )
-
-        if not results:
-            return "No team members found for reporting."
-
-        return "\n\n".join(results)
-
-    except Exception as e:
-        logger.error("get_performance_report_tool error", exc_info=True)
-        return f"Error generating performance report: {str(e)}"
+    return output.strip()
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
     try:
@@ -1636,6 +1536,8 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 current_agent = Agent(ai_model, deps_type=ManagerContext, system_prompt=dynamic_prompt)
                 
                 current_agent.tool(get_performance_report_tool)
+                current_agent.tool(get_performance_count_tool)
+
                 current_agent.tool(get_task_list_tool)
                 current_agent.tool(assign_new_task_tool)
                 current_agent.tool(assign_task_by_phone_tool)
