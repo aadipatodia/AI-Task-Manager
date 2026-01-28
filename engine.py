@@ -284,44 +284,34 @@ You MUST follow these rules strictly:
 **Case 3 (Update):** If a document is sent during work, use `update_task_status_tool` with status `Work In Progress`.
 
 ### TASK STATUS OUTPUT FORMAT (MANDATORY):
-When updating a task status, you MUST return a valid JSON object and NOTHING ELSE.
+You are a task workflow interpreter for a backend system.
 
-JSON schema:
-{{
-  "task_id": "<TASK_ID>",
-  "status": "<FINAL_STATUS>",
-  "remark": "<OPTIONAL_REMARK>"
-}}
-### REMARK EXTRACTION RULES:
-- Extract a remark ONLY if the user provides meaningful context beyond status
-- Examples of remarks:
-  - reason for completion
-  - delay explanation
-  - approval note
-  - rejection reason
-- If no meaningful remark is present, return remark as an empty string ""
+Your job is to understand the user's intent and determine the correct
+new_status value for API SID 607 based on:
+- The user's role relative to the specific task
+- The meaning of their message
 
-Examples:
-User: "Close task 123, completed after QA approval"
-Return:
-{{
-  "task_id": "123",
-  "status": "Close",
-  "remark": "Completed after QA approval"
-}}
+You MUST follow these rules strictly:
 
-User: "Done task 123"
-Return:
-{{
-  "task_id": "123",
-  "status": "Close",
-  "remark": ""
-}}
+1. Determine the user's role ONLY from the provided context.
+   - Employee = Assignee of the task
+   - Manager = Reporter/Creator of the task
 
-IMPORTANT:
-- Do NOT invent remarks
-- Do NOT repeat task ID or status inside remark
-- Keep remarks short and factual
+2. Strictly distinguish between:
+   - "Close"  → employee submission for approval
+   - "Closed" → manager final closure
+
+3. Never allow:
+   - Employees to use: Closed, Reopened
+   - Managers to use: Work In Progress, Close
+
+4. Interpret natural language correctly:
+   - "done", "finished", "completed" by an employee means submission, not final closure
+   - "approve", "looks good", "final close" by a manager means final closure
+
+5. Do NOT ask the user any questions.
+6. Do NOT explain rules.
+7. Do NOT include anything outside valid JSON.
 
 ### PERFORMANCE REPORTING:
 When the user asks for performance, statistics, counts, or a performance report:
@@ -1032,7 +1022,6 @@ async def get_performance_report_tool(
         return "Performance report PDF has been sent on WhatsApp."
 
     # ---------- NAME PRESENT → TEXT ----------
-    # ---------- NAME PRESENT → TEXT (SID 627 COUNT) ----------
     user = next(
         (u for u in team
         if name.lower() in u["name"].lower()
@@ -1047,7 +1036,7 @@ async def get_performance_report_tool(
     pending_tasks = await get_pending_tasks(user["login_code"])
 
     output = (
-        f"Tasks Report for User: {user['login_code']}\n"
+        f"Tasks Report for User:\n"
         f"Assign Task: {counts['ASSIGNED_TASK']}\n"
         f"Open Task: {counts['OPEN_TASK']}\n"
         f"Delayed Open Tasks: {counts['DELAYED_OPEN_TASK']}\n"
@@ -1061,6 +1050,8 @@ async def get_performance_report_tool(
             output += f"{i}. {t}\n"
 
     return output.strip()
+
+
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
     try:
@@ -1457,34 +1448,17 @@ async def update_task_status_tool(
     status: str,
     remark: Optional[str] = None
 ) -> str:
-    # ------------------------------------------------------------
-    # CONTEXT
-    # ------------------------------------------------------------
-    sender_phone = ctx.sender_phone
-    role = ctx.role
-    sender_mobile = sender_phone[-10:]
-
-    # ------------------------------------------------------------
-    # BASIC VALIDATION
-    # ------------------------------------------------------------
+  
+    # --- BASIC VALIDATION ---
     if not task_id or task_id.lower() in ["", "none", "null"]:
         return "Please mention the Task ID you want to update."
 
     if not status:
-        return "System Error: Task status could not be determined."
+        return "System Error: Final task status could not be determined."
 
-    # employees cannot final-close
-    if role == "employee" and status == "Closed":
-        return (
-            "You have submitted the task, but final closure "
-            "requires manager approval."
-        )
+    sender_mobile = ctx.deps.sender_phone[-10:]
 
-    if not remark or not remark.strip():
-        remark = f"Task updated to {status}"
-
-    remark = remark.strip()
-    
+    # --- OWNERSHIP CHECK (SID 632) ---
     ownership_payload = {
         "Event": "146560",
         "Child": [
@@ -1493,12 +1467,12 @@ async def update_task_status_tool(
                 "AC_ID": "201877",
                 "Parent": [
                     {
-                        "Control_Id": "146559",   # TASK ID
+                        "Control_Id": "146559",
                         "Value": task_id,
                         "Data_Form_Id": ""
                     },
                     {
-                        "Control_Id": "146562",   # MOBILE
+                        "Control_Id": "146562",
                         "Value": sender_mobile,
                         "Data_Form_Id": ""
                     }
@@ -1513,107 +1487,54 @@ async def update_task_status_tool(
             RootModel(ownership_payload)
         )
 
-        result = ownership_res.get("data", {}).get("Result", [])
-        if not result:
+        result_data = ownership_res.get("data", {}).get("Result", [])
+        if not result_data:
             return f"Permission Denied: You are not authorized to update Task {task_id}."
 
-        task_owner = result[0].get("TASK_OWNER")
+        task_owner = result_data[0].get("TASK_OWNER")
         if not is_authorized(task_owner):
             return f"Permission Denied: You are not authorized to update Task {task_id}."
 
-    except Exception:
-        logger.error("Ownership check failed", exc_info=True)
+    except Exception as e:
+        logger.error(f"Ownership check failed: {e}")
         return "System Error: Could not verify task ownership."
 
-    # ------------------------------------------------------------
-    # STATUS UPDATE (SID 607) – FULLY COMPATIBLE PAYLOAD
-    # ------------------------------------------------------------
-
-    parents = [
-        {
-            "Control_Id": "146602",  # TASK ID
-            "Value": task_id,
-            "Data_Form_Id": ""
-        },
-        {
-            "Control_Id": "146603",  # STATUS
-            "Value": status,
-            "Data_Form_Id": ""
-        },
-    ]
-
-    # ✅ SEND COMMENTS TO ALL POSSIBLE REMARK CONTROLS
-    # Appsavy will pick the mandatory one automatically
-    for cid in ["146604", "146612", "146620"]:
-        parents.append({
-            "Control_Id": cid,
-            "Value": remark,
-            "Data_Form_Id": ""
-        })
-
-    parents.append({
-        "Control_Id": "146605",  # WHATSAPP MOBILE
-        "Value": sender_mobile,
-        "Data_Form_Id": ""
-    })
-
-    update_payload = {
-        "Event": "146600",
-        "Child": [
-            {
-                "Control_Id": "146601",
-
-            # ✅ COMMENTS MUST BE HERE
-                "COMMENTS": remark,
-
-                "Parent": [
-                    {
-                        "Control_Id": "146602",  # TASK ID
-                        "Value": task_id,
-                        "Data_Form_Id": ""
-                    },
-                    {
-                        "Control_Id": "146603",  # STATUS
-                        "Value": status,
-                        "Data_Form_Id": ""
-                    },
-                    {
-                        "Control_Id": "146605",  # MOBILE
-                        "Value": sender_mobile,
-                        "Data_Form_Id": ""
-                    }
-                ]
-            }
-        ]
-    }
-
-    try:
-        api_response = await call_appsavy_api(
-            "UPDATE_STATUS",
-            RootModel(update_payload)
+    # --- ROLE SAFETY CHECK (FINAL GUARD) ---
+    if ctx.deps.role == "employee" and status == "Closed":
+        return (
+            "You have submitted the task, but final closure "
+            "requires manager approval."
         )
 
-        result_code = str(api_response.get("result", "0"))
+    # --- PROCEED WITH UPDATE (SID 607) ---
+    try:
+        req = UpdateTaskRequest(
+            TASK_ID=task_id,
+            STATUS=status,
+            COMMENTS=remark or f"Task updated to {status}",
+            WHATSAPP_MOBILE_NUMBER=sender_mobile
+        )
 
-        if result_code == "1":
+        api_response = await call_appsavy_api("UPDATE_STATUS", req)
+
+        if api_response and str(api_response.get("RESULT")) == "1":
             if status == "Close":
                 return (
-                    f"Task {task_id} has been marked as completed "
-                    "and sent for manager approval."
+                    f" Task {task_id} has been marked as completed "
+                    "and sent for manager closure."
                 )
             if status == "Closed":
-                return f"Task {task_id} has been closed successfully."
+                return f" Task {task_id} has been closed successfully."
             if status == "Reopened":
-                return f"Task {task_id} has been reopened."
+                return f" Task {task_id} has been reopened."
 
-            return f"Task {task_id} updated to '{status}'."
+            return f" Task {task_id} updated to '{status}'."
 
         return f"API Error: {api_response.get('resultmessage', 'Update failed')}"
 
-    except Exception:
-        logger.error("Task update failed", exc_info=True)
+    except Exception as e:
+        logger.error(f"Task update failed: {e}")
         return "System Error: Could not update task status."
-    
 async def handle_message(command, sender, pid, message=None, full_message=None):
     if command and command.strip().lower() == "delete & add":
         send_whatsapp_message(
@@ -1625,132 +1546,121 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         return
 
     try:
-        # ---------------------------------------------------------
-        # Normalize sender number
-        # ---------------------------------------------------------
-        if len(sender) == 10 and not sender.startswith("91"):
+        if len(sender) == 10 and not sender.startswith('91'):
             sender = f"91{sender}"
-
-        # ---------------------------------------------------------
-        # Media detection
-        # ---------------------------------------------------------
+    
         is_media = False
         if message:
             is_media = any(k in message for k in ["document", "image", "video", "audio", "type"])
-
+    
         if is_media and not command:
             send_whatsapp_message(
                 sender,
-                "File received. Please provide the assignee name, task description, and deadline.",
+               "File received. Please provide the assignee name, task description, and deadline to complete the assignment.",
                 pid
             )
             return
-
-        # ---------------------------------------------------------
-        # Role detection
-        # ---------------------------------------------------------
-        manager_phone = os.getenv("MANAGER_PHONE", "917428134319")
+    
+        manager_phone = os.getenv("MANAGER_PHONE", "919871536210")
         team = load_team()
-
+    
         if sender == manager_phone:
             role = "manager"
-        elif any(u["phone"] == sender for u in team):
+        elif any(u['phone'] == sender for u in team):
             role = "employee"
         else:
             role = None
-
+    
         if not role:
-            send_whatsapp_message(
-                sender,
-                "Access Denied: Your number is not authorized to use this system.",
-                pid
-            )
+            send_whatsapp_message(sender, "Access Denied: Your number is not authorized to use this system.", pid)
             return
-
-        # ---------------------------------------------------------
-        # Conversation memory
-        # ---------------------------------------------------------
+    
         if sender not in conversation_history:
             conversation_history[sender] = []
+    
+        if command:
+            try:
+                assignees = extract_multiple_assignees(command, team)
+                if len(assignees) > 1:
+                    for name in assignees:
+                        await assign_new_task_tool(
+                            ctx=ManagerContext(
+                            sender_phone=sender,
+                            role=role,
+                            current_time=datetime.datetime.now()
+                            ),
+                            name=name,
+                            task_name=command,
+                            deadline=datetime.datetime.now().strftime("%Y-%m-%d")
+                        )
+                    send_whatsapp_message(
+                           sender,
+                          f"Task successfully assigned to:\n" + "\n".join(assignees),
+                          pid
+                            )
+                    return  
 
-        if not command:
-            return
-
-        current_time = datetime.datetime.now()
-
-        # =========================================================
-        # HARD OVERRIDE — TASK STATUS UPDATE (RUN FIRST)
-        # =========================================================
-        task_id = extract_task_id(command)
-        if task_id:
-            status = resolve_status(command, role)
-            if status:
-                remark = extract_remark(command, task_id)
-
-                final_response = await update_task_status_tool(
-                    ctx=ManagerContext(
-                        sender_phone=sender,
-                        role=role,
-                        current_time=current_time
-                    ),
-                    task_id=task_id,
-                    status=status,
-                    remark=remark
+                current_time = datetime.datetime.now()
+                dynamic_prompt = get_system_prompt(current_time)
+            
+                current_agent = Agent(ai_model, deps_type=ManagerContext, system_prompt=dynamic_prompt)
+                
+                current_agent.tool(get_performance_report_tool)
+                current_agent.tool(get_task_list_tool)
+                current_agent.tool(assign_new_task_tool)
+                current_agent.tool(assign_task_by_phone_tool)
+                current_agent.tool(update_task_status_tool)
+                current_agent.tool(get_assignee_list_tool)
+                current_agent.tool(get_users_by_id_tool)
+                current_agent.tool(send_whatsapp_report_tool)
+                current_agent.tool(add_user_tool)
+                current_agent.tool(delete_user_tool)
+            
+                result = await current_agent.run(
+                    command,
+                    message_history=conversation_history[sender],
+                    deps=ManagerContext(
+                        sender_phone=sender, 
+                        role=role, 
+                        current_time=current_time,
+                        document_data=message  
+                    )
                 )
+            
+                conversation_history[sender] = result.all_messages()
+            
+                if len(conversation_history[sender]) > 10:
+                    
+                    conversation_history[sender] = conversation_history[sender][-10:]
+            
+                output_text = result.output
+                if output_text.strip().startswith("{"):
+                    try:
+                        data = json.loads(output_text)
+                        if "task_id" in data and "status" in data:
+                            status = data["status"]
+                            task_id = data["task_id"]
+                            if status == "Close":
+                                output_text = (
+                                    f"Task {task_id} has been marked as completed "
+                                    "and sent for manager approval."
+                                )
+                            elif status == "Closed":
+                                output_text = f"Task {task_id} has been closed successfully."
+                            elif status == "Reopened":
+                                output_text = f"Task {task_id} has been reopened."
+                            else:
+                                output_text = f"Task {task_id} updated to {status}."
 
-                send_whatsapp_message(sender, final_response, pid)
-                return
+                    except Exception:
+                        pass
+                send_whatsapp_message(sender, output_text, pid)
 
-        # =========================================================
-        # SAFE AGENT EXECUTION (NON-DESTRUCTIVE FLOWS ONLY)
-        # =========================================================
-        dynamic_prompt = get_system_prompt(current_time)
-
-        current_agent = Agent(
-            ai_model,
-            deps_type=ManagerContext,
-            system_prompt=dynamic_prompt
-        )
-
-        # Register tools
-        current_agent.tool(get_performance_report_tool)
-        current_agent.tool(get_task_list_tool)
-        current_agent.tool(assign_new_task_tool)
-        current_agent.tool(assign_task_by_phone_tool)
-        current_agent.tool(get_assignee_list_tool)
-        current_agent.tool(get_users_by_id_tool)
-        current_agent.tool(send_whatsapp_report_tool)
-        current_agent.tool(add_user_tool)
-        current_agent.tool(delete_user_tool)
-
-        try:
-            result = await current_agent.run(
-                command,
-                message_history=conversation_history[sender],
-                deps=ManagerContext(
-                    sender_phone=sender,
-                    role=role,
-                    current_time=current_time,
-                    document_data=message
-                )
-            )
-
-            conversation_history[sender] = result.all_messages()[-10:]
-            agent_output = result.output
-
-        except Exception as llm_error:
-            logger.error("LLM execution failed", exc_info=True)
-            agent_output = (
-                "I understood your request, but couldn't process it completely. "
-                "Please try rephrasing or try again."
-            )
-
-        send_whatsapp_message(sender, agent_output, pid)
-
+            
+            except Exception as e:
+                logger.error(f"Agent execution failed: {str(e)}", exc_info=True)
+                send_whatsapp_message(sender, f"System Error: Unable to process request. Please try again.", pid)
+            
     except Exception as e:
-        logger.error(f"handle_message fatal error: {str(e)}", exc_info=True)
-        send_whatsapp_message(
-            sender,
-            "An unexpected system error occurred. Please try again shortly.",
-            pid
-        )
+        logger.error(f"handle_message error: {str(e)}", exc_info=True)
+        send_whatsapp_message(sender, "An unexpected error occaurred. Please try again.", pid)
