@@ -325,8 +325,15 @@ IMPORTANT:
 
 ### PERFORMANCE REPORTING:
 When the user asks for performance, statistics, counts, or a performance report:
-Always use SID 627 as the only data source.
-Do not use any other APIs for performance reporting.
+Performance reporting rules:
+- When no employee name is mentioned:
+  - Use SID 627 with REPORT_TYPE = "Detail"
+  - Send PDF on WhatsApp
+- When a specific employee is mentioned:
+  - Use GET_COUNT (SID 616)
+  - Show text summary to the requester
+  - Do NOT send WhatsApp to the employee
+
 
 Interpretation rules:
 1. If the user does not mention any employee name:
@@ -930,29 +937,23 @@ async def get_users_by_id_tool(ctx: RunContext[ManagerContext], id_value: str) -
         logger.error(f"get_users_by_id_tool error: {str(e)}", exc_info=True)
         return f"Error fetching user information: {str(e)}"
 
-async def get_performance_count_tool(
+async def get_performance_count_via_627(
     ctx: RunContext[ManagerContext],
     login_code: str
-) -> Dict[str, Any]:
-    req = GetCountRequest(
-        Child=[{
-            "Control_Id": "108118",
-            "AC_ID": "113229",
-            "Parent": [
-                {"Control_Id": "111548", "Value": "1", "Data_Form_Id": ""},
-                {"Control_Id": "107566", "Value": login_code, "Data_Form_Id": ""},
-                {"Control_Id": "107568", "Value": "", "Data_Form_Id": ""},
-                {"Control_Id": "107569", "Value": "", "Data_Form_Id": ""},
-                {"Control_Id": "107599", "Value": "Assigned To Me", "Data_Form_Id": ""},
-                {"Control_Id": "109599", "Value": "", "Data_Form_Id": ""},
-                {"Control_Id": "108512", "Value": "", "Data_Form_Id": ""}
-            ]
-        }]
+) -> Dict[str, int]:
+
+    req = WhatsAppPdfReportRequest(
+        ASSIGNED_TO=login_code,
+        REPORT_TYPE="Count",
+        STATUS="",
+        MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
+        ASSIGNED_BY="Assigned To Me",
+        REFERENCE="WHATSAPP"
     )
 
-    res = await call_appsavy_api("GET_COUNT", req)
+    res = await call_appsavy_api("WHATSAPP_PDF_REPORT", req)
 
-    default_response = {
+    default = {
         "ASSIGNED_TASK": 0,
         "OPEN_TASK": 0,
         "DELAYED_OPEN_TASK": 0,
@@ -961,27 +962,53 @@ async def get_performance_count_tool(
     }
 
     if not isinstance(res, dict):
-        return default_response
+        return default
 
     data = res.get("data", {}).get("Result", [])
     if not data:
-        return default_response
+        return default
 
     row = data[0]
 
-    def safe_int(v):
-        try:
-            return int(v)
-        except Exception:
-            return 0
+    def i(v): 
+        try: return int(v)
+        except: return 0
 
     return {
-        "ASSIGNED_TASK": safe_int(row.get("ASSIGNED_TASK")),
-        "OPEN_TASK": safe_int(row.get("OPEN_TASK")),
-        "DELAYED_OPEN_TASK": safe_int(row.get("DELAYED_OPEN_TASK")),
-        "CLOSED_TASK": safe_int(row.get("CLOSED_TASK")),
-        "DELAYED_CLOSED_TASK": safe_int(row.get("DELAYED_CLOSED_TASK")),
+        "ASSIGNED_TASK": i(row.get("ASSIGNED_TASK")),
+        "OPEN_TASK": i(row.get("OPEN_TASK")),
+        "DELAYED_OPEN_TASK": i(row.get("DELAYED_OPEN_TASK")),
+        "CLOSED_TASK": i(row.get("CLOSED_TASK")),
+        "DELAYED_CLOSED_TASK": i(row.get("DELAYED_CLOSED_TASK")),
     }
+
+async def get_pending_tasks(login_code: str) -> List[str]:
+
+    res = await call_appsavy_api(
+        "GET_TASKS",
+        GetTasksRequest(
+            Event="106830",
+            Child=[{
+                "Control_Id": "106831",
+                "AC_ID": "110803",
+                "Parent": [
+                    {"Control_Id": "106827", "Value": login_code, "Data_Form_Id": ""},
+                    {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
+                ]
+            }]
+        )
+    )
+
+    tasks = normalize_tasks_response(res)
+
+    pending = []
+    for t in tasks:
+        if t.get("STS") in ["Open", "Work In Progress"]:
+            title = t.get("COMMENTS")
+            if title:
+                pending.append(title)
+
+    return pending
 
 async def get_performance_report_tool(
     ctx: RunContext[ManagerContext],
@@ -1005,9 +1032,10 @@ async def get_performance_report_tool(
         return "Performance report PDF has been sent on WhatsApp."
 
     # ---------- NAME PRESENT → TEXT ----------
+    # ---------- NAME PRESENT → TEXT (SID 627 COUNT) ----------
     user = next(
         (u for u in team
-         if name.lower() in u["name"].lower()
+        if name.lower() in u["name"].lower()
          or name.lower() == u["login_code"].lower()),
         None
     )
@@ -1015,17 +1043,24 @@ async def get_performance_report_tool(
     if not user:
         return f"User '{name}' not found."
 
-    counts = await get_performance_count_tool(ctx, user["login_code"])
+    counts = await get_performance_count_via_627(ctx, user["login_code"])
+    pending_tasks = await get_pending_tasks(user["login_code"])
 
     output = (
-        f"Tasks Report for User: {user['name'].upper()}\n"
+        f"Tasks Report for User: {user['login_code']}\n"
         f"Assign Task: {counts['ASSIGNED_TASK']}\n"
         f"Open Task: {counts['OPEN_TASK']}\n"
         f"Delayed Open Tasks: {counts['DELAYED_OPEN_TASK']}\n"
         f"Closed Tasks: {counts['CLOSED_TASK']}\n"
-        f"Delayed Closed Tasks: {counts['DELAYED_CLOSED_TASK']}"
+        f"Delayed Closed Tasks: {counts['DELAYED_CLOSED_TASK']}\n\n"
     )
-    return output
+
+    if pending_tasks:
+        output += "Pending Tasks:\n"
+        for i, t in enumerate(pending_tasks, 1):
+            output += f"{i}. {t}\n"
+
+    return output.strip()
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
     try:
@@ -1422,17 +1457,42 @@ async def update_task_status_tool(
     status: str,
     remark: Optional[str] = None
 ) -> str:
-  
-    # --- BASIC VALIDATION ---
+    # ------------------------------------------------------------------
+    # CONTEXT NORMALIZATION (Agent call OR manual call)
+    # ------------------------------------------------------------------
+    sender_phone = (
+        ctx.deps.sender_phone
+        if hasattr(ctx, "deps")
+        else ctx.sender_phone
+    )
+
+    role = (
+        ctx.deps.role
+        if hasattr(ctx, "deps")
+        else ctx.role
+    )
+
+    sender_mobile = sender_phone[-10:]
+
+    # ------------------------------------------------------------------
+    # BASIC VALIDATION
+    # ------------------------------------------------------------------
     if not task_id or task_id.lower() in ["", "none", "null"]:
         return "Please mention the Task ID you want to update."
 
     if not status:
         return "System Error: Final task status could not be determined."
 
-    sender_mobile = ctx.deps.sender_phone[-10:]
+    # Employees cannot final-close
+    if role == "employee" and status == "Closed":
+        return (
+            "You have submitted the task, but final closure "
+            "requires manager approval."
+        )
 
-    # --- OWNERSHIP CHECK (SID 632) ---
+    # ------------------------------------------------------------------
+    # OWNERSHIP CHECK (SID 632)
+    # ------------------------------------------------------------------
     ownership_payload = {
         "Event": "146560",
         "Child": [
@@ -1470,17 +1530,21 @@ async def update_task_status_tool(
             return f"Permission Denied: You are not authorized to update Task {task_id}."
 
     except Exception as e:
-        logger.error(f"Ownership check failed: {e}")
+        logger.error(f"Ownership check failed: {e}", exc_info=True)
         return "System Error: Could not verify task ownership."
 
-    # --- ROLE SAFETY CHECK (FINAL GUARD) ---
-    if ctx.deps.role == "employee" and status == "Closed":
+    # ------------------------------------------------------------------
+    # FINAL ROLE SAFETY GUARD
+    # ------------------------------------------------------------------
+    if role == "employee" and status == "Closed":
         return (
             "You have submitted the task, but final closure "
             "requires manager approval."
         )
 
-    # --- PROCEED WITH UPDATE (SID 607) ---
+    # ------------------------------------------------------------------
+    # STATUS UPDATE (SID 607)
+    # ------------------------------------------------------------------
     try:
         req = UpdateTaskRequest(
             TASK_ID=task_id,
@@ -1494,22 +1558,21 @@ async def update_task_status_tool(
         if api_response and str(api_response.get("RESULT")) == "1":
             if status == "Close":
                 return (
-                    f" Task {task_id} has been marked as completed "
-                    "and sent for manager closure."
+                    f"Task {task_id} has been marked as completed "
+                    "and sent for manager approval."
                 )
             if status == "Closed":
-                return f" Task {task_id} has been closed successfully."
+                return f"Task {task_id} has been closed successfully."
             if status == "Reopened":
-                return f" Task {task_id} has been reopened."
+                return f"Task {task_id} has been reopened."
 
-            return f" Task {task_id} updated to '{status}'."
+            return f"Task {task_id} updated to '{status}'."
 
         return f"API Error: {api_response.get('resultmessage', 'Update failed')}"
 
     except Exception as e:
-        logger.error(f"Task update failed: {e}")
+        logger.error(f"Task update failed: {e}", exc_info=True)
         return "System Error: Could not update task status."
-
     
 async def handle_message(command, sender, pid, message=None, full_message=None):
     if command and command.strip().lower() == "delete & add":
@@ -1522,11 +1585,15 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         return
 
     try:
-        # ---- Normalize sender ----
-        if len(sender) == 10 and not sender.startswith('91'):
+        # ---------------------------------------------------------
+        # Normalize sender number
+        # ---------------------------------------------------------
+        if len(sender) == 10 and not sender.startswith("91"):
             sender = f"91{sender}"
 
-        # ---- Media detection ----
+        # ---------------------------------------------------------
+        # Media detection
+        # ---------------------------------------------------------
         is_media = False
         if message:
             is_media = any(k in message for k in ["document", "image", "video", "audio", "type"])
@@ -1534,18 +1601,20 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         if is_media and not command:
             send_whatsapp_message(
                 sender,
-                "File received. Please provide the assignee name, task description, and deadline to complete the assignment.",
+                "File received. Please provide the assignee name, task description, and deadline.",
                 pid
             )
             return
 
-        # ---- Role detection ----
+        # ---------------------------------------------------------
+        # Role detection
+        # ---------------------------------------------------------
         manager_phone = os.getenv("MANAGER_PHONE", "919871536210")
         team = load_team()
 
         if sender == manager_phone:
             role = "manager"
-        elif any(u['phone'] == sender for u in team):
+        elif any(u["phone"] == sender for u in team):
             role = "employee"
         else:
             role = None
@@ -1558,12 +1627,18 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
             return
 
+        # ---------------------------------------------------------
+        # Conversation memory
+        # ---------------------------------------------------------
         if sender not in conversation_history:
             conversation_history[sender] = []
 
         if not command:
             return
 
+        # ---------------------------------------------------------
+        # Build Agent
+        # ---------------------------------------------------------
         current_time = datetime.datetime.now()
         dynamic_prompt = get_system_prompt(current_time)
 
@@ -1573,8 +1648,10 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             system_prompt=dynamic_prompt
         )
 
-        # ---- Register tools ----
-        current_agent.tool(get_performance_report_tool)
+        # ---------------------------------------------------------
+        # Register tools
+        # ---------------------------------------------------------
+        current_agent.tool(get_performance_report_tool)   # uses SID 627 internally
         current_agent.tool(get_task_list_tool)
         current_agent.tool(assign_new_task_tool)
         current_agent.tool(assign_task_by_phone_tool)
@@ -1584,7 +1661,9 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         current_agent.tool(add_user_tool)
         current_agent.tool(delete_user_tool)
 
-        # ---- Run agent ----
+        # ---------------------------------------------------------
+        # Run agent
+        # ---------------------------------------------------------
         result = await current_agent.run(
             command,
             message_history=conversation_history[sender],
@@ -1597,9 +1676,11 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         )
 
         conversation_history[sender] = result.all_messages()[-10:]
+        agent_output = result.output
 
-        output_text = result.output
-
+        # ---------------------------------------------------------
+        # HARD OVERRIDE: Task status update (highest priority)
+        # ---------------------------------------------------------
         task_id = extract_task_id(command)
         if task_id:
             status = resolve_status(command, role)
@@ -1620,8 +1701,10 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 send_whatsapp_message(sender, final_response, pid)
                 return
 
-        # ---- Normal response ----
-        send_whatsapp_message(sender, output_text, pid)
+        # ---------------------------------------------------------
+        # Normal agent response
+        # ---------------------------------------------------------
+        send_whatsapp_message(sender, agent_output, pid)
 
     except Exception as e:
         logger.error(f"handle_message error: {str(e)}", exc_info=True)
