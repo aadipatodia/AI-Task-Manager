@@ -227,6 +227,23 @@ You must determine the correct 'new_status' string by interpreting the user's in
 ### USER MANAGEMENT RULES (ADD / DELETE USERS):
 
 - Any authorized user can ADD a new user.
+### ADD USER TOOL (CRITICAL):
+When the user wants to add a user
+(e.g. "add user", "create user", "register user"):
+
+You MUST:
+1. Extract:
+   - name
+   - mobile number (10 digits)
+   - email
+2. Call the tool add_user_tool
+3. Pass arguments exactly as:
+   - name
+   - email
+   - mobile
+4. Do NOT ask any follow-up questions if all values are present
+5. Execute immediately
+
 - A user can DELETE a user ONLY IF:
   - The same user originally added that user.
 
@@ -545,7 +562,7 @@ async def add_user_tool(
                 target_name = name.lower().strip()
                 for item in result_list:
                     item_name = str(item.get("NAME", "")).lower().strip()
-                    if target_name == item_name:
+                    if target_name in item_name or item_name in target_name:
                         login_code = item.get("ID") or item.get("LOGIN_ID")
                         status_note = "ID fetched from system list"
                         break
@@ -931,6 +948,11 @@ async def get_performance_count_via_627(
     ctx: RunContext[ManagerContext],
     login_code: str
 ) -> Dict[str, int]:
+    """
+    SID 627 (Count) is a TRIGGER-ONLY API.
+    It does NOT return counts.
+    This function only triggers the report and returns an empty dict.
+    """
 
     req = WhatsAppPdfReportRequest(
         ASSIGNED_TO=login_code,
@@ -941,38 +963,54 @@ async def get_performance_count_via_627(
         REFERENCE="WHATSAPP"
     )
 
-    res = await call_appsavy_api("WHATSAPP_PDF_REPORT", req)
+    # Trigger Appsavy internal report
+    await call_appsavy_api("WHATSAPP_PDF_REPORT", req)
 
-    default = {
-        "ASSIGNED_TASK": 0,
+    # IMPORTANT: Do NOT return fake zeros
+    return {}
+
+async def get_task_summary_from_tasks(login_code: str) -> Dict[str, int]:
+    res = await call_appsavy_api(
+        "GET_TASKS",
+        GetTasksRequest(
+            Event="106830",
+            Child=[{
+                "Control_Id": "106831",
+                "AC_ID": "110803",
+                "Parent": [
+                    {"Control_Id": "106827", "Value": login_code, "Data_Form_Id": ""},
+                    {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
+                ]
+            }]
+        )
+    )
+
+    tasks = normalize_tasks_response(res)
+
+    summary = {
+        "ASSIGNED_TASK": len(tasks),
         "OPEN_TASK": 0,
-        "DELAYED_OPEN_TASK": 0,
+        "DELAYED_OPEN_TASK": 0,   # Appsavy does not expose delay flag here
         "CLOSED_TASK": 0,
-        "DELAYED_CLOSED_TASK": 0,
+        "DELAYED_CLOSED_TASK": 0
     }
 
-    if not isinstance(res, dict):
-        return default
+    for t in tasks:
+        sts = t.get("STS")
+        if sts == "Open":
+            summary["OPEN_TASK"] += 1
+        elif sts == "Work In Progress":
+            summary["OPEN_TASK"] += 1
+        elif sts == "Closed":
+            summary["CLOSED_TASK"] += 1
 
-    data = res.get("data", {}).get("Result", [])
-    if not data:
-        return default
-
-    row = data[0]
-
-    def i(v): 
-        try: return int(v)
-        except: return 0
-
-    return {
-        "ASSIGNED_TASK": i(row.get("ASSIGNED_TASK")),
-        "OPEN_TASK": i(row.get("OPEN_TASK")),
-        "DELAYED_OPEN_TASK": i(row.get("DELAYED_OPEN_TASK")),
-        "CLOSED_TASK": i(row.get("CLOSED_TASK")),
-        "DELAYED_CLOSED_TASK": i(row.get("DELAYED_CLOSED_TASK")),
-    }
+    return summary
 
 async def get_pending_tasks(login_code: str) -> List[str]:
+    """
+    Returns titles of pending tasks (Open / Work In Progress)
+    using GET_TASKS (SID 610).
+    """
 
     res = await call_appsavy_api(
         "GET_TASKS",
@@ -993,7 +1031,7 @@ async def get_pending_tasks(login_code: str) -> List[str]:
 
     pending = []
     for t in tasks:
-        if t.get("STS") in ["Open", "Work In Progress"]:
+        if t.get("STS") in ("Open", "Work In Progress"):
             title = t.get("COMMENTS")
             if title:
                 pending.append(title)
@@ -1011,7 +1049,6 @@ async def get_performance_report_tool(
         if ctx.deps.role != "manager":
             return "Permission Denied: Only managers can view full performance reports."
 
-        # PDF is sent ONLY to requester
         await send_whatsapp_report_tool(
             ctx,
             report_type="Detail",
@@ -1024,7 +1061,7 @@ async def get_performance_report_tool(
     # ---------- NAME PRESENT → TEXT ----------
     user = next(
         (u for u in team
-        if name.lower() in u["name"].lower()
+         if name.lower() in u["name"].lower()
          or name.lower() == u["login_code"].lower()),
         None
     )
@@ -1032,26 +1069,28 @@ async def get_performance_report_tool(
     if not user:
         return f"User '{name}' not found."
 
-    counts = await get_performance_count_via_627(ctx, user["login_code"])
+    # 🔹 Trigger SID 627 (Count) — no data expected
+    await get_performance_count_via_627(ctx, user["login_code"])
+
+    # 🔹 REAL data source
+    counts = await get_task_summary_from_tasks(user["login_code"])
     pending_tasks = await get_pending_tasks(user["login_code"])
 
     output = (
-        f"Tasks Report for User:\n"
-        f"Assign Task: {counts['ASSIGNED_TASK']}\n"
-        f"Open Task: {counts['OPEN_TASK']}\n"
-        f"Delayed Open Tasks: {counts['DELAYED_OPEN_TASK']}\n"
-        f"Closed Tasks: {counts['CLOSED_TASK']}\n"
-        f"Delayed Closed Tasks: {counts['DELAYED_CLOSED_TASK']}\n\n"
+        f"Performance Summary for {user['name'].title()}:\n\n"
+        f"Assigned Tasks: {counts['ASSIGNED_TASK']}\n"
+        f"Open Tasks: {counts['OPEN_TASK']}\n"
+        f"Closed Tasks: {counts['CLOSED_TASK']}\n\n"
     )
 
     if pending_tasks:
         output += "Pending Tasks:\n"
         for i, t in enumerate(pending_tasks, 1):
             output += f"{i}. {t}\n"
+    else:
+        output += "No pending tasks "
 
     return output.strip()
-
-
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
     try:
