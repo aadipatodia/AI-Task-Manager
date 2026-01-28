@@ -271,8 +271,8 @@ You MUST follow these rules strictly:
    - Managers to use: Work In Progress, Close
 
 4. Interpret natural language correctly:
-   - "done", "finished", "completed" by an employee means submission, not final closure
-   - "approve", "looks good", "final close" by a manager means final closure
+   - "done", "finished", "completed", "close", "closed", "submit" by an employee means submission, not final closure, i.e close tag
+   - "approve", "looks good", "final close", "close", "closed" by a manager means final closure, i.e closed tag
 
 5. Do NOT ask the user any questions.
 6. Do NOT explain rules.
@@ -1457,42 +1457,31 @@ async def update_task_status_tool(
     status: str,
     remark: Optional[str] = None
 ) -> str:
-    # ------------------------------------------------------------------
-    # CONTEXT NORMALIZATION (Agent call OR manual call)
-    # ------------------------------------------------------------------
-    sender_phone = (
-        ctx.deps.sender_phone
-        if hasattr(ctx, "deps")
-        else ctx.sender_phone
-    )
-
-    role = (
-        ctx.deps.role
-        if hasattr(ctx, "deps")
-        else ctx.role
-    )
-
+    # ------------------------------------------------------------
+    # CONTEXT NORMALIZATION
+    # ------------------------------------------------------------
+    sender_phone = ctx.sender_phone
+    role = ctx.role
     sender_mobile = sender_phone[-10:]
 
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------------
     # BASIC VALIDATION
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------------
     if not task_id or task_id.lower() in ["", "none", "null"]:
         return "Please mention the Task ID you want to update."
 
     if not status:
-        return "System Error: Final task status could not be determined."
+        return "System Error: Task status could not be determined."
 
-    # Employees cannot final-close
     if role == "employee" and status == "Closed":
         return (
             "You have submitted the task, but final closure "
             "requires manager approval."
         )
 
-    # ------------------------------------------------------------------
-    # OWNERSHIP CHECK (SID 632)
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------------
+    # OWNERSHIP CHECK  (SID 632)
+    # ------------------------------------------------------------
     ownership_payload = {
         "Event": "146560",
         "Child": [
@@ -1501,12 +1490,12 @@ async def update_task_status_tool(
                 "AC_ID": "201877",
                 "Parent": [
                     {
-                        "Control_Id": "146559",
+                        "Control_Id": "146559",   # TASK ID
                         "Value": task_id,
                         "Data_Form_Id": ""
                     },
                     {
-                        "Control_Id": "146562",
+                        "Control_Id": "146562",   # MOBILE
                         "Value": sender_mobile,
                         "Data_Form_Id": ""
                     }
@@ -1521,43 +1510,61 @@ async def update_task_status_tool(
             RootModel(ownership_payload)
         )
 
-        result_data = ownership_res.get("data", {}).get("Result", [])
-        if not result_data:
+        result = ownership_res.get("data", {}).get("Result", [])
+        if not result:
             return f"Permission Denied: You are not authorized to update Task {task_id}."
 
-        task_owner = result_data[0].get("TASK_OWNER")
+        task_owner = result[0].get("TASK_OWNER")
         if not is_authorized(task_owner):
             return f"Permission Denied: You are not authorized to update Task {task_id}."
 
     except Exception as e:
-        logger.error(f"Ownership check failed: {e}", exc_info=True)
+        logger.error("Ownership check failed", exc_info=True)
         return "System Error: Could not verify task ownership."
 
-    # ------------------------------------------------------------------
-    # FINAL ROLE SAFETY GUARD
-    # ------------------------------------------------------------------
-    if role == "employee" and status == "Closed":
-        return (
-            "You have submitted the task, but final closure "
-            "requires manager approval."
-        )
+    # ------------------------------------------------------------
+    # STATUS UPDATE  (SID 607)  ✅ FIXED STRUCTURE
+    # ------------------------------------------------------------
+    update_payload = {
+        "Event": "146600",   # ✅ Event ID of Service 607
+        "Child": [
+            {
+                "Control_Id": "146601",   # ✅ Main container
+                "Parent": [
+                    {
+                        "Control_Id": "146602",   # TASK ID
+                        "Value": task_id,
+                        "Data_Form_Id": ""
+                    },
+                    {
+                        "Control_Id": "146603",   # STATUS
+                        "Value": status,
+                        "Data_Form_Id": ""
+                    },
+                    {
+                        "Control_Id": "146604",   # COMMENTS
+                        "Value": remark or f"Task updated to {status}",
+                        "Data_Form_Id": ""
+                    },
+                    {
+                        "Control_Id": "146605",   # WHATSAPP MOBILE
+                        "Value": sender_mobile,
+                        "Data_Form_Id": ""
+                    }
+                ]
+            }
+        ]
+    }
 
-    # ------------------------------------------------------------------
-    # STATUS UPDATE (SID 607)
-    # ------------------------------------------------------------------
     try:
-        req = UpdateTaskRequest(
-            TASK_ID=task_id,
-            STATUS=status,
-            COMMENTS=remark or f"Task updated to {status}",
-            WHATSAPP_MOBILE_NUMBER=sender_mobile
+        api_response = await call_appsavy_api(
+            "UPDATE_STATUS",
+            RootModel(update_payload)
         )
 
-        api_response = await call_appsavy_api("UPDATE_STATUS", req)
-        
-        res_code = str(api_response.get("result") or api_response.get("RESULT") or "0")
+        result_code = str(api_response.get("result", "0"))
 
-        if api_response and res_code == "1":
+        if result_code == "1":
             if status == "Close":
                 return (
                     f"Task {task_id} has been marked as completed "
@@ -1573,7 +1580,7 @@ async def update_task_status_tool(
         return f"API Error: {api_response.get('resultmessage', 'Update failed')}"
 
     except Exception as e:
-        logger.error(f"Task update failed: {e}", exc_info=True)
+        logger.error("Task update failed", exc_info=True)
         return "System Error: Could not update task status."
     
 async def handle_message(command, sender, pid, message=None, full_message=None):
