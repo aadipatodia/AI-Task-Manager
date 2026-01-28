@@ -994,6 +994,7 @@ async def get_performance_report_tool(
 ) -> str:
     team = load_team()
 
+    # -------- NO NAME → PDF --------
     if not name:
         if ctx.deps.role != "manager":
             return "Permission Denied: Only managers can view full performance reports."
@@ -1008,6 +1009,7 @@ async def get_performance_report_tool(
 
         return "Performance report PDF has been sent on WhatsApp."
 
+    # -------- NAME PRESENT --------
     user = next(
         (u for u in team
          if name.lower() in u["name"].lower()
@@ -1018,23 +1020,15 @@ async def get_performance_report_tool(
     if not user:
         return f"User '{name}' not found."
 
-    counts = await get_performance_count_tool(ctx, user["login_code"])
-
-    output = (
-        f"Tasks Report for User: {user['name'].upper()}\n"
-        f"Assign Task: {counts['ASSIGNED_TASK']}\n"
-        f"Open Task: {counts['OPEN_TASK']}\n"
-        f"Delayed Open Tasks: {counts['DELAYED_OPEN_TASK']}\n"
-        f"Closed Tasks: {counts['CLOSED_TASK']}\n"
-        f"Delayed Closed Tasks: {counts['DELAYED_CLOSED_TASK']}"
+    # JUST TRIGGER SID 627 COUNT
+    await send_whatsapp_report_tool(
+        ctx,
+        report_type="Count",
+        status="",
+        assigned_to=user["login_code"]
     )
 
-    if counts["PENDING_TASKS"]:
-        output += "\n\nPending Tasks:\n"
-        for i, task in enumerate(counts["PENDING_TASKS"], start=1):
-            output += f"{i}. {task}\n"
-
-    return output.strip()
+    return "Performance report has been sent on WhatsApp."
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
     try:
