@@ -1417,9 +1417,7 @@ def resolve_final_status(intent: str, relationship: str, role: str) -> Optional[
 
     if intent == "REOPEN_TASK":
         return "Reopened"
-
     return None
-
 
 async def update_task_status_tool(
     ctx: RunContext[ManagerContext],
@@ -1527,130 +1525,111 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         return
 
     try:
+        # ---- Normalize sender ----
         if len(sender) == 10 and not sender.startswith('91'):
             sender = f"91{sender}"
-    
+
+        # ---- Media detection ----
         is_media = False
         if message:
             is_media = any(k in message for k in ["document", "image", "video", "audio", "type"])
-    
+
         if is_media and not command:
             send_whatsapp_message(
                 sender,
-               "File received. Please provide the assignee name, task description, and deadline to complete the assignment.",
+                "File received. Please provide the assignee name, task description, and deadline to complete the assignment.",
                 pid
             )
             return
-    
+
+        # ---- Role detection ----
         manager_phone = os.getenv("MANAGER_PHONE", "919871536210")
         team = load_team()
-    
+
         if sender == manager_phone:
             role = "manager"
         elif any(u['phone'] == sender for u in team):
             role = "employee"
         else:
             role = None
-    
+
         if not role:
-            send_whatsapp_message(sender, "Access Denied: Your number is not authorized to use this system.", pid)
+            send_whatsapp_message(
+                sender,
+                "Access Denied: Your number is not authorized to use this system.",
+                pid
+            )
             return
-    
+
         if sender not in conversation_history:
             conversation_history[sender] = []
-    
-        if command:
-            try:
-                assignees = extract_multiple_assignees(command, team)
-                if len(assignees) > 1:
-                    for name in assignees:
-                        await assign_new_task_tool(
-                            ctx=ManagerContext(
-                            sender_phone=sender,
-                            role=role,
-                            current_time=datetime.datetime.now()
-                            ),
-                            name=name,
-                            task_name=command,
-                            deadline=datetime.datetime.now().strftime("%Y-%m-%d")
-                        )
-                    send_whatsapp_message(
-                           sender,
-                          f"Task successfully assigned to:\n" + "\n".join(assignees),
-                          pid
-                            )
-                    return  
 
-                current_time = datetime.datetime.now()
-                dynamic_prompt = get_system_prompt(current_time)
-            
-                current_agent = Agent(ai_model, deps_type=ManagerContext, system_prompt=dynamic_prompt)
-                
-                current_agent.tool(get_performance_report_tool)
-                current_agent.tool(get_performance_count_tool)
+        if not command:
+            return
 
-                current_agent.tool(get_task_list_tool)
-                current_agent.tool(assign_new_task_tool)
-                current_agent.tool(assign_task_by_phone_tool)
-                
-                current_agent.tool(get_assignee_list_tool)
-                current_agent.tool(get_users_by_id_tool)
-                current_agent.tool(send_whatsapp_report_tool)
-                current_agent.tool(add_user_tool)
-                current_agent.tool(delete_user_tool)
-            
-                result = await current_agent.run(
-                    command,
-                    message_history=conversation_history[sender],
-                    deps=ManagerContext(
-                        sender_phone=sender, 
-                        role=role, 
-                        current_time=current_time,
-                        document_data=message  
-                    )
+        current_time = datetime.datetime.now()
+        dynamic_prompt = get_system_prompt(current_time)
+
+        current_agent = Agent(
+            ai_model,
+            deps_type=ManagerContext,
+            system_prompt=dynamic_prompt
+        )
+
+        # ---- Register tools ----
+        current_agent.tool(get_performance_report_tool)
+        current_agent.tool(get_task_list_tool)
+        current_agent.tool(assign_new_task_tool)
+        current_agent.tool(assign_task_by_phone_tool)
+        current_agent.tool(get_assignee_list_tool)
+        current_agent.tool(get_users_by_id_tool)
+        current_agent.tool(send_whatsapp_report_tool)
+        current_agent.tool(add_user_tool)
+        current_agent.tool(delete_user_tool)
+
+        # ---- Run agent ----
+        result = await current_agent.run(
+            command,
+            message_history=conversation_history[sender],
+            deps=ManagerContext(
+                sender_phone=sender,
+                role=role,
+                current_time=current_time,
+                document_data=message
+            )
+        )
+
+        conversation_history[sender] = result.all_messages()[-10:]
+
+        output_text = result.output
+
+        task_id = extract_task_id(command)
+        if task_id:
+            status = resolve_status(command, role)
+            if status:
+                remark = extract_remark(command, task_id)
+
+                final_response = await update_task_status_tool(
+                    ctx=ManagerContext(
+                        sender_phone=sender,
+                        role=role,
+                        current_time=current_time
+                    ),
+                    task_id=task_id,
+                    status=status,
+                    remark=remark
                 )
-            
-                conversation_history[sender] = result.all_messages()
-            
-                if len(conversation_history[sender]) > 10:
-                    
-                    conversation_history[sender] = conversation_history[sender][-10:]
-            
-                output_text = result.output
 
-                # 🔥 BACKEND-DRIVEN TASK STATUS HANDLING
-                task_id = extract_task_id(command)
+                send_whatsapp_message(sender, final_response, pid)
+                return
 
+        # ---- Normal response ----
+        send_whatsapp_message(sender, output_text, pid)
 
-                if task_id:
-                    status = resolve_status(command, role)
-
-                
-                    if status:
-                        remark = extract_remark(command, task_id)
-
-
-                        await update_task_status_tool(
-                            ctx=ManagerContext(
-                            sender_phone=sender,
-                            role=role,
-                            current_time=current_time
-                            ),
-                        task_id=task_id,
-                        status=status,
-                        remark=remark
-                        )
-
-        # ✅ USER-FRIENDLY TEXT OUTPUT (NO JSON)
-                        output_text = (
-                            f"Task ID: {task_id}\n"
-                            f"Status: {status}\n"
-                            f"Remark: {remark if remark else '—'}"
-                        )
-                        send_whatsapp_message(sender, output_text, pid)
-                        return
-
-            
     except Exception as e:
         logger.error(f"handle_message error: {str(e)}", exc_info=True)
-        send_whatsapp_message(sender, "An unexpected error occaurred. Please try again.", pid)
+        send_whatsapp_message(
+            sender,
+            "An unexpected error occurred. Please try again.",
+            pid
+        )
