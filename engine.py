@@ -277,6 +277,47 @@ You MUST follow these rules strictly:
 **Case 2 (Employee):** If a document/image is sent with a "completed" or "closed" message, use `update_task_status_tool` with status `Close` .
 **Case 3 (Update):** If a document is sent during work, use `update_task_status_tool` with status `Work In Progress`.
 
+### TASK STATUS OUTPUT FORMAT (MANDATORY):
+When updating a task status, you MUST return a valid JSON object and NOTHING ELSE.
+
+JSON schema:
+{
+  "task_id": "<TASK_ID>",
+  "status": "<FINAL_STATUS>",
+  "remark": "<OPTIONAL_REMARK>"
+}
+
+### REMARK EXTRACTION RULES:
+- Extract a remark ONLY if the user provides meaningful context beyond status
+- Examples of remarks:
+  - reason for completion
+  - delay explanation
+  - approval note
+  - rejection reason
+- If no meaningful remark is present, return remark as an empty string ""
+
+Examples:
+User: "Close task 123, completed after QA approval"
+Return:
+{
+  "task_id": "123",
+  "status": "Close",
+  "remark": "Completed after QA approval"
+}
+
+User: "Done task 123"
+Return:
+{
+  "task_id": "123",
+  "status": "Close",
+  "remark": ""
+}
+
+IMPORTANT:
+- Do NOT invent remarks
+- Do NOT repeat task ID or status inside remark
+- Keep remarks short and factual
+
 ### PERFORMANCE REPORTING:
 When user asks for performance, statistics, or counts (or chooses Performance Report) or says "show pending tasks for ...":
 - Use 'get_performance_report_tool'
@@ -1599,7 +1640,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 current_agent.tool(get_task_list_tool)
                 current_agent.tool(assign_new_task_tool)
                 current_agent.tool(assign_task_by_phone_tool)
-                current_agent.tool(update_task_status_tool)
+                
                 current_agent.tool(get_assignee_list_tool)
                 current_agent.tool(get_users_by_id_tool)
                 current_agent.tool(send_whatsapp_report_tool)
@@ -1630,21 +1671,31 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                         if "task_id" in data and "status" in data:
                             status = data["status"]
                             task_id = data["task_id"]
-                            if status == "Close":
-                                output_text = (
-                                    f"Task {task_id} has been marked as completed "
-                                    "and sent for manager approval."
-                                )
-                            elif status == "Closed":
-                                output_text = f"Task {task_id} has been closed successfully."
-                            elif status == "Reopened":
-                                output_text = f"Task {task_id} has been reopened."
-                            else:
-                                output_text = f"Task {task_id} updated to {status}."
+                            remark = data.get("remark") or None
+
+
+                            final_response = await update_task_status_tool(
+                                ctx = ManagerContext(
+                                    sender_phone = sender,
+                                    role = role,
+                                    current_time=current_time
+                                ),
+                                task_id=task_id,
+                                status=status,
+                                remark=remark
+                            )
+                            output_text = final_response
 
                     except Exception:
                         pass
+                                # 🚨 FINAL SAFETY GUARD — NEVER SEND RAW JSON TO WHATSAPP
+                if output_text and output_text.strip().startswith("{"):
+                    logger.error("Blocked raw JSON from being sent to WhatsApp")
+                    output_text = "Your request has been processed successfully."
+
                 send_whatsapp_message(sender, output_text, pid)
+                return
+
 
             
             except Exception as e:
