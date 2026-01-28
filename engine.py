@@ -159,7 +159,7 @@ API_CONFIGS = {
     }
 }
 
-ai_model = GeminiModel('gemini-2.0-flash-exp')
+ai_model = GeminiModel('gemini-2.0-flash')
 
 class ManagerContext(BaseModel):
     sender_phone: str
@@ -1623,7 +1623,29 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                     
                     conversation_history[sender] = conversation_history[sender][-10:]
             
-                send_whatsapp_message(sender, result.output, pid)
+                output_text = result.output
+                if output_text.strip().startswith("{"):
+                    try:
+                        data = json.loads(output_text)
+                        if "task_id" in data and "status" in data:
+                            status = data["status"]
+                            task_id = data["task_id"]
+                            if status == "Close":
+                                output_text = (
+                                    f"Task {task_id} has been marked as completed "
+                                    "and sent for manager approval."
+                                )
+                            elif status == "Closed":
+                                output_text = f"Task {task_id} has been closed successfully."
+                            elif status == "Reopened":
+                                output_text = f"Task {task_id} has been reopened."
+                            else:
+                                output_text = f"Task {task_id} updated to {status}."
+
+                    except Exception:
+                        pass
+                send_whatsapp_message(sender, output_text, pid)
+
             
             except Exception as e:
                 logger.error(f"Agent execution failed: {str(e)}", exc_info=True)
