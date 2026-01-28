@@ -1337,7 +1337,8 @@ async def assign_new_task_tool(
 
         # 2. Handle Document Attachment
         documents_child = []
-        if ctx.deps.document_data:
+        document_data = getattr(getattr(ctx, "deps", None), "document_data", None)
+        if document_data:            
             media_type = ctx.deps.document_data.get("type")
             media_info = ctx.deps.document_data.get(media_type)
             if media_info:
