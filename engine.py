@@ -1458,7 +1458,7 @@ async def update_task_status_tool(
     remark: Optional[str] = None
 ) -> str:
     # ------------------------------------------------------------
-    # CONTEXT NORMALIZATION
+    # CONTEXT
     # ------------------------------------------------------------
     sender_phone = ctx.sender_phone
     role = ctx.role
@@ -1473,6 +1473,7 @@ async def update_task_status_tool(
     if not status:
         return "System Error: Task status could not be determined."
 
+    # employees cannot final-close
     if role == "employee" and status == "Closed":
         return (
             "You have submitted the task, but final closure "
@@ -1480,7 +1481,15 @@ async def update_task_status_tool(
         )
 
     # ------------------------------------------------------------
-    # OWNERSHIP CHECK  (SID 632)
+    # NORMALIZE COMMENTS (CRITICAL)
+    # ------------------------------------------------------------
+    if not remark or not remark.strip():
+        remark = f"Task updated to {status}"
+
+    remark = remark.strip()
+
+    # ------------------------------------------------------------
+    # OWNERSHIP CHECK (SID 632)
     # ------------------------------------------------------------
     ownership_payload = {
         "Event": "146560",
@@ -1518,40 +1527,48 @@ async def update_task_status_tool(
         if not is_authorized(task_owner):
             return f"Permission Denied: You are not authorized to update Task {task_id}."
 
-    except Exception as e:
+    except Exception:
         logger.error("Ownership check failed", exc_info=True)
         return "System Error: Could not verify task ownership."
 
     # ------------------------------------------------------------
-    # STATUS UPDATE  (SID 607)  ✅ FIXED STRUCTURE
+    # STATUS UPDATE (SID 607) – FULLY COMPATIBLE PAYLOAD
     # ------------------------------------------------------------
+
+    parents = [
+        {
+            "Control_Id": "146602",  # TASK ID
+            "Value": task_id,
+            "Data_Form_Id": ""
+        },
+        {
+            "Control_Id": "146603",  # STATUS
+            "Value": status,
+            "Data_Form_Id": ""
+        },
+    ]
+
+    # ✅ SEND COMMENTS TO ALL POSSIBLE REMARK CONTROLS
+    # Appsavy will pick the mandatory one automatically
+    for cid in ["146604", "146612", "146620"]:
+        parents.append({
+            "Control_Id": cid,
+            "Value": remark,
+            "Data_Form_Id": ""
+        })
+
+    parents.append({
+        "Control_Id": "146605",  # WHATSAPP MOBILE
+        "Value": sender_mobile,
+        "Data_Form_Id": ""
+    })
+
     update_payload = {
-        "Event": "146600",   # ✅ Event ID of Service 607
+        "Event": "146600",
         "Child": [
             {
-                "Control_Id": "146601",   # ✅ Main container
-                "Parent": [
-                    {
-                        "Control_Id": "146602",   # TASK ID
-                        "Value": task_id,
-                        "Data_Form_Id": ""
-                    },
-                    {
-                        "Control_Id": "146603",   # STATUS
-                        "Value": status,
-                        "Data_Form_Id": ""
-                    },
-                    {
-                        "Control_Id": "146604",   # COMMENTS
-                        "Value": remark or f"Task updated to {status}",
-                        "Data_Form_Id": ""
-                    },
-                    {
-                        "Control_Id": "146605",   # WHATSAPP MOBILE
-                        "Value": sender_mobile,
-                        "Data_Form_Id": ""
-                    }
-                ]
+                "Control_Id": "146601",
+                "Parent": parents
             }
         ]
     }
@@ -1579,7 +1596,7 @@ async def update_task_status_tool(
 
         return f"API Error: {api_response.get('resultmessage', 'Update failed')}"
 
-    except Exception as e:
+    except Exception:
         logger.error("Task update failed", exc_info=True)
         return "System Error: Could not update task status."
     
