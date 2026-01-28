@@ -281,12 +281,11 @@ You MUST follow these rules strictly:
 When updating a task status, you MUST return a valid JSON object and NOTHING ELSE.
 
 JSON schema:
-{
+{{
   "task_id": "<TASK_ID>",
   "status": "<FINAL_STATUS>",
   "remark": "<OPTIONAL_REMARK>"
-}
-
+}}
 ### REMARK EXTRACTION RULES:
 - Extract a remark ONLY if the user provides meaningful context beyond status
 - Examples of remarks:
@@ -299,19 +298,19 @@ JSON schema:
 Examples:
 User: "Close task 123, completed after QA approval"
 Return:
-{
+{{
   "task_id": "123",
   "status": "Close",
   "remark": "Completed after QA approval"
-}
+}}
 
 User: "Done task 123"
 Return:
-{
+{{
   "task_id": "123",
   "status": "Close",
   "remark": ""
-}
+}}
 
 IMPORTANT:
 - Do NOT invent remarks
@@ -1688,7 +1687,9 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
                     except Exception:
                         pass
-                                # 🚨 FINAL SAFETY GUARD — NEVER SEND RAW JSON TO WHATSAPP
+                                
+                                
+
                 if output_text and output_text.strip().startswith("{"):
                     logger.error("Blocked raw JSON from being sent to WhatsApp")
                     output_text = "Your request has been processed successfully."
