@@ -1494,11 +1494,11 @@ def resolve_final_status(intent: str, relationship: str, role: str) -> Optional[
     return None
 
 APPSAVY_STATUS_MAP = {
-    "Open": "P",
-    "Work In Progress": "P",
-    "Close": "C",
-    "Closed": "C",
-    "Reopened": "R"
+    "Open": "Open",
+    "Work In Progress": "Work In Progress",
+    "Close": "CLosed",
+    "Closed": "Closed",
+    "Reopened": "Reopen"
 }
 
 async def update_task_status_tool(
