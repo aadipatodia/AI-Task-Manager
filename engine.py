@@ -109,15 +109,15 @@ API_CONFIGS = {
     },
 
     "UPDATE_STATUS": {
-        "url": f"{APPSAVY_BASE_URL}/PushdataJSONClient", # [cite: 1]
+        "url": f"{APPSAVY_BASE_URL}/PushdataJSONClient",
         "headers": {
-            "sid": "607",        # Session ID [cite: 2, 8]
-            "pid": "309",        # Project ID [cite: 3]
-            "fid": "10345",      # Feature ID [cite: 4]
-            "cid": "64",         # Client ID [cite: 4]
-            "uid": "TM_API",     # User ID [cite: 5]
-            "roleid": "1627",    # Role ID [cite: 6]
-            "TokenKey": "7bf28d4d-c14f-483d-872a-78c9c16bd982" # [cite: 6]
+            "sid": "607",
+            "pid": "309",
+            "fid": "13560",  # Updated to match Dak Management Form ID
+            "cid": "64",
+            "uid": "TM_API",
+            "roleid": "1627",
+            "TokenKey": "7bf28d4d-c14f-483d-872a-78c9c16bd982"
         }
     },
 
@@ -1554,8 +1554,10 @@ async def update_task_status_tool(
         )
 
         api_response = await call_appsavy_api("UPDATE_STATUS", req)
+        
+        res_code = str(api_response.get("result") or api_response.get("RESULT") or "0")
 
-        if api_response and str(api_response.get("RESULT")) == "1":
+        if api_response and res_code == "1":
             if status == "Close":
                 return (
                     f"Task {task_id} has been marked as completed "
