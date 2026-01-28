@@ -1616,10 +1616,8 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 current_agent.tool(add_user_tool)
                 current_agent.tool(delete_user_tool)
             
-
-                agent_input = full_message or command
                 result = await current_agent.run(
-                    agent_input,
+                    command,
                     message_history=conversation_history[sender],
                     deps=ManagerContext(
                         sender_phone=sender, 
@@ -1642,25 +1640,17 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                         if "task_id" in data and "status" in data:
                             status = data["status"]
                             task_id = data["task_id"]
-                            remark = data.get("remark")
-                            if not remark:
-                                remark = extract_remark(agent_input, task_id)
-                            
-                            remark = remark if remark else None
-
-                            final_response = await update_task_status_tool(
-                                ctx=ManagerContext(
-                                    sender_phone=sender,
-                                    role=role,
-                                    current_time=current_time
-                                ),
-                                task_id=task_id,
-                                status=status,
-                                remark=remark
-                            )
-
-                            output_text = final_response
-
+                            if status == "Close":
+                                output_text = (
+                                    f"Task {task_id} has been marked as completed "
+                                    "and sent for manager approval."
+                                )
+                            elif status == "Closed":
+                                output_text = f"Task {task_id} has been closed successfully."
+                            elif status == "Reopened":
+                                output_text = f"Task {task_id} has been reopened."
+                            else:
+                                output_text = f"Task {task_id} updated to {status}."
 
                     except Exception:
                         pass
