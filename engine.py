@@ -1489,14 +1489,28 @@ def resolve_final_status(intent: str, relationship: str, role: str) -> Optional[
         return "Reopened"
     return None
 
+APPSAVY_STATUS_MAP = {
+    "Open": "P",
+    "Work In Progress": "P",
+
+    # employee submission
+    "Close": "S",
+
+    # manager final closure
+    "Closed": "C",
+
+    # rejection
+    "Reopened": "R"
+}
+
 async def update_task_status_tool(
     ctx: RunContext[ManagerContext],
     task_id: str,
     status: str,
     remark: Optional[str] = None
 ) -> str:
-  
-    # --- BASIC VALIDATION ---
+
+    # ---------- BASIC VALIDATION ----------
     if not task_id or task_id.lower() in ["", "none", "null"]:
         return "Please mention the Task ID you want to update."
 
@@ -1505,7 +1519,7 @@ async def update_task_status_tool(
 
     sender_mobile = ctx.deps.sender_phone[-10:]
 
-    # --- OWNERSHIP CHECK (SID 632) ---
+    # ---------- OWNERSHIP CHECK (SID 632) ----------
     ownership_payload = {
         "Event": "146560",
         "Child": [
@@ -1546,18 +1560,25 @@ async def update_task_status_tool(
         logger.error(f"Ownership check failed: {e}")
         return "System Error: Could not verify task ownership."
 
-    # --- ROLE SAFETY CHECK (FINAL GUARD) ---
+    # ---------- ROLE SAFETY CHECK ----------
     if ctx.deps.role == "employee" and status == "Closed":
         return (
             "You have submitted the task, but final closure "
             "requires manager approval."
         )
 
-    # --- PROCEED WITH UPDATE (SID 607) ---
+    # ---------- STATUS MAPPING (🔥 CRITICAL FIX 🔥) ----------
+    appsavy_status = APPSAVY_STATUS_MAP.get(status)
+
+    if not appsavy_status:
+        logger.error(f"Invalid Appsavy status mapping: {status}")
+        return f"System Error: Unsupported status '{status}'."
+
+    # ---------- UPDATE STATUS (SID 607) ----------
     try:
         req = UpdateTaskRequest(
             TASK_ID=task_id,
-            STATUS=status,
+            STATUS=appsavy_status,  # ✅ INTERNAL CODE ONLY
             COMMENTS=remark or f"Task updated to {status}",
             WHATSAPP_MOBILE_NUMBER=sender_mobile
         )
@@ -1567,20 +1588,20 @@ async def update_task_status_tool(
         if api_response and str(api_response.get("RESULT")) == "1":
             if status == "Close":
                 return (
-                    f" Task {task_id} has been marked as completed "
-                    "and sent for manager closure."
+                    f"Task {task_id} has been marked as completed "
+                    "and sent for manager approval."
                 )
             if status == "Closed":
-                return f" Task {task_id} has been closed successfully."
+                return f"Task {task_id} has been closed successfully."
             if status == "Reopened":
-                return f" Task {task_id} has been reopened."
+                return f"Task {task_id} has been reopened."
 
-            return f" Task {task_id} updated to '{status}'."
+            return f"Task {task_id} updated to '{status}'."
 
         return f"API Error: {api_response.get('resultmessage', 'Update failed')}"
 
     except Exception as e:
-        logger.error(f"Task update failed: {e}")
+        logger.error(f"Task update failed: {e}", exc_info=True)
         return "System Error: Could not update task status."
 
 async def handle_message(command, sender, pid, message=None, full_message=None):
