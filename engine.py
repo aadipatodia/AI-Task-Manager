@@ -1098,7 +1098,7 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
                     "Parent": [
                         {"Control_Id": "106825", "Value": "", "Data_Form_Id": ""},
                         {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
-                        {"Control_Id": "106827", "Value": login_code, "Data_Form_Id": ""},
+                        {"Control_Id": "106825", "Value": login_code, "Data_Form_Id": ""},
                         {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
                         {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
                         {"Control_Id": "107809", "Value": "", "Data_Form_Id": ""}
