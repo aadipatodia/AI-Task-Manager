@@ -541,7 +541,7 @@ async def add_user_tool(
         if login_code:
             new_user = {
                 "name": name.lower().strip(),
-                "phone": "+91" + mobile[-10:],
+                "phone": normalize_phone(mobile),
                 "email": email,
                 "login_code": login_code
             }
@@ -768,7 +768,7 @@ async def send_whatsapp_report_tool(
             if not user:
                 return f"User '{assigned_to}' not found."
         else:
-            user = next((u for u in team if u["phone"] == ctx.deps.sender_phone), None)
+            user = next((u for u in team if u["phone"] == normalize_phone(ctx.deps.sender_phone)), None)
 
         if not user:
             return "Unable to resolve user for report."
@@ -1069,7 +1069,7 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
 
     try:
         team = load_team()
-        user = next((u for u in team if u["phone"] == ctx.deps.sender_phone), None)
+        user = next((u for u in team if u["phone"] == normalize_phone(ctx.deps.sender_phone)), None)
 
         if not user:
             return "Unable to identify your profile."
@@ -1336,16 +1336,16 @@ async def assign_new_task_tool(
                     ))
 
         # 3. Prepare the CreateTaskRequest (SID 604)
+        assignee_mobile = user["phone"][-10:]
         req = CreateTaskRequest(
-            ASSIGNEE=login_code,
+            ASSIGNEE=assignee_mobile,   # ✅ FIX
             DESCRIPTION=task_name,
             TASK_NAME=task_name,
             EXPECTED_END_DATE=to_appsavy_datetime(deadline),
             MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
             DETAILS=Details(
                 CHILD=[DetailChild(
-                    SEL="Y",
-                    LOGIN=login_code,
+                    LOGIN=assignee_mobile,  # ✅ FIX
                     PARTICIPANTS=user["name"].upper()
                 )]
             ),
@@ -1557,8 +1557,12 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
     
         if sender == manager_phone:
             role = "manager"
-        elif any(normalize_phone(u['phone']) == sender for u in team):
+        elif any(
+            normalize_phone(u['phone']) == normalize_phone(sender)
+            for u in team
+        ):
             role = "employee"
+
         else:
             role = None
     
