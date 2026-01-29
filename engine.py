@@ -387,6 +387,7 @@ When user asks to send, share, or receive a report on WhatsApp:
 - If no assignee specified, send report for requesting user
 
 ### IMPORTANT:
+- YOU DO NOT HAVE TO SEND ANY MESSAGES ON WHATSAPP 
 - Ignore WhatsApp headers like '[7:03 pm, 13/1/2026] ABC:' and focus only on the text after the colon.
 """
 
@@ -1022,13 +1023,6 @@ async def get_performance_report_tool(
         if ctx.deps.role != "manager":
             return "Permission Denied: Only managers can view full performance reports."
 
-        await send_whatsapp_report_tool(
-            ctx,
-            report_type="Detail",
-            status="",
-            assigned_to=None
-        )
-
         return "Performance report PDF has been sent on WhatsApp."
 
     # ---------- NAME PRESENT → TEXT ----------
@@ -1477,9 +1471,9 @@ async def update_task_status_tool(
 
     if api_response and str(api_response.get("RESULT")) == "1":
         if status == "Close":
-            return f"Task {task_id} submitted for manager approval."
+            return f"Task {task_id} closed"
         if status == "Closed":
-            return f"Task {task_id} closed successfully."
+            return f"Task {task_id} closed."
         if status == "Reopened":
             return f"Task {task_id} reopened."
         return f"Task {task_id} updated."
