@@ -291,15 +291,13 @@ You MUST follow these rules strictly:
 1. Determine the user's role ONLY from the provided context.
    - Employee = Assignee of the task
    - Manager = Reporter/Creator of the task
-2. Strictly distinguish between:
-   - "Close"  → employee submission for approval
-   - "Closed" → manager final closure
-3. Never allow:
-   - Employees to use: Closed, Reopened
-   - Managers to use: Work In Progress, Close
+2. Never allow:
+   - Employees to use: Reopened
+   - Managers to use: Work In Progress
 4. Interpret natural language correctly:
-   - "done", "finished", "completed", "close", "closed", "submit" by an employee means submission, not final closure, i.e close tag
-   - "approve", "looks good", "final close", "close", "closed" by a manager means final closure, i.e closed tag
+   - "done", "finished", "completed", "close", "closed", "submit" etc and phrases with similar intent by an employee means submission and final closure, i.e closed tag
+   - "approve", "looks good", "final close", "close", "closed" etc and phrases with similar intent by a manager means final closure, i.e closed tag
+   - "not good", "redo", "reassign", "reopen" etc and phrases with similar intent by a manager means "reopen"
 5. Do NOT ask the user any questions.
 6. Do NOT explain rules.
 7. Do NOT include anything outside valid JSON.
@@ -1121,8 +1119,7 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
                 f"ID: {task.get('TID')}\n"
                 f"Task: {task.get('COMMENTS')}\n"
                 f"Assigned On: {task.get('ASSIGN_DATE')}\n"
-                f"Deadline: {deadline}\n"
-                f"Status: {task.get('STS')}\n\n"
+                f"Deadline: {deadline}\n\n"
             )
 
         return output.strip()
@@ -1367,30 +1364,6 @@ async def assign_new_task_tool(
             
             # Check for success (RESULT 1)
             if str(api_response.get('result')) == "1" or str(api_response.get('RESULT')) == "1":
-                # --- Send Notifications ---
-                phone_id = os.getenv("PHONE_NUMBER_ID")
-                whatsapp_msg = f"New Task Assigned:\n\nTask: {task_name}\nDue Date: {deadline}\n\nPlease complete on time."
-
-                if phone_id:
-                    # FIX: RE-OPEN 24H WINDOW FIRST
-                    # We send the registration template to ensure the conversation session is active
-                    send_registration_template(
-                        recipient_number=user["phone"],
-                        user_identifier=user["name"].title(),
-                        phone_number_id=phone_id
-                    )
-                    
-                    # Wait briefly to let Meta register the new Utility session
-                    await asyncio.sleep(1.8)
-                    
-                    # Now send the free-form Task Details
-                    send_whatsapp_message(user["phone"], whatsapp_msg, phone_id)
-
-                # Send Emails
-                email_subject = f"New Task Assigned: {task_name}"
-                send_email(user["email"], email_subject, whatsapp_msg)
-                send_email(MANAGER_EMAIL, f"Task Confirmed: {task_name}", f"Assigned to {user['name']}.")
-
                 return f"Task successfully assigned to {user['name'].title()} (ID: {login_code})."
 
         return f"API Error: {api_response.get('resultmessage', 'Unexpected response format')}"
@@ -1542,6 +1515,29 @@ async def update_task_status_tool(
 
     return f"API Error: {api_response.get('resultmessage', 'Update failed')}"
 
+def should_send_whatsapp(text: str) -> bool:
+    """
+    Allow only clean, user-facing informational responses.
+    Block errors, API failures, permission issues, system logs.
+    """
+    if not text:
+        return False
+
+    block_keywords = [
+        "api error",
+        "system error",
+        "failed",
+        "error",
+        "exception",
+        "invalid",
+        "update failed",
+        "unable to"
+    ]
+
+    t = text.lower()
+    return not any(k in t for k in block_keywords)
+
+
 async def handle_message(command, sender, pid, message=None, full_message=None):
     if command and command.strip().lower() == "delete & add":
         send_whatsapp_message(
@@ -1661,13 +1657,15 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
                     except Exception:
                         pass
-                send_whatsapp_message(sender, output_text, pid)
-
+                if should_send_whatsapp(output_text):
+                    send_whatsapp_message(sender, output_text, pid)
+                else:
+                    logger.warning(f"WhatsApp suppressed message to {sender}: {output_text}")
             
             except Exception as e:
                 logger.error(f"Agent execution failed: {str(e)}", exc_info=True)
-                send_whatsapp_message(sender, f"System Error: Unable to process request. Please try again.", pid)
-            
+                logger.error("System error occurred while processing message", exc_info=True)
+
     except Exception as e:
         logger.error(f"handle_message error: {str(e)}", exc_info=True)
-        send_whatsapp_message(sender, "An unexpected error occaurred. Please try again.", pid)
+        logger.error("System error occurred while processing message", exc_info=True)
