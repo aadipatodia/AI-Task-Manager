@@ -1067,6 +1067,8 @@ async def get_performance_report_tool(
     return output.strip()
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
+    sender_mobile = ctx.deps.sender_phone[-10:]
+
     try:
         team = load_team()
         user = next((u for u in team if u["phone"] == ctx.deps.sender_phone), None)
@@ -1084,12 +1086,12 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
                     "Control_Id": "106831",
                     "AC_ID": "110803",
                     "Parent": [
-                        {"Control_Id": "106825", "Value": "", "Data_Form_Id": ""},
+                        {"Control_Id": "106825", "Value": login_code, "Data_Form_Id": ""},
                         {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
-                        {"Control_Id": "106827", "Value": login_code, "Data_Form_Id": ""},
                         {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
                         {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
-                        {"Control_Id": "107809", "Value": "", "Data_Form_Id": ""}
+                        {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""},
+                        {"Control_Id": "146515", "Value": sender_mobile, "Data_Form_Id":""}
                     ]
                 }]
             )
