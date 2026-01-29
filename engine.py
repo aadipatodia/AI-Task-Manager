@@ -301,6 +301,7 @@ You MUST follow these rules strictly:
 5. Do NOT ask the user any questions.
 6. Do NOT explain rules.
 7. Do NOT include anything outside valid JSON.
+8. ONCE THE TASK IS CLOSED FROM EMPLOYEE/ASSIGNEE'S SIDE OR MANAGER/REPORTER'S SIDE IT DOESN'T REQUIRE ANY APPROVAL. BOTH ARE CATEGORISED AS "CLOSED"
 
 **DOCUMENT HANDLING:**
 **Case 1 (Manager):** If a document/image is sent while creating a task, use `assign_new_task_tool`. 
@@ -1046,21 +1047,12 @@ async def get_performance_report_tool(
 
     # REAL data source
     counts = await get_task_summary_from_tasks(user["login_code"])
-    pending_tasks = await get_pending_tasks(user["login_code"])
-
     output = (
         f"Performance Summary:\n\n"
         f"Assigned Tasks: {counts['ASSIGNED_TASK']}\n"
         f"Open Tasks: {counts['OPEN_TASK']}\n"
         f"Closed Tasks: {counts['CLOSED_TASK']}\n\n"
     )
-
-    if pending_tasks:
-        output += "Pending Tasks:\n"
-        for i, t in enumerate(pending_tasks, 1):
-            output += f"{i}. {t}\n"
-    else:
-        output += "No pending tasks "
 
     return output.strip()
 
@@ -1344,10 +1336,7 @@ async def assign_new_task_tool(
             EXPECTED_END_DATE=to_appsavy_datetime(deadline),
             MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
             DETAILS=Details(
-                CHILD=[DetailChild(
-                    LOGIN=" ",  
-                    PARTICIPANTS=user["name"].upper()
-                )]
+                CHILD=[]
             ),
             DOCUMENTS=Documents(CHILD=documents_child)
         )
