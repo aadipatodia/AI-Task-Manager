@@ -1378,66 +1378,48 @@ async def assign_task_by_phone_tool(
     task_name: str,
     deadline: str
 ) -> str:
-    """
-    Assigns task using phone number instead of name.
-    Supports 10-digit and full formats.
-    """
+    
     try:
         team = load_team()
+        normalized_phone = normalize_phone(phone)
         
-        if len(phone) == 10 and not phone.startswith('91'):
-            phone = f"91{phone}"
-        
-        user = next((u for u in team if u['phone'] == phone), None)
+        user = next(
+            (
+                u for u in team
+                if normalize_phone(u.get("phone", "")) == normalized_phone
+            ),
+            None
+        )
+
         if not user:
             return f"Error: No employee found with phone number {phone}."
-        
-        return await assign_new_task_tool(ctx, user['name'], task_name, deadline)
-        
+
+        login_code = user["login_code"]
+
+        if users_collection is not None:
+            users_collection.update_one(
+                {"login_code": login_code},
+                {"$set": {
+                    "name": user["name"].lower(),
+                    "phone": normalized_phone,
+                    "login_code": login_code
+                }},
+                upsert=True
+            )
+            
+        return await assign_new_task_tool(
+            ctx,
+            user["name"],
+            task_name,
+            deadline
+        )
+
     except Exception as e:
-        logger.error(f"assign_task_by_phone_tool error: {str(e)}", exc_info=True)
+        logger.error(
+            f"assign_task_by_phone_tool error: {str(e)}",
+            exc_info=True
+        )
         return f"Error assigning task by phone: {str(e)}"
-
-
-EMPLOYEE_ALLOWED_STATUSES = {
-    "open": "Open",
-    "work in progress": "Work In Progress",
-    "wip": "Work In Progress",
-    "in progress": "Work In Progress",
-
-    # submission for approval
-    "close": "Close",
-    "done": "Close",
-    "completed": "Close",
-    "submit": "Close",
-    "submitted": "Close"
-
-}
-
-MANAGER_ALLOWED_STATUSES = {
-    # final approval
-    "close":"Closed",
-    "closed": "Closed",
-    "final close": "Closed",
-    "approve": "Closed",
-    "approved": "Closed",
-
-    # rejection
-    "reopen": "Reopened",
-    "reopened": "Reopened",
-    "reject": "Reopened"
-}
-
-def resolve_final_status(intent: str, relationship: str, role: str) -> Optional[str]:
-    if intent == "CLOSE_TASK":
-        if role == "manager":
-            return "Closed"
-        if relationship in ["REPORTER", "ASSIGNEE"]:
-            return "Close"
-
-    if intent == "REOPEN_TASK":
-        return "Reopened"
-    return None
 
 APPSAVY_STATUS_MAP = {
     "Open": "Open",
@@ -1537,6 +1519,13 @@ def should_send_whatsapp(text: str) -> bool:
     t = text.lower()
     return not any(k in t for k in block_keywords)
 
+def normalize_phone(phone: str) -> str:
+    digits = re.sub(r"\D", "", phone)
+    if len(digits) == 10:
+        return "91" + digits
+    if len(digits) == 12 and digits.startswith("91"):
+        return digits
+    return digits
 
 async def handle_message(command, sender, pid, message=None, full_message=None):
     if command and command.strip().lower() == "delete & add":
@@ -1549,8 +1538,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         return
 
     try:
-        if len(sender) == 10 and not sender.startswith('91'):
-            sender = f"91{sender}"
+        sender = normalize_phone(sender)
     
         is_media = False
         if message:
@@ -1569,7 +1557,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
     
         if sender == manager_phone:
             role = "manager"
-        elif any(u['phone'] == sender for u in team):
+        elif any(normalize_phone(u['phone']) == sender for u in team):
             role = "employee"
         else:
             role = None
@@ -1596,11 +1584,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                             task_name=command,
                             deadline=datetime.datetime.now().strftime("%Y-%m-%d")
                         )
-                    send_whatsapp_message(
-                           sender,
-                          f"Task successfully assigned to:\n" + "\n".join(assignees),
-                          pid
-                            )
                     return  
 
                 current_time = datetime.datetime.now()
@@ -1629,7 +1612,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                     )
                 )
 
-            
                 conversation_history[sender] = result.all_messages()
             
                 if len(conversation_history[sender]) > 10:
