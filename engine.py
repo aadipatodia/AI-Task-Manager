@@ -1041,14 +1041,7 @@ async def get_performance_report_tool(
 
     # REAL data source
     counts = await get_task_summary_from_tasks(user["login_code"])
-    output = (
-        f"Performance Summary:\n\n"
-        f"Assigned Tasks: {counts['ASSIGNED_TASK']}\n"
-        f"Open Tasks: {counts['OPEN_TASK']}\n"
-        f"Closed Tasks: {counts['CLOSED_TASK']}\n\n"
-    )
-
-    return output.strip()
+    return
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
     sender_mobile = ctx.deps.sender_phone[-10:]
@@ -1626,7 +1619,9 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
                     except Exception:
                         pass
-                if not should_send_whatsapp(output_text):
+                if should_send_whatsapp(output_text):
+                    send_whatsapp_message(sender, output_text, pid)
+                else:
                     logger.warning(f"WhatsApp suppressed message to {sender}: {output_text}")
             
             except Exception as e:
