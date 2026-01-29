@@ -720,6 +720,66 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
         logger.error(f"Exception calling API {key}: {str(e)}")
         return None
 
+async def forward_document_to_whatsapp(recipient_phone: str, document_data: dict, caption: str = ""):
+    """
+    Forwards the received WhatsApp media (image/document) to another WhatsApp number
+    """
+    try:
+        access_token = os.getenv("ACCESS_TOKEN")
+        if not access_token:
+            logger.error("Missing WhatsApp ACCESS_TOKEN")
+            return False
+
+        media_id = document_data.get("id")
+        if not media_id:
+            return False
+
+        # Step 1: Get media URL from WhatsApp Cloud API
+        headers = {"Authorization": f"Bearer {access_token}"}
+        media_resp = requests.get(
+            f"https://graph.facebook.com/v20.0/{media_id}/",
+            headers=headers
+        )
+        if media_resp.status_code != 200:
+            logger.error(f"Failed to get media URL: {media_resp.text}")
+            return False
+
+        download_url = media_resp.json().get("url")
+        mime_type = media_resp.json().get("mime_type", "application/octet-stream")
+
+        # Step 2: Download the actual file
+        file_resp = requests.get(download_url, headers=headers)
+        if file_resp.status_code != 200:
+            logger.error("Failed to download media")
+            return False
+
+        file_bytes = file_resp.content
+
+        # Step 3: Send to recipient via your send_whatsapp_document function
+        # (assuming it accepts bytes or file-like object)
+        filename = document_data.get("filename", f"attachment_{media_id}")
+        if "image" in mime_type:
+            success = send_whatsapp_document(
+                recipient_phone,
+                file_bytes,
+                filename=filename,
+                caption=caption,
+                mime_type=mime_type
+            )
+        else:
+            success = send_whatsapp_document(
+                recipient_phone,
+                file_bytes,
+                filename=filename,
+                caption=caption
+            )
+
+        return success
+
+    except Exception as e:
+        logger.error(f"Failed to forward document: {e}", exc_info=True)
+        return False
+
 def download_and_encode_document(document_data: Dict):
     """Downloads media from Meta and returns base64 string."""
     try:
@@ -1225,7 +1285,6 @@ def extract_remark(text: str, task_id: str):
 
     return t.capitalize() if t else ""
 
-
 async def assign_new_task_tool(
     ctx: RunContext[ManagerContext],
     name: str,
@@ -1312,7 +1371,6 @@ async def assign_new_task_tool(
                 "Please reply with the correct 10-digit phone number."
             )
 
-        # 3. SINGLE MATCH FOUND: Proceed with Assignment (SID 604)
         user = matches[0]
         login_code = user["login_code"]
 
@@ -1336,16 +1394,17 @@ async def assign_new_task_tool(
                     ))
 
         # 3. Prepare the CreateTaskRequest (SID 604)
-        assignee_mobile = user["phone"][-10:]
+        login_code = user["login_code"]
+
         req = CreateTaskRequest(
-            ASSIGNEE=assignee_mobile,   # ✅ FIX
+            ASSIGNEE=login_code,        
             DESCRIPTION=task_name,
             TASK_NAME=task_name,
             EXPECTED_END_DATE=to_appsavy_datetime(deadline),
             MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
             DETAILS=Details(
                 CHILD=[DetailChild(
-                    LOGIN=assignee_mobile,  # ✅ FIX
+                    LOGIN="",  
                     PARTICIPANTS=user["name"].upper()
                 )]
             ),
@@ -1472,15 +1531,35 @@ async def update_task_status_tool(
     if not appsavy_status:
         return f"Unsupported status '{status}'."
 
+        # Handle document attachment + forward to manager
+    document_data = getattr(getattr(ctx, "deps", None), "document_data", None)
+    base64_upload = {"VALUE": "", "BASE64": ""}
+
+    if document_data and document_data.get("id"):
+        media_info = document_data.get(document_data.get("type"), {})
+        if media_info:
+            logger.info(f"Processing document for task update {task_id}")
+
+            # A. Attach to Appsavy update
+            base64_data = download_and_encode_document(media_info)
+            if base64_data:
+                fname = media_info.get("filename") or f"update_{task_id}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+                base64_upload = {
+                    "VALUE": fname,
+                    "BASE64": base64_data
+                }
+
+            # B. Forward to manager
+            manager_phone = os.getenv("MANAGER_PHONE", "919871536210")  # ← your manager number
+            caption = f"Task {task_id} update by employee\nStatus: {status}\nRemark: {remark or 'No remark'}"
+            await forward_document_to_whatsapp(manager_phone, media_info, caption)
+            
     # ---- FINAL PAYLOAD (EXACT FORMAT) ----
     req = UpdateTaskRequest(
         TASK_ID=task_id,
-        STATUS=appsavy_status,               # internal code
+        STATUS=appsavy_status,
         COMMENTS=remark or "Terminal Test",
-        UPLOAD_DOCUMENT={
-            "VALUE": "",
-            "BASE64": ""
-        },
+        UPLOAD_DOCUMENT=base64_upload,   
         WHATSAPP_MOBILE_NUMBER=sender_mobile
     )
 
@@ -1612,7 +1691,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                         sender_phone=sender,
                         role=role,
                         current_time=current_time,
-                        document_data=message
+                        document_data=full_message if is_media else None
                     )
                 )
 
