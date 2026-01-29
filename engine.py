@@ -12,7 +12,6 @@ from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.gemini import GeminiModel
-from pydantic_ai.messages import ModelResponse, ModelRequest, TextPart, UserPromptPart
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -20,9 +19,9 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
 from send_message import send_whatsapp_message, send_whatsapp_document
-from google_auth_oauthlib.flow import Flow
 import asyncio
-from send_message import send_registration_template
+from collections import defaultdict
+pending_media: Dict[str, Dict] = defaultdict(dict)  # phone -> {'media': dict, 'timestamp': datetime}
 
 load_dotenv()
 
@@ -1536,6 +1535,7 @@ async def update_task_status_tool(
     base64_upload = {"VALUE": "", "BASE64": ""}
 
     if document_data and document_data.get("id"):
+        logger.info(f"Attaching & forwarding document ID {document_data['id']} for task {task_id}")
         media_info = document_data.get(document_data.get("type"), {})
         if media_info:
             logger.info(f"Processing document for task update {task_id}")
@@ -1553,7 +1553,8 @@ async def update_task_status_tool(
             manager_phone = os.getenv("MANAGER_PHONE", "919871536210")  # ← your manager number
             caption = f"Task {task_id} update by employee\nStatus: {status}\nRemark: {remark or 'No remark'}"
             await forward_document_to_whatsapp(manager_phone, media_info, caption)
-            
+    else:
+        logger.info(f"No document attached for task {task_id} update")
     # ---- FINAL PAYLOAD (EXACT FORMAT) ----
     req = UpdateTaskRequest(
         TASK_ID=task_id,
@@ -1622,13 +1623,12 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         is_media = False
         if message:
             is_media = any(k in message for k in ["document", "image", "video", "audio", "type"])
-    
+        
         if is_media and not command:
-            send_whatsapp_message(
-                sender,
-               "File received. Please provide the assignee name, task description, and deadline to complete the assignment.",
-                pid
-            )
+            pending_media[sender] = {
+                'media': full_message,  # or extract media part
+                'timestamp': datetime.datetime.now()
+            }
             return
     
         manager_phone = os.getenv("MANAGER_PHONE", "919871536210")
@@ -1684,16 +1684,19 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 current_agent.tool(send_whatsapp_report_tool)
                 current_agent.tool(add_user_tool)
                 current_agent.tool(delete_user_tool)
-            
-                result = await current_agent.run(
-                    command,
-                    deps=ManagerContext(
-                        sender_phone=sender,
-                        role=role,
-                        current_time=current_time,
-                        document_data=full_message if is_media else None
+
+                document_data = pending_media.get(sender, {}).get('media') if pending_media.get(sender) else (full_message if is_media else None)
+                if sender in pending_media and (datetime.datetime.now() - pending_media[sender]['timestamp']).seconds > 600:
+                    del pending_media[sender]
+                    result = await current_agent.run(
+                        command,
+                        deps=ManagerContext(
+                            sender_phone=sender,
+                            role=role,
+                            current_time=current_time,
+                            document_data=full_message if is_media else None
+                        )
                     )
-                )
 
                 conversation_history[sender] = result.all_messages()
             
