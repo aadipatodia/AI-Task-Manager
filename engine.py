@@ -344,16 +344,6 @@ Interpretation rules:
 - Do not calculate, derive, or modify counts.
 - Missing values must be treated as zero.
 
-### TASK LISTING:
-When user asks to see tasks, list tasks, pending work:
-- Use 'get_task_list_tool'
-- Without name → Show tasks for the requesting user
-- With name (managers only) → Show tasks for specified employee
-- Show the tasks exactly as returned by the API without applying additional sorting
-- IMPORTANT:
-When responding with task lists, return the tool output EXACTLY as-is.
-Do not summarize, rephrase, or omit any fields.
-
 ### TASK ASSIGNMENT BY PHONE:
 Support assignment using phone numbers:
 - Extract 10-digit number or full format
@@ -790,7 +780,7 @@ async def send_whatsapp_report_tool(
             REPORT_TYPE=report_type,
             STATUS=normalize_status_for_report(status),
             MOBILE_NUMBER=user["phone"][-10:],
-            ASSIGNED_BY="Assigned By Me",
+            ASSIGNED_BY="",
             REFERENCE="WHATSAPP"
         )
 
@@ -855,7 +845,6 @@ async def get_assignee_list_tool(ctx: RunContext[ManagerContext]) -> str:
         return f"Error fetching assignee list: {str(e)}"
 
 async def get_users_by_id_tool(ctx: RunContext[ManagerContext], id_value: str) -> str:
-
     try:
         if not (id_value.startswith('G-') or id_value.startswith('D-')):
             return "Error: ID must start with 'G-' (Group) or 'D-' (User). Example: G-10343-41 or D-3514-1001"
@@ -941,7 +930,7 @@ async def get_performance_count_via_627(
         REPORT_TYPE="Count",
         STATUS="",
         MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
-        ASSIGNED_BY="Assigned To Me",
+        ASSIGNED_BY="",
         REFERENCE="WHATSAPP"
     )
 
@@ -1054,15 +1043,15 @@ async def get_performance_report_tool(
     if not user:
         return f"User '{name}' not found."
 
-    # 🔹 Trigger SID 627 (Count) — no data expected
+    # Trigger SID 627 (Count) — no data expected
     await get_performance_count_via_627(ctx, user["login_code"])
 
-    # 🔹 REAL data source
+    # REAL data source
     counts = await get_task_summary_from_tasks(user["login_code"])
     pending_tasks = await get_pending_tasks(user["login_code"])
 
     output = (
-        f"Performance Summary for {user['name'].title()}:\n\n"
+        f"Performance Summary:\n\n"
         f"Assigned Tasks: {counts['ASSIGNED_TASK']}\n"
         f"Open Tasks: {counts['OPEN_TASK']}\n"
         f"Closed Tasks: {counts['CLOSED_TASK']}\n\n"
@@ -1095,8 +1084,12 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
                     "Control_Id": "106831",
                     "AC_ID": "110803",
                     "Parent": [
-                        {"Control_Id": "106825", "Value": login_code, "Data_Form_Id": ""},
-                        {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""}
+                        {"Control_Id": "106825", "Value": "", "Data_Form_Id": ""},
+                        {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
+                        {"Control_Id": "106827", "Value": login_code, "Data_Form_Id": ""},
+                        {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
+                        {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
+                        {"Control_Id": "107809", "Value": "", "Data_Form_Id": ""}
                     ]
                 }]
             )
