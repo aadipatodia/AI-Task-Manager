@@ -1530,37 +1530,15 @@ async def update_task_status_tool(
     if not appsavy_status:
         return f"Unsupported status '{status}'."
 
-        # Handle document attachment + forward to manager
-    document_data = getattr(getattr(ctx, "deps", None), "document_data", None)
-    base64_upload = {"VALUE": "", "BASE64": ""}
-
-    if document_data and document_data.get("id"):
-        logger.info(f"Attaching & forwarding document ID {document_data['id']} for task {task_id}")
-        media_info = document_data.get(document_data.get("type"), {})
-        if media_info:
-            logger.info(f"Processing document for task update {task_id}")
-
-            # A. Attach to Appsavy update
-            base64_data = download_and_encode_document(media_info)
-            if base64_data:
-                fname = media_info.get("filename") or f"update_{task_id}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-                base64_upload = {
-                    "VALUE": fname,
-                    "BASE64": base64_data
-                }
-
-            # B. Forward to manager
-            manager_phone = os.getenv("MANAGER_PHONE", "919871536210")  # ← your manager number
-            caption = f"Task {task_id} update by employee\nStatus: {status}\nRemark: {remark or 'No remark'}"
-            await forward_document_to_whatsapp(manager_phone, media_info, caption)
-    else:
-        logger.info(f"No document attached for task {task_id} update")
     # ---- FINAL PAYLOAD (EXACT FORMAT) ----
     req = UpdateTaskRequest(
         TASK_ID=task_id,
-        STATUS=appsavy_status,
+        STATUS=appsavy_status,               # internal code
         COMMENTS=remark or "Terminal Test",
-        UPLOAD_DOCUMENT=base64_upload,   
+        UPLOAD_DOCUMENT={
+            "VALUE": "",
+            "BASE64": ""
+        },
         WHATSAPP_MOBILE_NUMBER=sender_mobile
     )
 
