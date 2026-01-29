@@ -1626,9 +1626,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
                     except Exception:
                         pass
-                if should_send_whatsapp(output_text):
-                    send_whatsapp_message(sender, output_text, pid)
-                else:
+                if not should_send_whatsapp(output_text):
                     logger.warning(f"WhatsApp suppressed message to {sender}: {output_text}")
             
             except Exception as e:
