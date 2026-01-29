@@ -1086,12 +1086,13 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
                     "Control_Id": "106831",
                     "AC_ID": "110803",
                     "Parent": [
-                        {"Control_Id": "106825", "Value": login_code, "Data_Form_Id": ""},
-                        {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
-                        {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
-                        {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
-                        {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""},
-                        {"Control_Id": "146515", "Value": sender_mobile, "Data_Form_Id":""}
+                        {"Control_Id": "106825", "Value": "Open,Work In Progress,Close", "Data_Form_Id": ""},  # or leave empty or "Open"
+                        {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},           # from date
+                        {"Control_Id": "106827", "Value": login_code, "Data_Form_Id": ""},   # ← ensure this is correct D-... or whatever Appsavy uses
+                        {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},           # to date
+                        {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},           # assignment type
+                        {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""},          # button label / flag
+                        {"Control_Id": "146515", "Value": ctx.deps.sender_phone[-10:], "Data_Form_Id": ""}  # ← ADD THIS LINE – critical for WhatsApp context
                     ]
                 }]
             )
