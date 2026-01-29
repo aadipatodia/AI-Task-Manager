@@ -316,7 +316,6 @@ Performance reporting rules:
   - Send PDF on WhatsApp
 - When a specific employee is mentioned:
   - Use GET_COUNT (SID 616)
-  - Show text summary to the requester
   - Do NOT send WhatsApp to the employee
 
 Interpretation rules:
@@ -329,7 +328,6 @@ Interpretation rules:
 
 2. If the user mentions a specific employee name or login code:
 - Use SID 627 with REPORT_TYPE = "Count".
-- Show the count summary AND pending tasks in text format.
 - Do not generate or send a PDF.
 
 3. Do not infer PDF intent from keywords.
@@ -1607,8 +1605,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                             task_id = data["task_id"]
                             if status == "Close":
                                 output_text = (
-                                    f"Task {task_id} has been marked as completed "
-                                    "and sent for manager approval."
+                                    f"Task {task_id} has been closed successfully"
                                 )
                             elif status == "Closed":
                                 output_text = f"Task {task_id} has been closed successfully."
