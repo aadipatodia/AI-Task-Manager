@@ -12,6 +12,7 @@ from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.gemini import GeminiModel
+from pydantic_ai.messages import ModelResponse, ModelRequest, TextPart, UserPromptPart
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -19,9 +20,9 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
 from send_message import send_whatsapp_message, send_whatsapp_document
+from google_auth_oauthlib.flow import Flow
 import asyncio
-from collections import defaultdict
-pending_media: Dict[str, Dict] = defaultdict(dict)  # phone -> {'media': dict, 'timestamp': datetime}
+from send_message import send_registration_template
 
 load_dotenv()
 
@@ -590,7 +591,7 @@ async def delete_user_tool(
         # --- MongoDB se bhi hatane ka logic ---
         if users_collection is not None:
             # Phone number ke base par document delete karein
-            users_collection.delete_one({"phone": "+91" + mobile[-10:]})
+            users_collection.delete_one({"phone": "91" + mobile[-10:]})
             logger.info(f"User with mobile {mobile[-10:]} removed from MongoDB.")
 
         return "User deleted successfully from system and database."
@@ -718,66 +719,6 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
     except Exception as e:
         logger.error(f"Exception calling API {key}: {str(e)}")
         return None
-
-async def forward_document_to_whatsapp(recipient_phone: str, document_data: dict, caption: str = ""):
-    """
-    Forwards the received WhatsApp media (image/document) to another WhatsApp number
-    """
-    try:
-        access_token = os.getenv("ACCESS_TOKEN")
-        if not access_token:
-            logger.error("Missing WhatsApp ACCESS_TOKEN")
-            return False
-
-        media_id = document_data.get("id")
-        if not media_id:
-            return False
-
-        # Step 1: Get media URL from WhatsApp Cloud API
-        headers = {"Authorization": f"Bearer {access_token}"}
-        media_resp = requests.get(
-            f"https://graph.facebook.com/v20.0/{media_id}/",
-            headers=headers
-        )
-        if media_resp.status_code != 200:
-            logger.error(f"Failed to get media URL: {media_resp.text}")
-            return False
-
-        download_url = media_resp.json().get("url")
-        mime_type = media_resp.json().get("mime_type", "application/octet-stream")
-
-        # Step 2: Download the actual file
-        file_resp = requests.get(download_url, headers=headers)
-        if file_resp.status_code != 200:
-            logger.error("Failed to download media")
-            return False
-
-        file_bytes = file_resp.content
-
-        # Step 3: Send to recipient via your send_whatsapp_document function
-        # (assuming it accepts bytes or file-like object)
-        filename = document_data.get("filename", f"attachment_{media_id}")
-        if "image" in mime_type:
-            success = send_whatsapp_document(
-                recipient_phone,
-                file_bytes,
-                filename=filename,
-                caption=caption,
-                mime_type=mime_type
-            )
-        else:
-            success = send_whatsapp_document(
-                recipient_phone,
-                file_bytes,
-                filename=filename,
-                caption=caption
-            )
-
-        return success
-
-    except Exception as e:
-        logger.error(f"Failed to forward document: {e}", exc_info=True)
-        return False
 
 def download_and_encode_document(document_data: Dict):
     """Downloads media from Meta and returns base64 string."""
@@ -1284,6 +1225,7 @@ def extract_remark(text: str, task_id: str):
 
     return t.capitalize() if t else ""
 
+
 async def assign_new_task_tool(
     ctx: RunContext[ManagerContext],
     name: str,
@@ -1370,6 +1312,7 @@ async def assign_new_task_tool(
                 "Please reply with the correct 10-digit phone number."
             )
 
+        # 3. SINGLE MATCH FOUND: Proceed with Assignment (SID 604)
         user = matches[0]
         login_code = user["login_code"]
 
@@ -1393,17 +1336,16 @@ async def assign_new_task_tool(
                     ))
 
         # 3. Prepare the CreateTaskRequest (SID 604)
-        login_code = user["login_code"]
-
+        assignee_mobile = user["phone"][-10:]
         req = CreateTaskRequest(
-            ASSIGNEE=login_code,        
+            ASSIGNEE=login_code,   
             DESCRIPTION=task_name,
             TASK_NAME=task_name,
             EXPECTED_END_DATE=to_appsavy_datetime(deadline),
             MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
             DETAILS=Details(
                 CHILD=[DetailChild(
-                    LOGIN="",  
+                    LOGIN=" ",  
                     PARTICIPANTS=user["name"].upper()
                 )]
             ),
@@ -1601,12 +1543,13 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         is_media = False
         if message:
             is_media = any(k in message for k in ["document", "image", "video", "audio", "type"])
-        
+    
         if is_media and not command:
-            pending_media[sender] = {
-                'media': full_message,  # or extract media part
-                'timestamp': datetime.datetime.now()
-            }
+            send_whatsapp_message(
+                sender,
+               "File received. Please provide the assignee name, task description, and deadline to complete the assignment.",
+                pid
+            )
             return
     
         manager_phone = os.getenv("MANAGER_PHONE", "919871536210")
@@ -1662,19 +1605,16 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 current_agent.tool(send_whatsapp_report_tool)
                 current_agent.tool(add_user_tool)
                 current_agent.tool(delete_user_tool)
-
-                document_data = pending_media.get(sender, {}).get('media') if pending_media.get(sender) else (full_message if is_media else None)
-                if sender in pending_media and (datetime.datetime.now() - pending_media[sender]['timestamp']).seconds > 600:
-                    del pending_media[sender]
-                    result = await current_agent.run(
-                        command,
-                        deps=ManagerContext(
-                            sender_phone=sender,
-                            role=role,
-                            current_time=current_time,
-                            document_data=full_message if is_media else None
-                        )
+            
+                result = await current_agent.run(
+                    command,
+                    deps=ManagerContext(
+                        sender_phone=sender,
+                        role=role,
+                        current_time=current_time,
+                        document_data=message
                     )
+                )
 
                 conversation_history[sender] = result.all_messages()
             
@@ -1703,7 +1643,9 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
                     except Exception:
                         pass
-                if not should_send_whatsapp(output_text):
+                if should_send_whatsapp(output_text):
+                    send_whatsapp_message(sender, output_text, pid)
+                else:
                     logger.warning(f"WhatsApp suppressed message to {sender}: {output_text}")
             
             except Exception as e:
