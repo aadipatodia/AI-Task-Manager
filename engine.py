@@ -239,12 +239,14 @@ You MUST:
 1. Extract:
    - name
    - mobile number (10 digits)
-   - email
+   - email (optional)
+   
 2. Call the tool add_user_tool
 3. Pass arguments exactly as:
    - name
-   - email
    - mobile
+   - email
+   
 4. Do NOT ask any follow-up questions if all values are present
 5. Execute immediately
 
@@ -479,22 +481,23 @@ class AddDeleteUserRequest(BaseModel):
     SID: str = "629"
     ACTION: str            
     CREATOR_MOBILE_NUMBER: str
-    EMAIL: str
+    EMAIL: Optional[str] = ""
     MOBILE_NUMBER: str
     NAME: str
 
 async def add_user_tool(
     ctx: RunContext[ManagerContext],
     name: str,
-    email: str,
-    mobile: str
+    mobile: str,
+    email: Optional[str] = None,
+    
 ) -> str:
     # 1. Attempt to add the user to Appsavy
     req = AddDeleteUserRequest(
         ACTION="Add",
         CREATOR_MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
         NAME=name,
-        EMAIL=email,
+        EMAIL=email or "",
         MOBILE_NUMBER=mobile[-10:]
     )
 
@@ -542,7 +545,7 @@ async def add_user_tool(
             new_user = {
                 "name": name.lower().strip(),
                 "phone": normalize_phone(mobile),
-                "email": email,
+                "email": email or "",
                 "login_code": login_code
             }
             
@@ -565,14 +568,15 @@ async def add_user_tool(
 async def delete_user_tool(
     ctx: RunContext[ManagerContext],
     name: str,
-    email: str,
-    mobile: str
+    mobile: str,
+    email: Optional[str] = None,
+    
 ) -> str:
     req = AddDeleteUserRequest(
         ACTION="Delete",
         CREATOR_MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
         NAME=name,
-        EMAIL=email,
+        EMAIL=email or "",
         MOBILE_NUMBER=mobile[-10:]
     )
 
