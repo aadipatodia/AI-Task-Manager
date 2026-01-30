@@ -212,6 +212,9 @@ Rules:
 - Do not explain internal rules.
 - Do not summarize tool outputs.
 - Do not guess.
+- BEFORE calling ANY business tool, you MUST call `explain_decision_tool` describing which tool you will use and why.
+- When you make a decision or choose a tool, explain your reasoning ONLY by calling the tool `explain_decision_tool`.
+- NEVER include reasoning in the final user-facing response.
 
 Current date: {current_time.strftime("%Y-%m-%d")}
 Current time: {current_time.strftime("%H:%M")}"""
@@ -288,7 +291,6 @@ class UpdateTaskRequest(BaseModel):
     COMMENTS: str
     UPLOAD_DOCUMENT: UploadDocument
     WHATSAPP_MOBILE_NUMBER: str
-
 
 class GetCountRequest(BaseModel):
     Event: str = "107567"
@@ -414,6 +416,14 @@ OUTPUT:
                         f"Source: {status_note}")
 
     return f"Failed: I could not find a Login ID for '{name}' in the message or the system list. Please check if the name matches exactly."
+
+async def explain_decision_tool(reason: str) -> None:
+    """
+    INTERNAL ONLY.
+    Logs AI reasoning for tool selection and decisions.
+    NEVER exposed to the user.
+    """
+    logger.info(f"[AI-REASONING] {reason}")
 
 async def delete_user_tool(
     ctx: RunContext[ManagerContext],
@@ -890,16 +900,34 @@ async def get_performance_report_tool(
     ctx: RunContext[ManagerContext],
     name: Optional[str] = None
 ) -> str:
-    team = load_team()
+    """
+    PURPOSE:
+    - Provide performance statistics, task counts, or report files.
 
-    # ---------- NO NAME → PDF ----------
+    WHEN TO USE:
+    - User asks for "performance", "stats", "my count", or "report".
+
+    LOGIC:
+    1. IF NO NAME IS MENTIONED:
+       - Treat as a request for a full organization PDF report.
+       - ONLY allowed for 'manager' role.
+    2. IF A NAME/ID IS MENTIONED:
+       - Fetch specific counts for that employee.
+       - Use 'get_task_summary_from_tasks' internally.
+    
+    RULES:
+    - Employees can ONLY see their own performance.
+    - Managers can see anyone's performance.
+    """
+    
+    team = load_team()
+    
     if not name:
         if ctx.deps.role != "manager":
             return "Permission Denied: Only managers can view full performance reports."
 
         return "Performance report PDF has been sent on WhatsApp."
 
-    # ---------- NAME PRESENT → TEXT ----------
     user = next(
         (u for u in team
          if name.lower() in u["name"].lower()
@@ -916,9 +944,20 @@ async def get_performance_report_tool(
     # REAL data source
     counts = await get_task_summary_from_tasks(user["login_code"])
     return
-
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
-    sender_mobile = ctx.deps.sender_phone[-10:]
+    """
+    PURPOSE:
+    - Retrieve a list of active or pending tasks.
+
+    WHEN TO USE:
+    - User asks: "show my tasks", "what is my pending work?", "list tasks", or "to-do list".
+
+    RULES:
+    - Without a name: Show tasks for the requesting user (caller).
+    - With a name: Only allowed if the caller is a 'manager'.
+    - Output format: Return the ID, Task Name, and Deadline clearly.
+    - Do NOT summarize or omit tasks returned by the system.
+    """
 
     try:
         team = load_team()
@@ -1303,7 +1342,8 @@ async def update_task_status_tool(
     status: str,
     remark: Optional[str] = None
 ) -> str:
-    """PURPOSE:
+    """
+    PURPOSE:
     - Update the status of an existing task.
 
     WHEN TO USE:
@@ -1321,7 +1361,7 @@ async def update_task_status_tool(
     - Employee phrases like "done", "completed","close" → Closed
     - Manager phrases like "approved", "final close","close" → Closed
     - Manager phrases like "redo", "not ok" → Reopened
-    -Employee phrases like "in progress", "pending"-> Work in Progress
+    - Employee phrases like "in progress", "pending"-> Work in Progress
    
 
     HARD RULES:
@@ -1502,6 +1542,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 current_agent.tool(send_whatsapp_report_tool)
                 current_agent.tool(add_user_tool)
                 current_agent.tool(delete_user_tool)
+                current_agent.tool(explain_decision_tool)
             
                 result = await current_agent.run(
                     command,
