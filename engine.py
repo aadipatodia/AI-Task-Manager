@@ -40,6 +40,7 @@ client = MongoClient(MONGO_URI, tlsCAFile=certifi.where()) if MONGO_URI else Non
 db = client['ai_task_manager'] if client is not None else None
 users_collection = db['users'] if db is not None else None
 conversation_history: Dict[str, List[Any]] = {}
+last_document_by_sender: Dict[str, Dict] = {}
 
 APPSAVY_BASE_URL = "https://configapps.appsavy.com/api/AppsavyRestService"
 
@@ -217,7 +218,8 @@ Rules:
 - NEVER include reasoning in the final user-facing response.
 
 Current date: {current_time.strftime("%Y-%m-%d")}
-Current time: {current_time.strftime("%H:%M")}"""
+Current time: {current_time.strftime("%H:%M")}
+"""
 
 def load_team():
     """This function is 100% dynamic and will fetch users from MongoDB."""
@@ -289,7 +291,8 @@ class UpdateTaskRequest(BaseModel):
     TASK_ID: str
     STATUS: str
     COMMENTS: str
-    UPLOAD_DOCUMENT: UploadDocument
+    UPLOAD_DOCUMENT: str = ""   # filename
+    BASE64: str = ""            # base64 string
     WHATSAPP_MOBILE_NUMBER: str
 
 class GetCountRequest(BaseModel):
@@ -1271,6 +1274,7 @@ OUTPUT:
             
             # Check for success (RESULT 1)
             if str(api_response.get('result')) == "1" or str(api_response.get('RESULT')) == "1":
+                last_document_by_sender.pop(ctx.deps.sender_phone, None)
                 return f"Task successfully assigned to {user['name'].title()} (ID: {login_code})."
 
         return f"API Error: {api_response.get('resultmessage', 'Unexpected response format')}"
@@ -1409,21 +1413,43 @@ async def update_task_status_tool(
     if not appsavy_status:
         return f"Unsupported status '{status}'."
 
-    # ---- FINAL PAYLOAD (EXACT FORMAT) ----
+    # ---- DOCUMENT HANDLING (WHATSAPP ATTACHMENT) ----
+    filename = ""
+    base64_data = ""
+
+    if ctx.deps.document_data:
+        media_type = ctx.deps.document_data.get("type")
+        media_info = ctx.deps.document_data.get(media_type)
+
+        if media_info:
+            logger.info(f"Downloading document for task update: {media_type}")
+            base64_data = download_and_encode_document(media_info)
+            mime = media_info.get("mime_type", "")
+            if not media_info.get("filename"):
+                if "pdf" in mime:
+                    filename = "attachment.pdf"
+                elif "image" in mime:
+                    filename = "image.jpg"
+                elif "audio" in mime:
+                    filename = "audio.mp3"
+                else:
+                    filename = "attachment.bin"
+            else:
+                filename = media_info["filename"]
+
     req = UpdateTaskRequest(
         TASK_ID=task_id,
-        STATUS=appsavy_status,               # internal code
-        COMMENTS=remark or "Terminal Test",
-        UPLOAD_DOCUMENT={
-            "VALUE": "",
-            "BASE64": ""
-        },
+        STATUS=appsavy_status,
+        COMMENTS=remark or "Updated via WhatsApp",
+        UPLOAD_DOCUMENT=filename,
+        BASE64=base64_data,
         WHATSAPP_MOBILE_NUMBER=sender_mobile
     )
 
     api_response = await call_appsavy_api("UPDATE_STATUS", req)
 
     if api_response and str(api_response.get("RESULT")) == "1":
+        last_document_by_sender.pop(ctx.deps.sender_phone, None)
         if status == "Close":
             return f"Task {task_id} closed"
         if status == "Closed":
@@ -1480,6 +1506,9 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         is_media = False
         if message:
             is_media = any(k in message for k in ["document", "image", "video", "audio", "type"])
+            
+        if is_media:
+            last_document_by_sender[sender] = message
     
         if is_media and not command:
             send_whatsapp_message(
@@ -1550,7 +1579,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                         sender_phone=sender,
                         role=role,
                         current_time=current_time,
-                        document_data=message
+                        document_data=last_document_by_sender.get(sender)
                     )
                 )
 
