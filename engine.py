@@ -4,6 +4,7 @@ import certifi
 import json
 from pydantic import RootModel
 import datetime
+from pymongo import ReturnDocument
 import base64
 import requests
 import logging
@@ -809,7 +810,6 @@ async def get_performance_count_via_627(
     It does NOT return counts.
     This function only triggers the report and returns an empty dict.
     """
-
     req = WhatsAppPdfReportRequest(
         ASSIGNED_TO=login_code,
         REPORT_TYPE="Count",
@@ -945,6 +945,7 @@ async def get_performance_report_tool(
     # REAL data source
     counts = await get_task_summary_from_tasks(user["login_code"])
     return
+
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
     """
     PURPOSE:
@@ -1095,7 +1096,6 @@ def resolve_status(text: str, role: str):
 
     return None
 
-
 def extract_remark(text: str, task_id: str):
     t = text.lower()
 
@@ -1142,7 +1142,6 @@ RULES:
 - If multiple matches → ask clarification.
 - If document exists → attach automatically.
 - NEVER assign without a deadline.
-
 
 OUTPUT:
 - Single confirmation or single error message
@@ -1246,8 +1245,6 @@ OUTPUT:
                         DOCUMENT_NAME=fname
                     ))
 
-        # 3. Prepare the CreateTaskRequest (SID 604)
-        assignee_mobile = user["phone"][-10:]
         req = CreateTaskRequest(
             ASSIGNEE=login_code,   
             DESCRIPTION=task_name,
@@ -1365,7 +1362,6 @@ async def update_task_status_tool(
     - Manager phrases like "redo", "not ok" → Reopened
     - Employee phrases like "in progress", "pending"-> Work in Progress
    
-
     HARD RULES:
     - NEVER ask questions.
     - NEVER invent task IDs.
@@ -1404,7 +1400,7 @@ async def update_task_status_tool(
 
     # ---- Role guard ----
     if ctx.deps.role == "employee" and status == "Closed":
-        return "Final closure requires manager approval."
+        return 
 
     # ---- STATUS MAPPING ----
     appsavy_status = APPSAVY_STATUS_MAP.get(status)
