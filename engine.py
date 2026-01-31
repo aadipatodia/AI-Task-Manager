@@ -193,9 +193,6 @@ class PerformanceCountResult(BaseModel):
 def get_system_prompt(current_time: datetime.datetime) -> str:
     team = load_team()
     team_description = "\n".join([f"- {u['name']} (Login: {u['login_code']})" for u in team])
-    current_date_str = current_time.strftime("%Y-%m-%d")
-    current_time_str = current_time.strftime("%I:%M %p")
-    day_of_week = current_time.strftime("%A")
     
     return f"""
 You are the Official AI Task Manager Bot.
@@ -219,6 +216,7 @@ Rules:
 
 Current date: {current_time.strftime("%Y-%m-%d")}
 Current time: {current_time.strftime("%H:%M")}
+day_of_week = current_time.strftime("%A")
 """
 
 def load_team():
