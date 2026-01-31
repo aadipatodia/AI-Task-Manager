@@ -164,7 +164,7 @@ API_CONFIGS = {
     }
 }
 
-ai_model = GeminiModel('gemini-2.5-pro')
+ai_model = GeminiModel('gemini-2.5-flash-lite')
 
 class ManagerContext(BaseModel):
     sender_phone: str
