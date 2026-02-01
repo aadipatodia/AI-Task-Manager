@@ -3,25 +3,23 @@ from pymongo import MongoClient
 import certifi
 import json
 from pydantic import RootModel
+from pydantic_ai.messages import UserPromptPart
 import datetime
-from pymongo import ReturnDocument
 import base64
 import requests
 import logging
 import re
-from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field
+from typing import List, Optional, Dict
+from pydantic import BaseModel
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.gemini import GeminiModel
-from pydantic_ai.messages import ModelResponse, ModelRequest, TextPart, UserPromptPart
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
-from send_message import send_whatsapp_message, send_whatsapp_document
-from google_auth_oauthlib.flow import Flow
+from send_message import send_whatsapp_message
 import asyncio
 import pytz
 IST = pytz.timezone("Asia/Kolkata")
@@ -34,7 +32,7 @@ logger = logging.getLogger(__name__)
 SCOPES = ['https://www.googleapis.com/auth/gmail.send']
 
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-1-ugb8.onrender.com/oauth2callback")
-MANAGER_EMAIL = "ankita.mishra@mobineers.com"
+MANAGER_EMAIL = "aadi@mobineers.com"
 
 # Initialize MongoDB Connection
 MONGO_URI = os.getenv("MONGO_URI")
@@ -214,6 +212,12 @@ Rules:
 - Do not summarize tool outputs.
 - Do not guess.
 - NEVER include reasoning in the final user-facing response.
+
+CRITICAL TASK ASSIGNMENT FLOW:
+- When assigning a task, NEVER finalize it in the first response.
+- First, restate assignee, task, and deadline and ask for confirmation.
+- After the user replies (agreement or correction), proceed with assignment.
+- Treat agreement contextually; do NOT rely on specific words.
 
 Current date: {current_time.strftime("%Y-%m-%d")}
 Current time: {current_time.strftime("%H:%M")}
@@ -416,8 +420,8 @@ OUTPUT:
                 logger.info(f"Successfully synced {name} to MongoDB with ID {login_code}")
                 
                 type_str = "Created" if is_success else "Synced"
-                return "ok"
-    return "ok"
+                return "OK"
+    return "failed"
 
 async def explain_decision_tool(
     ctx: RunContext[ManagerContext],
@@ -487,7 +491,7 @@ OUTPUT:
 
         return "User deleted successfully from system and database."
     
-    return "ok"
+    return "OK"
 
 def get_gmail_service():
     try:
@@ -529,32 +533,6 @@ def to_appsavy_datetime(iso_dt: str) -> str:
         dt = IST.localize(dt)
     return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
-
-def send_email(to_email: str, subject: str, body: str) -> bool:
-    """Send email via Gmail API."""
-    try:
-        service = get_gmail_service()
-        if not service:
-            logger.warning("Gmail service unavailable, skipping email")
-            return False
-        
-        message = MIMEMultipart()
-        message['to'] = to_email
-        message['subject'] = subject
-        message.attach(MIMEText(body, 'plain'))
-        
-        raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
-        send_message = service.users().messages().send(
-            userId='me',
-            body={'raw': raw_message}
-        ).execute()
-        
-        logger.info(f"Email sent successfully to {to_email}")
-        return True
-    except Exception as e:
-        logger.error(f"Email sending failed: {str(e)}")
-        return False
-
 def normalize_tasks_response(tasks_data):
     """Normalize Appsavy GET_TASKS response to always return a list"""
     if not isinstance(tasks_data, dict):
@@ -566,17 +544,6 @@ def normalize_tasks_response(tasks_data):
         return []
 
     return data.get("Result", [])
-
-def normalize_task(task: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize Appsavy task object to internal standard keys"""
-    return {
-        "task_id": task.get("TID"),
-        "task_name": task.get("COMMENTS"),
-        "assigned_by": task.get("REPORTER"),
-        "assign_date": task.get("ASSIGN_DATE"),
-        "status": task.get("STS"),
-        "task_type": task.get("TASK_TYPE")
-    }
 
 def is_authorized(task_owner) -> bool:
     try:
@@ -676,7 +643,6 @@ async def send_whatsapp_report_tool(
             REFERENCE="WHATSAPP"
         )
 
-
         api_response = await call_appsavy_api("WHATSAPP_PDF_REPORT", req)
 
         if not api_response:
@@ -685,11 +651,7 @@ async def send_whatsapp_report_tool(
         if isinstance(api_response, dict) and api_response.get("error"):
             return f"API Error: {api_response['error']}"
 
-        return (
-            f"WhatsApp PDF report sent successfully.\n"
-            f"Report Type: {report_type}\n"
-            f"Status: {status}"
-        )
+        return "OK"
 
     except Exception as e:
         logger.error("send_whatsapp_report_tool error", exc_info=True)
@@ -932,8 +894,19 @@ async def get_performance_report_tool(
     if not name:
         if ctx.deps.role != "manager":
             return "Permission Denied: Only managers can view full performance reports."
+        
+        await call_appsavy_api(
+            "WHATSAPP_PDF_REPORT",
+            WhatsAppPdfReportRequest(
+                ASSIGNED_TO="",
+                REPORT_TYPE="Detail",
+                STATUS="",
+                MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
+                REFERENCE="WHATSAPP"
+            )
+        )
 
-        return "Performance report PDF has been sent on WhatsApp."
+        return "OK"
 
     user = next(
         (u for u in team
@@ -1074,34 +1047,6 @@ def extract_task_id(text: str):
     match = re.search(r"\btask\s*(\d+)\b", text.lower())
     return match.group(1) if match else None
 
-
-def resolve_status(text: str, role: str):
-    t = text.lower()
-
-    # Future / pending → Work In Progress
-    if any(x in t for x in [
-        "pending",
-        "in progress",
-        "working",
-        "will be completed",
-        "by "
-    ]):
-        return "Work In Progress"
-
-    # Done / completed → Close or Closed
-    if any(x in t for x in [
-        "done",
-        "completed",
-        "finished"
-    ]):
-        return "Closed" if role == "manager" else "Close"
-
-    # Reopen
-    if "reopen" in t:
-        return "Reopened"
-
-    return None
-
 def extract_remark(text: str, task_id: str):
     t = text.lower()
 
@@ -1148,6 +1093,17 @@ RULES:
 - If multiple matches → ask clarification.
 - If document exists → attach automatically.
 - NEVER assign without a deadline.
+- BEFORE FINAL ALLOTMENT OF THE TASK ALWAYS CONFIRM FROM THE USER 
+
+CRITICAL TASK ASSIGNMENT RULE:
+- Before calling assign_new_task_tool, you MUST explicitly confirm:
+  1. Assignee
+  2. Task description
+  3. Deadline
+- If confirmation has NOT been explicitly given by the user,
+  DO NOT finalize task assignment.
+- In that case, ask the user to confirm the details instead of assigning.
+
 
 OUTPUT:
 - Single confirmation or single error message
@@ -1156,7 +1112,17 @@ OUTPUT:
         # 1. MERGE SOURCES: Fetch candidates from BOTH MongoDB and Appsavy (SID 606)
         team = load_team()
         mongo_matches = [u for u in team if name.lower() in u["name"].lower() or name.lower() == u["login_code"].lower()]
-
+        
+        last_messages = conversation_history.get(ctx.deps.sender_phone, [])
+        if len(last_messages) < 2:
+            return (
+                "Please confirm the task details before I proceed:\n\n"
+                f"Assignee: {name}\n"
+                f"Task: {task_name}\n"
+                f"Deadline: {deadline}\n\n"
+                "Reply with CONFIRM to proceed, or reply with corrections."
+            )
+            
         assignee_res = await call_appsavy_api("GET_ASSIGNEE", GetAssigneeRequest(
             Event="0", 
             Child=[{"Control_Id": "106771", "AC_ID": "111057"}]
@@ -1336,7 +1302,7 @@ async def assign_task_by_phone_tool(
 APPSAVY_STATUS_MAP = {
     "Open": "Open",
     "Work In Progress": "Work In Progress",
-    "Close": "CLosed",
+    "Close": "Closed",
     "Closed": "Closed",
     "Reopened": "Reopen"
 }
@@ -1520,24 +1486,20 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         if command:
             conversation_history[sender].append(command)
-            conversation_history[sender] = conversation_history[sender][-10:]
+            conversation_history[sender] = conversation_history[sender][-5:]
 
         # ---- Multi-assignee fast path ----
         if command:
             assignees = extract_multiple_assignees(command, team)
             if len(assignees) > 1:
-                for name in assignees:
-                    await assign_new_task_tool(
-                        ctx=ManagerContext(
-                            sender_phone=sender,
-                            role=role,
-                            current_time=datetime.datetime.now(IST)
-                        ),
-                        name=name,
-                        task_name=command,
-                        deadline=datetime.datetime.now(IST).strftime("%Y-%m-%d")
-                    )
-                return
+                send_whatsapp_message(
+                    sender,
+                    "I found multiple assignees. Please confirm:\n\n"
+                    + "\n".join(assignees)
+                    + "\n\nAlso confirm the task details and deadline.",
+                    pid
+                )
+            return
 
         # ---- Agent setup ----
         current_time = datetime.datetime.now(IST)
@@ -1562,8 +1524,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         agent.tool(delete_user_tool)
         agent.tool(explain_decision_tool)
 
-        # ---- Build context window for agent ----
-        from pydantic_ai.messages import UserPromptPart
+        # ---- Build context window for agent ---
 
         history_parts = [
             UserPromptPart(content=msg)
