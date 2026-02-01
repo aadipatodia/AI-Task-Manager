@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from send_message import send_whatsapp_message
 import asyncio
 import pytz
+from pydantic_ai.messages import UserPromptPart
 IST = pytz.timezone("Asia/Kolkata")
 
 #918683005252
@@ -1569,12 +1570,15 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         # Inject recent conversation (user + assistant)
         for turn in conversation_history.get(sender, []):
-            messages.append(turn["content"])
+            if turn["role"] == "user":
+                messages.append(UserPromptPart(text=turn["content"]))
 
         # Inject pending task state (single source of truth)
         pending = pending_task_by_sender.get(sender)
         if pending:
             messages.append(
+                UserPromptPart(
+                text=
                 "System context:\n"
                 "There is a task awaiting confirmation.\n"
                 f"Assignee: {pending['name']}\n"
@@ -1583,12 +1587,18 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 "If the user agrees → finalize.\n"
                 "If the user rejects → cancel.\n"
                 "If the user modifies → update details."
+                )
             )
 
         # Inject resolved relative deadline (if any)
         relative_deadline = parse_relative_deadline(command, current_time)
         if relative_deadline:
-            messages.append(f"System note: Deadline resolved as {relative_deadline}")
+            messages.append(
+                UserPromptPart(text=f"System note: Deadline resolved as {relative_deadline}")
+            )
+
+        if command:
+            messages.append(UserPromptPart(text=command))
 
         # ---- Run agent ----
         try:
