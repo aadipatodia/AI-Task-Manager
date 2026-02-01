@@ -1248,6 +1248,23 @@ OUTPUT:
         logger.error(f"assign_new_task_tool error: {str(e)}", exc_info=True)
         return f"System Error: Unable to assign task ({str(e)})"
 
+def parse_relative_deadline(text: str, now: datetime.datetime) -> Optional[str]:
+    text = text.lower()
+
+    match = re.search(r"in\s+(\d+)\s*(hour|hours|hr|hrs)", text)
+    if match:
+        hours = int(match.group(1))
+        dt = now + datetime.timedelta(hours=hours)
+        return dt.isoformat()
+
+    match = re.search(r"in\s+(\d+)\s*(minute|minutes|min|mins)", text)
+    if match:
+        mins = int(match.group(1))
+        dt = now + datetime.timedelta(minutes=mins)
+        return dt.isoformat()
+
+    return None
+
 async def assign_task_by_phone_tool(
     ctx: RunContext[ManagerContext],
     phone: str,
@@ -1478,7 +1495,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
             return
 
-        # ---- Conversation memory (LAST 10 USER MESSAGES) ----
+        # ---- Conversation memory ----
         if sender not in conversation_history:
             conversation_history[sender] = []
 
@@ -1522,19 +1539,35 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         agent.tool(delete_user_tool)
         agent.tool(explain_decision_tool)
 
-        # ---- Build context window for agent ---
-
+        # ---- Build context window (SAFE + DETERMINISTIC) ----
         messages = conversation_history[sender][:-1] + [command]
-        result = await agent.run(
-            messages,
-            deps=ManagerContext(
-                sender_phone=sender,
-                role=role,
-                current_time=current_time,
-                document_data=last_document_by_sender.get(sender)
+
+        relative_deadline = parse_relative_deadline(command, current_time)
+        if relative_deadline:
+            messages.append(
+                f"System note: Deadline resolved as {relative_deadline}"
             )
-        )
-        
+
+        # ---- Run agent (guard against Gemini empty output) ----
+        try:
+            result = await agent.run(
+                messages,
+                deps=ManagerContext(
+                    sender_phone=sender,
+                    role=role,
+                    current_time=current_time,
+                    document_data=last_document_by_sender.get(sender)
+                )
+            )
+        except Exception as e:
+            logger.error("Agent execution failed", exc_info=True)
+            send_whatsapp_message(
+                sender,
+                "I couldn’t process that request. Please rephrase or try again.",
+                pid
+            )
+            return
+
         output_text = (result.output or "").strip()
         if not output_text:
             output_text = (
@@ -1542,26 +1575,13 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 "Please clarify what you want me to do."
             )
 
-
-        # ---- DECIDE WHATSAPP OWNERSHIP BASED ON TOOL CALLS ----
-        called_tools = []
-        for msg in result.all_messages():
-            if hasattr(msg, "tool_name") and msg.tool_name:
-                called_tools.append(msg.tool_name)
-
-        called_tools = list(set(called_tools))  # dedupe
-        
-        send_whatsapp = True
-
-        if send_whatsapp:
-            send_whatsapp_message(sender, output_text, pid)
-        else:
-            logger.info(
-                f"[WHATSAPP-SUPPRESSED] "
-                f"user={sender} "
-                f"tools_called={called_tools}"
-            )
+        # ---- Send WhatsApp response ----
+        send_whatsapp_message(sender, output_text, pid)
 
     except Exception as e:
         logger.error(f"handle_message error: {str(e)}", exc_info=True)
-        logger.error("System error occurred while processing message", exc_info=True)
+        send_whatsapp_message(
+            sender,
+            "A system error occurred. Please try again shortly.",
+            pid
+        )
