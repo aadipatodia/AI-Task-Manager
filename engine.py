@@ -163,7 +163,7 @@ API_CONFIGS = {
     }
 }
 
-ai_model = GeminiModel('gemini-2.5-pro')
+ai_model = GeminiModel('gemini-2.5-flash-lite')
 
 class ManagerContext(BaseModel):
     sender_phone: str
@@ -1530,7 +1530,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
             return
     
-        manager_phone = os.getenv("MANAGER_PHONE", "919871536210")
+        manager_phone = os.getenv("MANAGER_PHONE")
         team = load_team()
     
         if sender == manager_phone:
