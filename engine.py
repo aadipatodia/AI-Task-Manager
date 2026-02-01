@@ -420,7 +420,7 @@ OUTPUT:
                 logger.info(f"Successfully synced {name} to MongoDB with ID {login_code}")
                 
                 type_str = "Created" if is_success else "Synced"
-                return ""
+                return 
     return "failed"
 
 async def explain_decision_tool(
@@ -491,7 +491,7 @@ OUTPUT:
 
         return "User deleted successfully from system and database."
     
-    return ""
+    return 
 
 def get_gmail_service():
     try:
@@ -651,7 +651,7 @@ async def send_whatsapp_report_tool(
         if isinstance(api_response, dict) and api_response.get("error"):
             return f"API Error: {api_response['error']}"
 
-        return ""
+        return
 
     except Exception as e:
         logger.error("send_whatsapp_report_tool error", exc_info=True)
@@ -906,7 +906,7 @@ async def get_performance_report_tool(
             )
         )
 
-        return ""
+        return 
 
     user = next(
         (u for u in team
@@ -921,7 +921,7 @@ async def get_performance_report_tool(
     # Trigger SID 627 (Count) — no data expected
     await get_performance_count_via_627(ctx, user["login_code"])
 
-    return ""
+    return
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
     """
@@ -1460,7 +1460,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             return
 
         # ---- Role resolution ----
-        manager_phone = normalize_phone(os.getenv("MANAGER_PHONE", "919871536210"))
+        manager_phone = normalize_phone(os.getenv("MANAGER_PHONE"))
         team = load_team()
 
         if sender == manager_phone:
@@ -1524,14 +1524,9 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         # ---- Build context window for agent ---
 
-        history_parts = [
-            UserPromptPart(content=msg)
-            for msg in conversation_history[sender][:-1]
-        ]
-
-        # ---- Run agent ----
+        messages = conversation_history[sender][:-1] + [command]
         result = await agent.run(
-            [*history_parts, UserPromptPart(content=command)],
+            messages,
             deps=ManagerContext(
                 sender_phone=sender,
                 role=role,
