@@ -1583,13 +1583,25 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 current_agent.tool(delete_user_tool)
 
                 history_parts = []
-                for msg in conversation_history.get(sender, [])[-5:]:  # last 5
+                recent_history = conversation_history.get(sender, [])[-5:]  # last 5 turns
+                for msg in recent_history:
                     if isinstance(msg, UserPromptPart):
                         history_parts.append(f"User: {msg.content}")
                     elif isinstance(msg, ModelResponse):
-                        history_parts.append(f"Bot: {msg.content}")
+                        bot_text = getattr(msg, 'output', None)
+                        if bot_text is None:
+                            bot_text = getattr(msg, 'text', '') or getattr(msg, 'generated_text', '') or str(msg)
+                        history_parts.append(f"Bot: {bot_text.strip()}")
+                    elif hasattr(msg, 'content'):
+                        history_parts.append(f"Message: {msg.content}")
+                    else:
+                        history_parts.append(f"Unknown message: {str(msg)}")
+                        
+                    logger.debug(f"Message type: {type(msg).__name__}, dir: {dir(msg)[:20]}...")  # first 10 attrs
 
-                full_prompt = "\n".join(history_parts) + "\nCurrent message: " + command
+                full_prompt = "\n".join(history_parts) + "\n\nCurrent user message: " + command.strip()
+
+                logger.debug(f"Full prompt sent to agent for {sender}:\n{full_prompt}")
                 
                 result = await current_agent.run(
                     full_prompt,
