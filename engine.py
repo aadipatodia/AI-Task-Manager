@@ -16,8 +16,6 @@ from pydantic_ai.models.gemini import GeminiModel
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
 from send_message import send_whatsapp_message
 import asyncio
@@ -1556,15 +1554,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         send_whatsapp = False
 
-        # CASE 1: Our system owns this → task list
-        if "get_task_list_tool" in called_tools:
-            send_whatsapp = True
-
-        # CASE 2: LLM asked a clarification question
-        # (No tool was called at all)
-        elif not called_tools and output_text:
-            send_whatsapp = True
-
+        send_whatsapp = True
 
         if send_whatsapp:
             send_whatsapp_message(sender, output_text, pid)
