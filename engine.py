@@ -1559,7 +1559,12 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         agent.tool(explain_decision_tool)
 
         # ---- Build context window (SAFE + DETERMINISTIC) ----
-        messages = conversation_history[sender][:-1] + [command]
+        messages = [command]
+        if command.strip().lower() in {"confirm", "yes", "okay", "proceed"}:
+            messages = conversation_history[sender]
+        else:
+            messages = [command]
+
 
         relative_deadline = parse_relative_deadline(command, current_time)
         if relative_deadline:
@@ -1568,6 +1573,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
 
         # ---- Run agent (guard against Gemini empty output) ----
+        called_tools = []
         try:
             result = await agent.run(
                 messages,
@@ -1577,14 +1583,14 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                     current_time=current_time,
                     document_data=last_document_by_sender.get(sender)
                 )
+                called_tools = []
             )
+            for msg in result.all_messages():
+                    if hasattr(msg, "tool_name") and msg.tool_name:
+                        called_tools.append(msg.tool_name)
+                        
         except Exception as e:
             logger.error("Agent execution failed", exc_info=True)
-            send_whatsapp_message(
-                sender,
-                "I couldn’t process that request. Please rephrase or try again.",
-                pid
-            )
             return
 
         output_text = (result.output or "").strip()
