@@ -12,7 +12,6 @@ from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.gemini import GeminiModel
-from pydantic_ai.messages import ModelResponse, ModelRequest, TextPart, UserPromptPart
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -23,6 +22,10 @@ from send_message import send_whatsapp_message, send_whatsapp_document
 from google_auth_oauthlib.flow import Flow
 import asyncio
 from send_message import send_registration_template
+from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+
+conversation_history: Dict[str, list] = {}
+
 
 load_dotenv()
 
@@ -660,6 +663,30 @@ def send_email(to_email: str, subject: str, body: str) -> bool:
     except Exception as e:
         logger.error(f"Email sending failed: {str(e)}")
         return False
+
+def add_to_history(sender: str, role: str, content: str):
+    """
+    role: 'user' | 'assistant'
+    """
+    if sender not in conversation_history:
+        conversation_history[sender] = []
+
+    if role == "user":
+        conversation_history[sender].append(
+            ModelRequest(
+                parts=[UserPromptPart(content)]
+            )
+        )
+    else:
+        conversation_history[sender].append(
+            ModelResponse(
+                parts=[TextPart(content)]
+            )
+        )
+
+    # HARD LIMIT to avoid token explosion
+    conversation_history[sender] = conversation_history[sender][-10:]
+
 
 def normalize_tasks_response(tasks_data):
     """Normalize Appsavy GET_TASKS response to always return a list"""
@@ -1489,6 +1516,40 @@ def should_send_whatsapp(text: str) -> bool:
     t = text.lower()
     return not any(k in t for k in block_keywords)
 
+async def should_use_history_gemini(
+    ai_model,
+    system_prompt: str,
+    user_message: str
+) -> bool:
+    """
+    Asks Gemini whether prior conversation is required to answer correctly.
+    Returns True / False only.
+    """
+
+    decision_agent = Agent(
+        ai_model,
+        system_prompt=(
+            system_prompt
+            + "\n\nYou are a classifier. "
+              "Answer ONLY with 'YES' or 'NO'. "
+              "Do NOT explain."
+        )
+    )
+
+    result = await decision_agent.run(
+        f"""
+Does this message require previous conversation context to answer correctly?
+
+Message:
+\"{user_message}\"
+
+Answer strictly with YES or NO.
+"""
+    )
+
+    return result.output.strip().upper() == "YES"
+
+
 def normalize_phone(phone: str) -> str:
     digits = re.sub(r"\D", "", phone)
     if len(digits) == 10:
@@ -1563,7 +1624,21 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 current_time = datetime.datetime.now()
                 dynamic_prompt = get_system_prompt(current_time)
             
-                current_agent = Agent(ai_model, deps_type=ManagerContext, system_prompt=dynamic_prompt)
+                history = conversation_history.get(sender, [])
+
+                use_history = await should_use_history_gemini(
+                    ai_model=ai_model,
+                    system_prompt=dynamic_prompt,
+                    user_message=command
+                )
+
+                current_agent = Agent(
+                    ai_model,
+                    deps_type=ManagerContext,
+                    system_prompt=dynamic_prompt,
+                    message_history=history if use_history else []
+                )
+
                 
                 current_agent.tool(get_performance_report_tool)
                 current_agent.tool(get_task_list_tool)
@@ -1575,6 +1650,10 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 current_agent.tool(send_whatsapp_report_tool)
                 current_agent.tool(add_user_tool)
                 current_agent.tool(delete_user_tool)
+                
+
+                add_to_history(sender, "user", command)
+
             
                 result = await current_agent.run(
                     command,
@@ -1585,6 +1664,9 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                         document_data=message
                     )
                 )
+                
+                if result.output:
+                    add_to_history(sender, "assistant", result.output)
 
                 conversation_history[sender] = result.all_messages()
             
