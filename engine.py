@@ -1520,12 +1520,12 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         history = conversation_history.get(sender,[])
         messages = [
-            UserPromptPart(
-                content = json.dumps({
-                    "conversation_history":history,
-                    "new_message":command
-                })
-            )
+           
+            json.dumps({
+                "conversation_history":history,
+                "new_message":command
+            })
+            
         ]
         result = await agent.run(
             messages,
