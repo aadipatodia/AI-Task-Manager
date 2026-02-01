@@ -3,26 +3,26 @@ from pymongo import MongoClient
 import certifi
 import json
 from pydantic import RootModel
-from pydantic_ai.messages import UserPromptPart
 import datetime
 import base64
 import requests
 import logging
 import re
-from typing import List, Optional, Dict
-from pydantic import BaseModel
+from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.gemini import GeminiModel
+from pydantic_ai.messages import ModelResponse, ModelRequest, TextPart, UserPromptPart
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
-from send_message import send_whatsapp_message
+from send_message import send_whatsapp_message, send_whatsapp_document
+from google_auth_oauthlib.flow import Flow
 import asyncio
-import pytz
-IST = pytz.timezone("Asia/Kolkata")
-
-#918683005252
+from send_message import send_registration_template
 
 load_dotenv()
 
@@ -32,15 +32,14 @@ logger = logging.getLogger(__name__)
 SCOPES = ['https://www.googleapis.com/auth/gmail.send']
 
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-1-ugb8.onrender.com/oauth2callback")
-MANAGER_EMAIL = "aadi@mobineers.com"
+MANAGER_EMAIL = "ankita.mishra@mobineers.com"
 
 # Initialize MongoDB Connection
 MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI, tlsCAFile=certifi.where()) if MONGO_URI else None
 db = client['ai_task_manager'] if client is not None else None
 users_collection = db['users'] if db is not None else None
-conversation_history: Dict[str, List[str]] = {}
-last_document_by_sender: Dict[str, Dict] = {}
+conversation_history: Dict[str, List[Any]] = {}
 
 APPSAVY_BASE_URL = "https://configapps.appsavy.com/api/AppsavyRestService"
 
@@ -164,15 +163,14 @@ API_CONFIGS = {
     }
 }
 
-ai_model = GeminiModel('gemini-2.5-flash-lite')
+ai_model = GeminiModel('gemini-2.5-pro')
 
 class ManagerContext(BaseModel):
     sender_phone: str
     role: str
-    current_time: datetime.datetime
+    current_time: datetime.datetime = Field(default_factory=datetime.datetime.now)
     document_data: Optional[Dict] = None
-
-
+    
 class WhatsAppPdfReportRequest(BaseModel):
     SID: str = "627"
     ASSIGNED_TO: str
@@ -194,47 +192,201 @@ class PerformanceCountResult(BaseModel):
 def get_system_prompt(current_time: datetime.datetime) -> str:
     team = load_team()
     team_description = "\n".join([f"- {u['name']} (Login: {u['login_code']})" for u in team])
+    current_date_str = current_time.strftime("%Y-%m-%d")
+    current_time_str = current_time.strftime("%I:%M %p")
+    day_of_week = current_time.strftime("%A")
     
     return f"""
-You are the Official AI Task Manager Bot.
+### AUTHORIZED TEAM MEMBERS:
+{team_description}
 
-Your role:
-- Understand the user's intent.
-- Select the correct tool.
-- NEVER invent data.
-- NEVER assume permissions.
-- ALWAYS rely on tool responses.
+You are the Official AI Task Manager Bot for the organization.
+Identity: TM_API (Manager).
+You are a precise, professional assistant with natural language understanding capabilities.
 
-Rules:
-- If a task, user, or report action is requested → use a tool.
-- If required data is missing → ask a clarification question.
-- Do not explain internal rules.
-- Do not summarize tool outputs.
-- Do not guess.
-- NEVER include reasoning in the final user-facing response.
+Current Date: {current_date_str} ({day_of_week})
+Current Time: {current_time_str}
 
-CRITICAL TASK ASSIGNMENT FLOW:
-- When assigning a task, NEVER finalize it in the first response.
-- First, restate assignee, task, and deadline and ask for confirmation.
-- After the user replies (agreement or correction), proceed with assignment.
-- Treat agreement contextually; do NOT rely on specific words.
+### CORE PRINCIPLES:
+1. **Natural Language Understanding**: Understand user intent from conversational language
+2. **Context Awareness**: Use conversation history to understand references
+3. **Proactive Clarification**: Ask for missing information naturally
+4. **Professional Communication**: Clear, concise, no emojis
 
-IMPORTANT:
-- User names may be single-word or informal.
-- Do NOT ask for full name unless the API explicitly fails.
-- Do NOT ask for email unless the user provides it voluntarily.
+### TASK ASSIGNMENT:
+* When user wants to assign a task, extract: assignee name, task description, deadline
+* Use 'assign_new_task_tool'
+* **Deadline Logic:**
+  - If time mentioned is later than current time → Use today's date
+  - If time has already passed today → Use tomorrow's date
+  - "tomorrow" → Next day
+  - "next week" → 7 days from now
+  - No time specified → default to end of current day (23:59)
+  - Always format as ISO: YYYY-MM-DDTHH:MM:SS
+* **Name Resolution**: Map names to login IDs from team directory
 
-Current date: {current_time.strftime("%Y-%m-%d")}
-Current time: {current_time.strftime("%H:%M")}
-day_of_week = current_time.strftime("%A")
+### TASK STATUS RULES (API SID 607):
+You must determine the correct 'new_status' string by interpreting the user's intent and role within the conversation context. Do not look for specific keywords; understand the "state" the user is describing.
 
-- If the user says "today", "tomorrow", or a specific time (e.g., "8pm") or "in 2 hours", convert it to 'YYYY-MM-DDTHH:MM:SS' based on the current date/time.
-- Current date: {current_time.strftime("%Y-%m-%d")}
-- Current time: {current_time.strftime("%H:%M")}
+### USER MANAGEMENT RULES (ADD / DELETE USERS):
+- - Email is optional when adding and deleting users. Do not ask for it unless the user explicitly provides it or asks about email features.
+- Any authorized user can ADD a new user.
+
+### ADD USER TOOL (CRITICAL):
+When the user wants to add a user
+(e.g. "add user", "create user", "register user"):
+
+You MUST:
+1. Extract:
+   - name (required)
+   - mobile number (10 digits, required)
+   - email (optional)
+2. Call the tool add_user_tool with:
+   - name
+   - mobile
+   - email (only if provided, otherwise omit or pass None/empty)
+3. Do NOT ask for email if it's missing
+4. Execute immediately if name + mobile are present
+
+- Deletion is ownership-based, NOT role-based.
+- Managers do NOT have special override permissions for deleting users.
+
+### DELETION OWNERSHIP ENFORCEMENT:
+- Before deleting a user, always verify ownership.
+- Ownership means: the requester is the same user who added the target user.
+- BUT NEVER ASK THE USER IF HE IS THE ONE WHO ADDED THAT USER OR NOT
+- If the requester did NOT add the user:
+  - Deny the request.
+  - Respond with:
+    "Permission Denied: Only the user who added this account can delete it."
+- Do NOT call the delete user API if ownership does not match.
+- If ownership information is missing or unclear, ask for clarification instead of deleting.
+
+### TOOL USAGE CONSTRAINTS:
+- Use 'delete_user_tool' ONLY after confirming ownership.
+- Ownership means: requester mobile number == creator mobile number.
+- Never assume ownership.
+
+### TASK LISTING:
+When user asks to see tasks, list tasks, pending work:
+- Use 'get_task_list_tool'
+- Without name → Show tasks for the requesting user
+- With name (managers only) → Show tasks for specified employee
+- Show the tasks exactly as returned by the API without applying additional sorting
+- IMPORTANT:
+When responding with task lists, return the tool output EXACTLY as-is.
+Do not summarize, rephrase, or omit any fields.
+
+### UPDATE TASK STATUS
+Your job is to understand the user's intent and determine the correct
+new_status value for API SID 607 based on:
+- The user's role relative to the specific task
+- The meaning of their message
+
+You MUST follow these rules strictly:
+1. Determine the user's role ONLY from the provided context.
+   - Employee = Assignee of the task
+   - Manager = Reporter/Creator of the task
+2. Never allow:
+   - Employees to use: Reopened
+   - Managers to use: Work In Progress
+4. Interpret natural language correctly:
+   - "done", "finished", "completed", "close", "closed", "submit" etc and phrases with similar intent by an employee means submission and final closure, i.e closed tag
+   - "approve", "looks good", "final close", "close", "closed" etc and phrases with similar intent by a manager means final closure, i.e closed tag
+   - "not good", "redo", "reassign", "reopen" etc and phrases with similar intent by a manager means "reopen"
+5. Do NOT ask the user any questions.
+6. Do NOT explain rules.
+7. Do NOT include anything outside valid JSON.
+8. ONCE THE TASK IS CLOSED FROM EMPLOYEE/ASSIGNEE'S SIDE OR MANAGER/REPORTER'S SIDE IT DOESN'T REQUIRE ANY APPROVAL. BOTH ARE CATEGORISED AS "CLOSED"
+
+**DOCUMENT HANDLING:**
+**Case 1 (Manager):** If a document/image is sent while creating a task, use `assign_new_task_tool`. 
+**Case 2 (Employee):** If a document/image is sent with a "completed" or "closed" message, use `update_task_status_tool` with status `Close` .
+**Case 3 (Update):** If a document is sent during work, use `update_task_status_tool` with status `Work In Progress`.
+
+### PERFORMANCE REPORTING:
+When the user asks for performance, statistics, counts, or a performance report:
+Performance reporting rules:
+- When no employee name is mentioned:
+  - Use SID 627 with REPORT_TYPE = "Detail"
+  - Send PDF on WhatsApp
+- When a specific employee is mentioned:
+  - Use GET_COUNT (SID 616)
+  - Do NOT send WhatsApp to the employee
+
+Interpretation rules:
+1. If the user does not mention any employee name:
+- Treat the request as a general performance report.
+- Generate the report for all employees (Managers only).
+- Use SID 627 with REPORT_TYPE = "Detail".
+- Send the PDF report on WhatsApp.
+- The user does not need to explicitly say “PDF”.
+
+2. If the user mentions a specific employee name or login code:
+- Use SID 627 with REPORT_TYPE = "Count".
+- Do not generate or send a PDF.
+
+3. Do not infer PDF intent from keywords.
+- PDF is implied automatically for general (no-name) performance requests.
+- Text summary is implied automatically for named employee requests.
+
+4. Employees may only view their own performance.
+- Managers may view performance for all employees.
+
+5. Return results exactly as provided by SID 627.
+- Do not calculate, derive, or modify counts.
+- Missing values must be treated as zero.
+
+### TASK ASSIGNMENT BY PHONE:
+Support assignment using phone numbers:
+- Extract 10-digit number or full format
+- Use 'assign_task_by_phone_tool'
+
+### USER LOOKUP:
+When asked about users in a group or specific user details:
+- Use 'get_users_by_id_tool' with group ID or user ID
+- Group IDs start with 'G-' (e.g., G-10343-41)
+- User IDs start with 'D-' (e.g., D-3514-1001)
+
+### ASSIGNEE LOOKUP:
+When needing to list all available assignees:
+- Use 'get_assignee_list_tool'
+- Returns all users who can be assigned tasks
+
+### DOCUMENT HANDLING:
+- When file received without task details: Ask for assignee name, task description, and deadline
+- When file received with partial info: Ask for missing details
+- Attach stored file to next task assignment automatically
+
+### MANAGER TASK APPROVAL:
+When manager wants to approve/reject completed work:
+- Understand approval/rejection phrases
+- Use 'update_task_status_tool' with appropriate action
+
+### EMPLOYEES VIEWING TASKS:
+Employees can always view their own tasks
+
+### COMMUNICATION STYLE:
+- Professional and concise
+- No emojis or casual language
+- Don't mention internal tool names
+- Ask clarifying questions when needed
+- Confirm critical actions before executing
+
+### WHATSAPP PDF REPORTS:
+When user asks to send, share, or receive a report on WhatsApp:
+- Use 'send_whatsapp_report_tool'
+- REPORT_TYPE: "Count" or "Detail"
+- STATUS examples: Open, Closed, Reported Closed
+- If no assignee specified, send report for requesting user
+
+### IMPORTANT:
+- YOU DO NOT HAVE TO SEND ANY MESSAGES ON WHATSAPP 
+- Ignore WhatsApp headers like '[7:03 pm, 13/1/2026] ABC:' and focus only on the text after the colon.
 """
 
 def load_team():
-    """This function is 100% dynamic and will fetch users from MongoDB."""
+    """Ab ye function 100% dynamic hai, sirf MongoDB se users fetch karega."""
     if users_collection is None:
         logger.error("MongoDB connection cant be initialized")
         return []
@@ -303,9 +455,9 @@ class UpdateTaskRequest(BaseModel):
     TASK_ID: str
     STATUS: str
     COMMENTS: str
-    UPLOAD_DOCUMENT: str = ""   # filename
-    BASE64: str = ""            # base64 string
+    UPLOAD_DOCUMENT: UploadDocument
     WHATSAPP_MOBILE_NUMBER: str
+
 
 class GetCountRequest(BaseModel):
     Event: str = "107567"
@@ -323,171 +475,98 @@ class AddDeleteUserRequest(BaseModel):
     SID: str = "629"
     ACTION: str            
     CREATOR_MOBILE_NUMBER: str
-    EMAIL: Optional[str] = ""
+    EMAIL: str = ""               # ← made optional with default ""
     MOBILE_NUMBER: str
     NAME: str
-    
-import dateparser
-
-def to_appsavy_datetime(time_str: str) -> str:
-    # Try parsing natural language if ISO fails
-    dt = dateparser.parse(time_str, settings={'PREFER_DATES_FROM': 'future', 'RELATIVE_BASE': datetime.datetime.now(IST)})
-    
-    if not dt:
-        # Fallback to current logic or raise error
-        dt = datetime.datetime.fromisoformat(time_str)
-        
-    if dt.tzinfo is None:
-        dt = IST.localize(dt)
-    return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 async def add_user_tool(
     ctx: RunContext[ManagerContext],
     name: str,
-    mobile: str
-    
+    mobile: str,
+    email: Optional[str] = None   # ← now optional
 ) -> str:
-    await explain_decision_tool(
-        ctx,
-        "Intent: Add user | Tool: ADD_DELETE_USER | API: PushdataJSONClient (SID 629)"
-    )
-    """
-ROLE:
-You create a new user.
+    # Normalize mobile
+    mobile_clean = mobile[-10:] if len(mobile) >= 10 else mobile
 
-REQUIRED FIELDS:
-- Name
-- 10-digit mobile number
-- Email (optional)
-
-FLOW:
-1. Call ADD_DELETE_USER (ACTION=Add)
-2. Extract login ID
-3. Sync user to MongoDB
-
-YOU MUST NOT:
-- Ask follow-up if data is complete
-- Guess login ID
-- Modify mobile number format incorrectly
-
-OUTPUT:
-- Agent-internal confirmation string (not always sent to user)
-- Or failure reason
-"""
-
-
-    # 1. Attempt to add the user to Appsavy
     req = AddDeleteUserRequest(
         ACTION="Add",
         CREATOR_MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
-        NAME=name,
-        EMAIL= "",
-        MOBILE_NUMBER=mobile[-10:]
+        NAME=name.strip(),
+        EMAIL=email.strip() if email else "",   # ← safe handling
+        MOBILE_NUMBER=mobile_clean
     )
 
     res = await call_appsavy_api("ADD_DELETE_USER", req)
-    if not isinstance(res, dict): return f"Failed to add user: {res}"
-    
+    if not isinstance(res, dict):
+        return f"Failed to add user: {res}"
+
     msg = res.get("resultmessage", "")
     login_code = None
+    status_note = ""
 
-    # Check for Success (1) or Already Exists
-    is_success = str(res.get("result")) == "1" or str(res.get("RESULT")) == "1"
+    is_success = str(res.get("result", "")) in ("1", "SUCCESS")
     is_existing = "already exists" in msg.lower()
 
     if is_success or is_existing:
-        # STEP 1: Try to extract Login ID from the message text (Regex)
+        # Try to extract Login Code from message
         match = re.search(r"login Code:\s*([A-Z0-9-]+)", msg, re.IGNORECASE)
         login_code = match.group(1) if match else None
-        
-        if login_code:
-            status_note = "ID extracted from API message"
-        
-        # STEP 2: BACKUP - If ID is missing from the message, ALWAYS check the list
+
         if not login_code:
-            logger.info(f"ID missing from message. Fetching list to find: '{name}'")
-            assignee_res = await call_appsavy_api("GET_ASSIGNEE", GetAssigneeRequest(Event="0", Child=[{"Control_Id": "106771", "AC_ID": "111057"}]))
-            
+            # Fallback: search assignee list
+            assignee_res = await call_appsavy_api(
+                "GET_ASSIGNEE",
+                GetAssigneeRequest(Event="0", Child=[{"Control_Id": "106771", "AC_ID": "111057"}])
+            )
             result_list = []
             if isinstance(assignee_res, dict):
                 result_list = assignee_res.get("data", {}).get("Result", [])
             elif isinstance(assignee_res, list):
                 result_list = assignee_res
 
-            if result_list:
-                target_name = name.lower().strip()
-                for item in result_list:
-                    item_name = str(item.get("NAME", "")).lower().strip()
-                    if target_name in item_name or item_name in target_name:
-                        login_code = item.get("ID") or item.get("LOGIN_ID")
-                        status_note = "ID fetched from system list"
-                        break
+            target_name = name.lower().strip()
+            for item in result_list:
+                item_name = str(item.get("NAME", "")).lower().strip()
+                if target_name in item_name or item_name in target_name:
+                    login_code = item.get("ID") or item.get("LOGIN_ID")
+                    status_note = "ID fetched from system list"
+                    break
 
-        # STEP 3: If we have an ID, save to MongoDB
         if login_code:
             new_user = {
                 "name": name.lower().strip(),
                 "phone": normalize_phone(mobile),
-                "email": "",
+                "email": email.strip() if email else None,   # ← store None if missing
                 "login_code": login_code
             }
-            
+
             if users_collection is not None:
                 users_collection.update_one(
                     {"phone": new_user["phone"]},
                     {"$set": new_user},
                     upsert=True
                 )
-                logger.info(f"Successfully synced {name} to MongoDB with ID {login_code}")
-                
-                return 
-    return "failed"
+                logger.info(f"Synced user {name} → Login: {login_code}")
 
-async def explain_decision_tool(
-    ctx: RunContext[ManagerContext],
-    reason: str
-) -> None:
-    logger.info(
-        f"[AI-DECISION]"
-        f" User={ctx.deps.sender_phone}"
-        f" Role={ctx.deps.role}"
-        f" Reason={reason}"
-    )
+            action_word = "Created" if is_success else "Synced (already existed)"
+            email_part = f"\nEmail: {email}" if email else ""
+            return (
+                f"Success"
+            )
+
+    return f"Failed to add user '{name}'"
 
 async def delete_user_tool(
     ctx: RunContext[ManagerContext],
     name: str,
     mobile: str,
-    email: Optional[str] = None,
-    
+    email: Optional[str] = None   # optional here too
 ) -> str:
-    """
-ROLE:
-You delete an existing user.
-
-ABSOLUTE RULE:
-- Only the creator of the user can delete them
-
-MANDATORY CHECK:
-- requester mobile == creator mobile
-
-IF CHECK FAILS:
-- Deny deletion immediately
-
-NEVER:
-- Allow manager override
-- Assume ownership
-- Delete without verification
-
-OUTPUT:
-- Success or permission denied
-"""
-    
     req = AddDeleteUserRequest(
         ACTION="Delete",
         CREATOR_MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
-        NAME=name,
-        EMAIL=email or "",
+        NAME=name.strip(),
+        EMAIL=email.strip() if email else "",
         MOBILE_NUMBER=mobile[-10:]
     )
 
@@ -509,8 +588,9 @@ OUTPUT:
             users_collection.delete_one({"phone": "91" + mobile[-10:]})
             logger.info(f"User with mobile {mobile[-10:]} removed from MongoDB.")
 
-        return
-    return 
+        return "User deleted successfully from system and database."
+    
+    return f"Failed to delete user: {res.get('resultmessage')}"
 
 def get_gmail_service():
     try:
@@ -548,9 +628,32 @@ def normalize_status_for_report(status: str) -> str:
 
 def to_appsavy_datetime(iso_dt: str) -> str:
     dt = datetime.datetime.fromisoformat(iso_dt)
-    if dt.tzinfo is None:
-        dt = IST.localize(dt)
     return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+def send_email(to_email: str, subject: str, body: str) -> bool:
+    """Send email via Gmail API."""
+    try:
+        service = get_gmail_service()
+        if not service:
+            logger.warning("Gmail service unavailable, skipping email")
+            return False
+        
+        message = MIMEMultipart()
+        message['to'] = to_email
+        message['subject'] = subject
+        message.attach(MIMEText(body, 'plain'))
+        
+        raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
+        send_message = service.users().messages().send(
+            userId='me',
+            body={'raw': raw_message}
+        ).execute()
+        
+        logger.info(f"Email sent successfully to {to_email}")
+        return True
+    except Exception as e:
+        logger.error(f"Email sending failed: {str(e)}")
+        return False
 
 def normalize_tasks_response(tasks_data):
     """Normalize Appsavy GET_TASKS response to always return a list"""
@@ -563,6 +666,17 @@ def normalize_tasks_response(tasks_data):
         return []
 
     return data.get("Result", [])
+
+def normalize_task(task: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize Appsavy task object to internal standard keys"""
+    return {
+        "task_id": task.get("TID"),
+        "task_name": task.get("COMMENTS"),
+        "assigned_by": task.get("REPORTER"),
+        "assign_date": task.get("ASSIGN_DATE"),
+        "status": task.get("STS"),
+        "task_type": task.get("TASK_TYPE")
+    }
 
 def is_authorized(task_owner) -> bool:
     try:
@@ -662,6 +776,7 @@ async def send_whatsapp_report_tool(
             REFERENCE="WHATSAPP"
         )
 
+
         api_response = await call_appsavy_api("WHATSAPP_PDF_REPORT", req)
 
         if not api_response:
@@ -670,7 +785,11 @@ async def send_whatsapp_report_tool(
         if isinstance(api_response, dict) and api_response.get("error"):
             return f"API Error: {api_response['error']}"
 
-        return
+        return (
+            f"WhatsApp PDF report sent successfully.\n"
+            f"Report Type: {report_type}\n"
+            f"Status: {status}"
+        )
 
     except Exception as e:
         logger.error("send_whatsapp_report_tool error", exc_info=True)
@@ -797,6 +916,7 @@ async def get_performance_count_via_627(
     It does NOT return counts.
     This function only triggers the report and returns an empty dict.
     """
+
     req = WhatsAppPdfReportRequest(
         ASSIGNED_TO=login_code,
         REPORT_TYPE="Count",
@@ -833,7 +953,7 @@ async def get_task_summary_from_tasks(login_code: str) -> Dict[str, int]:
     summary = {
         "ASSIGNED_TASK": len(tasks),
         "OPEN_TASK": 0,
-        "DELAYED_OPEN_TASK": 0, 
+        "DELAYED_OPEN_TASK": 0,   # Appsavy does not expose delay flag here
         "CLOSED_TASK": 0,
         "DELAYED_CLOSED_TASK": 0
     }
@@ -888,45 +1008,16 @@ async def get_performance_report_tool(
     ctx: RunContext[ManagerContext],
     name: Optional[str] = None
 ) -> str:
-    """
-    PURPOSE:
-    - Provide performance statistics, task counts, or report files.
-
-    WHEN TO USE:
-    - User asks for "performance", "stats", "count", or "report".
-
-    LOGIC:
-    1. IF NO NAME IS MENTIONED:
-       - Treat as a request for a full organization PDF report.
-       - ONLY allowed for 'manager' role.
-    2. IF A NAME/ID IS MENTIONED:
-       - Fetch specific counts for that employee.
-       - Use 'get_task_summary_from_tasks' internally.
-    
-    RULES:
-    - Employees can ONLY see their own performance.
-    - Managers can see anyone's performance.
-    """
-    
     team = load_team()
-    
+
+    # ---------- NO NAME → PDF ----------
     if not name:
         if ctx.deps.role != "manager":
             return "Permission Denied: Only managers can view full performance reports."
-        
-        await call_appsavy_api(
-            "WHATSAPP_PDF_REPORT",
-            WhatsAppPdfReportRequest(
-                ASSIGNED_TO="",
-                REPORT_TYPE="Detail",
-                STATUS="",
-                MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
-                REFERENCE="WHATSAPP"
-            )
-        )
 
-        return 
+        return "Performance report PDF has been sent on WhatsApp."
 
+    # ---------- NAME PRESENT → TEXT ----------
     user = next(
         (u for u in team
          if name.lower() in u["name"].lower()
@@ -940,22 +1031,12 @@ async def get_performance_report_tool(
     # Trigger SID 627 (Count) — no data expected
     await get_performance_count_via_627(ctx, user["login_code"])
 
+    # REAL data source
+    counts = await get_task_summary_from_tasks(user["login_code"])
     return
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
-    """
-    PURPOSE:
-    - Retrieve a list of active or pending tasks.
-
-    WHEN TO USE:
-    - User asks: "show my tasks", "what is my pending work?", "list tasks", or "to-do list".
-
-    RULES:
-    - Without a name: Show tasks for the requesting user (caller).
-    - With a name: Only allowed if the caller is a 'manager'.
-    - Output format: Return the ID, Task Name, and Deadline clearly.
-    - Do NOT summarize or omit tasks returned by the system.
-    """
+    sender_mobile = ctx.deps.sender_phone[-10:]
 
     try:
         team = load_team()
@@ -1064,6 +1145,35 @@ def extract_task_id(text: str):
     match = re.search(r"\btask\s*(\d+)\b", text.lower())
     return match.group(1) if match else None
 
+
+def resolve_status(text: str, role: str):
+    t = text.lower()
+
+    # Future / pending → Work In Progress
+    if any(x in t for x in [
+        "pending",
+        "in progress",
+        "working",
+        "will be completed",
+        "by "
+    ]):
+        return "Work In Progress"
+
+    # Done / completed → Close or Closed
+    if any(x in t for x in [
+        "done",
+        "completed",
+        "finished"
+    ]):
+        return "Closed" if role == "manager" else "Close"
+
+    # Reopen
+    if "reopen" in t:
+        return "Reopened"
+
+    return None
+
+
 def extract_remark(text: str, task_id: str):
     t = text.lower()
 
@@ -1094,52 +1204,14 @@ async def assign_new_task_tool(
     deadline: str
 ) -> str:
     """
-PURPOSE:
-- Assign a new task to a user or group.
-
-WHEN TO ACT:
-- User wants to assign, give, create, or delegate a task.
-
-REQUIRED INPUT:
-- Assignee (name, login code, or phone)
-- Task description
-- Deadline (Format: 'YYYY-MM-DDTHH:MM:SS'. You must convert relative times like '8pm today' or "day fater tomorrow" or "in 5 hours" to this format yourself using the current time context).
-
-
-RULES:
-- Resolve assignee using MongoDB + Appsavy.
-- If multiple matches → ask clarification.
-- If document exists → attach automatically.
-- NEVER assign without a deadline.
-- BEFORE FINAL ALLOTMENT OF THE TASK ALWAYS CONFIRM FROM THE USER 
-
-CRITICAL TASK ASSIGNMENT RULE:
-- Before calling assign_new_task_tool, you MUST explicitly confirm:
-  1. Assignee
-  2. Task description
-  3. Deadline
-- If confirmation has NOT been explicitly given by the user,
-  DO NOT finalize task assignment.
-- In that case, ask the user to confirm the details instead of assigning.
-
-OUTPUT:
-- Single confirmation or single error message
-"""
+    Assigns a new task to a user or group.
+    Fixes: Duplicate name resolution, N/A phone numbers, and Meta 24h window blockage.
+    """
     try:
         # 1. MERGE SOURCES: Fetch candidates from BOTH MongoDB and Appsavy (SID 606)
         team = load_team()
         mongo_matches = [u for u in team if name.lower() in u["name"].lower() or name.lower() == u["login_code"].lower()]
-        
-        last_messages = conversation_history.get(ctx.deps.sender_phone, [])
-        if len(last_messages) < 2:
-            return (
-                "Please confirm the task details before I proceed:\n\n"
-                f"Assignee: {name}\n"
-                f"Task: {task_name}\n"
-                f"Deadline: {deadline}\n\n"
-                "Reply with CONFIRM to proceed, or reply with corrections."
-            )
-            
+
         assignee_res = await call_appsavy_api("GET_ASSIGNEE", GetAssigneeRequest(
             Event="0", 
             Child=[{"Control_Id": "106771", "AC_ID": "111057"}]
@@ -1226,7 +1298,7 @@ OUTPUT:
                 base64_data = download_and_encode_document(media_info)
                 if base64_data:
                     fname = media_info.get("filename") or (
-                        f"task_image_{datetime.datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.png" 
+                        f"task_image_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png" 
                         if media_type == "image" else "task_document.pdf"
                     )
                     documents_child.append(DocumentItem(
@@ -1234,6 +1306,8 @@ OUTPUT:
                         DOCUMENT_NAME=fname
                     ))
 
+        # 3. Prepare the CreateTaskRequest (SID 604)
+        assignee_mobile = user["phone"][-10:]
         req = CreateTaskRequest(
             ASSIGNEE=login_code,   
             DESCRIPTION=task_name,
@@ -1258,7 +1332,6 @@ OUTPUT:
             
             # Check for success (RESULT 1)
             if str(api_response.get('result')) == "1" or str(api_response.get('RESULT')) == "1":
-                last_document_by_sender.pop(ctx.deps.sender_phone, None)
                 return f"Task successfully assigned to {user['name'].title()} (ID: {login_code})."
 
         return f"API Error: {api_response.get('resultmessage', 'Unexpected response format')}"
@@ -1266,23 +1339,6 @@ OUTPUT:
     except Exception as e:
         logger.error(f"assign_new_task_tool error: {str(e)}", exc_info=True)
         return f"System Error: Unable to assign task ({str(e)})"
-
-def parse_relative_deadline(text: str, now: datetime.datetime) -> Optional[str]:
-    text = text.lower()
-
-    match = re.search(r"in\s+(\d+)\s*(hour|hours|hr|hrs)", text)
-    if match:
-        hours = int(match.group(1))
-        dt = now + datetime.timedelta(hours=hours)
-        return dt.isoformat()
-
-    match = re.search(r"in\s+(\d+)\s*(minute|minutes|min|mins)", text)
-    if match:
-        mins = int(match.group(1))
-        dt = now + datetime.timedelta(minutes=mins)
-        return dt.isoformat()
-
-    return None
 
 async def assign_task_by_phone_tool(
     ctx: RunContext[ManagerContext],
@@ -1336,7 +1392,7 @@ async def assign_task_by_phone_tool(
 APPSAVY_STATUS_MAP = {
     "Open": "Open",
     "Work In Progress": "Work In Progress",
-    "Close": "Closed",
+    "Close": "CLosed",
     "Closed": "Closed",
     "Reopened": "Reopen"
 }
@@ -1347,36 +1403,6 @@ async def update_task_status_tool(
     status: str,
     remark: Optional[str] = None
 ) -> str:
-    """
-    PURPOSE:
-    - Update the status of an existing task.
-
-    WHEN TO USE:
-    - User wants to mark a task as done, closed, reopened, or in progress.
-
-    AUTHORIZATION RULES:
-    - Only task owner (assignee or reporter) can update.
-    - Never ask user if h is assignee or reporter, that is already handled by sid 632, i.e CHECK_OWNERSHIP API
-    - Employees CAN use status "Closed".
-    - Managers CANNOT use status "Work In Progress".
-    - Map intent → status
-    - Call UPDATE_STATUS API
-    - Do Attach document if given by the user
-
-    STATUS INTERPRETATION:
-    - Employee phrases like "done", "completed","close" → Closed
-    - Manager phrases like "approved", "final close","close" → Closed
-    - Manager phrases like "redo", "not ok" → Reopened
-    - Employee phrases like "in progress", "pending"-> Work in Progress
-   
-    HARD RULES:
-    - NEVER ask questions.
-    - NEVER invent task IDs.
-    - NEVER bypass ownership check.
-    - ALWAYS call CHECK_OWNERSHIP first.
-
-    OUTPUT:
-    - Return ONLY user-facing confirmation text."""
 
     if not task_id:
         return "Please mention the Task ID you want to update."
@@ -1405,48 +1431,30 @@ async def update_task_status_tool(
     if not result or not is_authorized(result[0].get("TASK_OWNER")):
         return f"Permission Denied: You are not authorized to update Task {task_id}."
 
+    # ---- Role guard ----
+    if ctx.deps.role == "employee" and status == "Closed":
+        return "Final closure requires manager approval."
+
     # ---- STATUS MAPPING ----
     appsavy_status = APPSAVY_STATUS_MAP.get(status)
     if not appsavy_status:
         return f"Unsupported status '{status}'."
 
-    # ---- DOCUMENT HANDLING (WHATSAPP ATTACHMENT) ----
-    filename = ""
-    base64_data = ""
-
-    if ctx.deps.document_data:
-        media_type = ctx.deps.document_data.get("type")
-        media_info = ctx.deps.document_data.get(media_type)
-
-        if media_info:
-            logger.info(f"Downloading document for task update: {media_type}")
-            base64_data = download_and_encode_document(media_info)
-            mime = media_info.get("mime_type", "")
-            if not media_info.get("filename"):
-                if "pdf" in mime:
-                    filename = "attachment.pdf"
-                elif "image" in mime:
-                    filename = "image.jpg"
-                elif "audio" in mime:
-                    filename = "audio.mp3"
-                else:
-                    filename = "attachment.bin"
-            else:
-                filename = media_info["filename"]
-
+    # ---- FINAL PAYLOAD (EXACT FORMAT) ----
     req = UpdateTaskRequest(
         TASK_ID=task_id,
-        STATUS=appsavy_status,
-        COMMENTS=remark or "Updated via WhatsApp",
-        UPLOAD_DOCUMENT=filename,
-        BASE64=base64_data,
+        STATUS=appsavy_status,               # internal code
+        COMMENTS=remark or "Terminal Test",
+        UPLOAD_DOCUMENT={
+            "VALUE": "",
+            "BASE64": ""
+        },
         WHATSAPP_MOBILE_NUMBER=sender_mobile
     )
 
     api_response = await call_appsavy_api("UPDATE_STATUS", req)
 
     if api_response and str(api_response.get("RESULT")) == "1":
-        last_document_by_sender.pop(ctx.deps.sender_phone, None)
         if status == "Close":
             return f"Task {task_id} closed"
         if status == "Closed":
@@ -1457,6 +1465,28 @@ async def update_task_status_tool(
 
     return f"API Error: {api_response.get('resultmessage', 'Update failed')}"
 
+def should_send_whatsapp(text: str) -> bool:
+    """
+    Allow only clean, user-facing informational responses.
+    Block errors, API failures, permission issues, system logs.
+    """
+    if not text:
+        return False
+
+    block_keywords = [
+        "api error",
+        "system error",
+        "failed",
+        "error",
+        "exception",
+        "invalid",
+        "update failed",
+        "unable to"
+    ]
+
+    t = text.lower()
+    return not any(k in t for k in block_keywords)
+
 def normalize_phone(phone: str) -> str:
     digits = re.sub(r"\D", "", phone)
     if len(digits) == 10:
@@ -1466,7 +1496,6 @@ def normalize_phone(phone: str) -> str:
     return digits
 
 async def handle_message(command, sender, pid, message=None, full_message=None):
-    # ---- Quick command shortcut ----
     if command and command.strip().lower() == "delete & add":
         send_whatsapp_message(
             sender,
@@ -1478,129 +1507,118 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
     try:
         sender = normalize_phone(sender)
-
-        # ---- Media detection ----
+    
         is_media = False
         if message:
             is_media = any(k in message for k in ["document", "image", "video", "audio", "type"])
-
-        if is_media:
-            last_document_by_sender[sender] = message
-
+    
         if is_media and not command:
             send_whatsapp_message(
                 sender,
-                "File received. Please provide the assignee name, task description, and deadline.",
+               "File received. Please provide the assignee name, task description, and deadline to complete the assignment.",
                 pid
             )
             return
-
-        # ---- Role resolution ----
-        manager_phone = normalize_phone(os.getenv("MANAGER_PHONE"))
+    
+        manager_phone = os.getenv("MANAGER_PHONE", "919871536210")
         team = load_team()
-
+    
         if sender == manager_phone:
             role = "manager"
-        elif any(normalize_phone(u["phone"]) == sender for u in team):
+        elif any(
+            normalize_phone(u['phone']) == normalize_phone(sender)
+            for u in team
+        ):
             role = "employee"
+
         else:
             role = None
-
+    
         if not role:
-            send_whatsapp_message(
-                sender,
-                "Access Denied: Your number is not authorized to use this system.",
-                pid
-            )
+            send_whatsapp_message(sender, "Access Denied: Your number is not authorized to use this system.", pid)
             return
-
-        # ---- Conversation memory ----
+    
         if sender not in conversation_history:
             conversation_history[sender] = []
-
+    
         if command:
-            conversation_history[sender].append(command)
-            conversation_history[sender] = conversation_history[sender][-5:]
+            try:
+                assignees = extract_multiple_assignees(command, team)
+                if len(assignees) > 1:
+                    for name in assignees:
+                        await assign_new_task_tool(
+                            ctx=ManagerContext(
+                            sender_phone=sender,
+                            role=role,
+                            current_time=datetime.datetime.now()
+                            ),
+                            name=name,
+                            task_name=command,
+                            deadline=datetime.datetime.now().strftime("%Y-%m-%d")
+                        )
+                    return  
 
-        # ---- Multi-assignee fast path ----
-        if command:
-            assignees = extract_multiple_assignees(command, team)
-            if len(assignees) > 1:
-                send_whatsapp_message(
-                    sender,
-                    "I found multiple assignees. Please confirm:\n\n"
-                    + "\n".join(assignees)
-                    + "\n\nAlso confirm the task details and deadline.",
-                    pid
+                current_time = datetime.datetime.now()
+                dynamic_prompt = get_system_prompt(current_time)
+            
+                current_agent = Agent(ai_model, deps_type=ManagerContext, system_prompt=dynamic_prompt)
+                
+                current_agent.tool(get_performance_report_tool)
+                current_agent.tool(get_task_list_tool)
+                current_agent.tool(assign_new_task_tool)
+                current_agent.tool(assign_task_by_phone_tool)
+                current_agent.tool(update_task_status_tool)
+                current_agent.tool(get_assignee_list_tool)
+                current_agent.tool(get_users_by_id_tool)
+                current_agent.tool(send_whatsapp_report_tool)
+                current_agent.tool(add_user_tool)
+                current_agent.tool(delete_user_tool)
+            
+                result = await current_agent.run(
+                    command,
+                    deps=ManagerContext(
+                        sender_phone=sender,
+                        role=role,
+                        current_time=current_time,
+                        document_data=message
+                    )
                 )
-                return
 
-        # ---- Agent setup ----
-        current_time = datetime.datetime.now(IST)
-        dynamic_prompt = get_system_prompt(current_time)
+                conversation_history[sender] = result.all_messages()
+            
+                if len(conversation_history[sender]) > 10:
+                    
+                    conversation_history[sender] = conversation_history[sender][-10:]
+            
+                output_text = result.output
+                if output_text.strip().startswith("{"):
+                    try:
+                        data = json.loads(output_text)
+                        if "task_id" in data and "status" in data:
+                            status = data["status"]
+                            task_id = data["task_id"]
+                            if status == "Close":
+                                output_text = (
+                                    f"Task {task_id} has been closed successfully"
+                                )
+                            elif status == "Closed":
+                                output_text = f"Task {task_id} has been closed successfully."
+                            elif status == "Reopened":
+                                output_text = f"Task {task_id} has been reopened."
+                            else:
+                                output_text = f"Task {task_id} updated to {status}."
 
-        agent = Agent(
-            ai_model,
-            deps_type=ManagerContext,
-            system_prompt=dynamic_prompt
-        )
-
-        # ---- Register tools ----
-        agent.tool(get_performance_report_tool)
-        agent.tool(get_task_list_tool)
-        agent.tool(assign_new_task_tool)
-        agent.tool(assign_task_by_phone_tool)
-        agent.tool(update_task_status_tool)
-        agent.tool(get_assignee_list_tool)
-        agent.tool(get_users_by_id_tool)
-        agent.tool(send_whatsapp_report_tool)
-        agent.tool(add_user_tool)
-        agent.tool(delete_user_tool)
-        agent.tool(explain_decision_tool)
-
-        # ---- Build context window (SAFE + DETERMINISTIC) ----
-        messages = conversation_history[sender][:-1] + [command]
-
-        relative_deadline = parse_relative_deadline(command, current_time)
-        if relative_deadline:
-            messages.append(
-                f"System note: Deadline resolved as {relative_deadline}"
-            )
-
-        # ---- Run agent (guard against Gemini empty output) ----
-        try:
-            result = await agent.run(
-                messages,
-                deps=ManagerContext(
-                    sender_phone=sender,
-                    role=role,
-                    current_time=current_time,
-                    document_data=last_document_by_sender.get(sender)
-                )
-            )
-        except Exception as e:
-            logger.error("Agent execution failed", exc_info=True)
-            send_whatsapp_message(
-                sender,
-                "I couldn’t process that request. Please rephrase or try again.",
-                pid
-            )
-            return
-
-        output_text = (result.output or "").strip()
-        if not output_text:
-            output_text = (
-                "I couldn’t identify a task, update, or request in that message. "
-                "Please clarify what you want me to do."
-            )
-
-        # ---- Send WhatsApp response ----
-        send_whatsapp_message(sender, output_text, pid)
+                    except Exception:
+                        pass
+                if should_send_whatsapp(output_text):
+                    send_whatsapp_message(sender, output_text, pid)
+                else:
+                    logger.warning(f"WhatsApp suppressed message to {sender}: {output_text}")
+            
+            except Exception as e:
+                logger.error(f"Agent execution failed: {str(e)}", exc_info=True)
+                logger.error("System error occurred while processing message", exc_info=True)
 
     except Exception as e:
         logger.error(f"handle_message error: {str(e)}", exc_info=True)
-        send_whatsapp_message(
-            sender,
-            "A system error occurred. Please try again shortly.",
-            pid
-        )
+        logger.error("System error occurred while processing message", exc_info=True)
