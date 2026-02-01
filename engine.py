@@ -1583,8 +1583,8 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                     current_time=current_time,
                     document_data=last_document_by_sender.get(sender)
                 )
-                called_tools = []
             )
+            called_tools = []
             for msg in result.all_messages():
                     if hasattr(msg, "tool_name") and msg.tool_name:
                         called_tools.append(msg.tool_name)
