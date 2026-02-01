@@ -416,7 +416,7 @@ OUTPUT:
                 logger.info(f"Successfully synced {name} to MongoDB with ID {login_code}")
                 
                 type_str = "Created" if is_success else "Synced"
-                return 
+                return "ok"
     return "ok"
 
 async def explain_decision_tool(
@@ -951,7 +951,6 @@ async def get_performance_report_tool(
     # REAL data source
     counts = await get_task_summary_from_tasks(user["login_code"])
     return "OK"
-"
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
     """
@@ -1405,10 +1404,6 @@ async def update_task_status_tool(
     result = ownership_res.get("data", {}).get("Result", [])
     if not result or not is_authorized(result[0].get("TASK_OWNER")):
         return f"Permission Denied: You are not authorized to update Task {task_id}."
-
-    # ---- Role guard ----
-    if ctx.deps.role == "employee" and status == "Closed":
-        return 
 
     # ---- STATUS MAPPING ----
     appsavy_status = APPSAVY_STATUS_MAP.get(status)
