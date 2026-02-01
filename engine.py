@@ -41,6 +41,7 @@ db = client['ai_task_manager'] if client is not None else None
 users_collection = db['users'] if db is not None else None
 conversation_history: Dict[str, List[Dict]] = {}
 last_document_by_sender: Dict[str, Dict] = {}
+pending_task_confirmation: Dict[str, Dict] = {}
 
 APPSAVY_BASE_URL = "https://configapps.appsavy.com/api/AppsavyRestService"
 
@@ -520,6 +521,17 @@ def to_appsavy_datetime(iso_dt: str) -> str:
     if dt.tzinfo is None:
         dt = IST.localize(dt)
     return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+APPSAVY_OWNED_TOOLS = {
+    "assign_new_task_tool",
+    "assign_task_by_phone_tool",
+    "update_task_status_tool",
+    "send_whatsapp_report_tool",
+    "get_performance_report_tool",
+    "get_performance_report_count",
+    "add_user_tool",
+    "delete_user_tool"
+}
 
 def normalize_tasks_response(tasks_data):
     """Normalize Appsavy GET_TASKS response to always return a list"""
@@ -1094,26 +1106,57 @@ OUTPUT:
 - Single confirmation or single error message
 """
     try:
-        # 1. MERGE SOURCES: Fetch candidates from BOTH MongoDB and Appsavy (SID 606)
-        team = load_team()
-        mongo_matches = [u for u in team if name.lower() in u["name"].lower() or name.lower() == u["login_code"].lower()]
-        
-        history = conversation_history.get(ctx.deps.sender_phone, [])
-        pending = [m for m in history if not m["handled"]]
-        if len(pending) < 2:
+        sender = ctx.deps.sender_phone
+
+        # -------------------------------------------------
+        # ✅ CONFIRMATION GATE (CORRECT & EXECUTION-SAFE)
+        # -------------------------------------------------
+        pending = pending_task_confirmation.get(sender)
+
+        # FIRST CALL → ask for confirmation
+        if pending is None:
+            pending_task_confirmation[sender] = {
+                "name": name,
+                "task_name": task_name,
+                "deadline": deadline
+            }
+
             return (
-                "Please confirm the task details before I proceed:\n\n"
+                "Please confirm the task details:\n\n"
                 f"Assignee: {name}\n"
                 f"Task: {task_name}\n"
                 f"Deadline: {deadline}\n\n"
-                "Reply with CONFIRM to proceed, or reply with corrections."
+                "Reply with CONFIRM to proceed."
             )
-            
-        assignee_res = await call_appsavy_api("GET_ASSIGNEE", GetAssigneeRequest(
-            Event="0", 
-            Child=[{"Control_Id": "106771", "AC_ID": "111057"}]
-        ))
-        
+
+        # If confirmation exists but details differ → block overwrite
+        if (
+            pending["name"] != name
+            or pending["task_name"] != task_name
+            or pending["deadline"] != deadline
+        ):
+            return "Please reply CONFIRM to proceed or send corrected details."
+
+        # -------------------------------------------------
+        # ✅ EXECUTION PHASE (CONFIRM RECEIVED)
+        # -------------------------------------------------
+
+        # 1. MERGE SOURCES: Fetch candidates from BOTH MongoDB and Appsavy
+        team = load_team()
+        mongo_matches = [
+            u for u in team
+            if name.lower() in u["name"].lower()
+            or name.lower() == u["login_code"].lower()
+        ]
+
+        assignee_res = await call_appsavy_api(
+            "GET_ASSIGNEE",
+            GetAssigneeRequest(
+                Event="0",
+                Child=[{"Control_Id": "106771", "AC_ID": "111057"}]
+            )
+        )
+
         appsavy_users = []
         if isinstance(assignee_res, dict):
             appsavy_users = assignee_res.get("data", {}).get("Result", [])
@@ -1121,15 +1164,18 @@ OUTPUT:
             appsavy_users = assignee_res
 
         appsavy_matches = [
-            {"name": u.get("NAME") or u.get("PARTICIPANT_NAME"), "login_code": u.get("ID") or u.get("LOGIN_ID"), "phone": "N/A"} 
-            for u in appsavy_users if name.lower() in str(u.get("NAME", "")).lower()
+            {
+                "name": u.get("NAME") or u.get("PARTICIPANT_NAME"),
+                "login_code": u.get("ID") or u.get("LOGIN_ID"),
+                "phone": "N/A"
+            }
+            for u in appsavy_users
+            if name.lower() in str(u.get("NAME", "")).lower()
         ]
 
-        # Deduplicate using Login ID to ensure we catch every unique instance
         combined = {}
         for u in mongo_matches:
             combined[u["login_code"]] = u
-
         for u in appsavy_matches:
             if u["login_code"] not in combined:
                 combined[u["login_code"]] = u
@@ -1139,102 +1185,63 @@ OUTPUT:
         if not matches:
             return f"Error: User or Group '{name}' not found in the authorized directory."
 
-        # 2. DEEP LOOKUP & HIERARCHY: If multiple matches, fetch REAL details (SID 609)
         if len(matches) > 1:
-            final_options = []
-            for candidate in matches:
-                # Call Detail API (SID 609) to get Mobile + Division + Zone
-                details_res = await call_appsavy_api("GET_USERS_BY_ID", GetUsersByIdRequest(
-                    Event="107018",
-                    Child=[{
-                        "Control_Id": "107019",
-                        "AC_ID": "111271",
-                        "Parent": [{"Control_Id": "106771", "Value": candidate["login_code"], "Data_Form_Id": ""}]
-                    }]
-                ))
-                
-                # If API succeeds, extract phone and office data
-                if isinstance(details_res, list) and len(details_res) > 0:
-                    detail = details_res[0]
-                    candidate["phone"] = detail.get("MOBILE") or detail.get("PHONE") or "N/A"
-                    # Capture Hierarchy levels
-                    office_parts = [
-                        detail.get("ZONE_NAME"),
-                        detail.get("CIRCLE_NAME"),
-                        detail.get("DIVISION_NAME")
-                    ]
-                    candidate["office"] = " > ".join([p for p in office_parts if p]) or "Office N/A"
-                elif isinstance(details_res, dict) and "data" in details_res:
-                    res_list = details_res.get("data", {}).get("Result", [])
-                    if res_list:
-                        candidate["phone"] = res_list[0].get("MOBILE") or "N/A"
-                        candidate["office"] = res_list[0].get("DIVISION_NAME") or "Office N/A"
-                
-                final_options.append(candidate)
-
-            # Format clarification message with Hierarchy and Phone Numbers
-            options_text = "\n".join([f"- {u['name']} ({u.get('office', 'Office N/A')}): {u['phone']}" for u in final_options])
             return (
-                f"I found multiple users named '{name}'. Who should I assign this to?\n\n"
-                f"{options_text}\n\n"
-                "Please reply with the correct 10-digit phone number."
+                f"I found multiple users named '{name}'. "
+                "Please specify the correct 10-digit phone number."
             )
 
-        # 3. SINGLE MATCH FOUND: Proceed with Assignment (SID 604)
+        # 2. SINGLE MATCH → CREATE TASK
         user = matches[0]
         login_code = user["login_code"]
 
-        # 2. Handle Document Attachment
         documents_child = []
-        document_data = getattr(getattr(ctx, "deps", None), "document_data", None)
-        if document_data:            
-            media_type = ctx.deps.document_data.get("type")
-            media_info = ctx.deps.document_data.get(media_type)
+        document_data = ctx.deps.document_data
+
+        if document_data:
+            media_type = document_data.get("type")
+            media_info = document_data.get(media_type)
             if media_info:
-                logger.info(f"Downloading attachment for new task: {media_type}")
                 base64_data = download_and_encode_document(media_info)
                 if base64_data:
-                    fname = media_info.get("filename") or (
-                        f"task_image_{datetime.datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.png" 
-                        if media_type == "image" else "task_document.pdf"
+                    fname = media_info.get("filename") or "task_document.pdf"
+                    documents_child.append(
+                        DocumentItem(
+                            DOCUMENT=DocumentInfo(VALUE=fname, BASE64=base64_data),
+                            DOCUMENT_NAME=fname
+                        )
                     )
-                    documents_child.append(DocumentItem(
-                        DOCUMENT=DocumentInfo(VALUE=fname, BASE64=base64_data),
-                        DOCUMENT_NAME=fname
-                    ))
 
         req = CreateTaskRequest(
-            ASSIGNEE=login_code,   
+            ASSIGNEE=login_code,
             DESCRIPTION=task_name,
             TASK_NAME=task_name,
             EXPECTED_END_DATE=to_appsavy_datetime(deadline),
             MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
-            DETAILS=Details(
-                CHILD=[]
-            ),
+            DETAILS=Details(CHILD=[]),
             DOCUMENTS=Documents(CHILD=documents_child)
         )
-        
-        # 4. Execute API Call
+
         api_response = await call_appsavy_api("CREATE_TASK", req)
-        
+
         if not api_response:
             return "API failure: No response from server during task creation."
-        
+
         if isinstance(api_response, dict):
-            if api_response.get('error'):
+            if api_response.get("error"):
                 return f"API failure: {api_response.get('error')}"
-            
-            # Check for success (RESULT 1)
-            if str(api_response.get('result')) == "1" or str(api_response.get('RESULT')) == "1":
-                last_document_by_sender.pop(ctx.deps.sender_phone, None)
+
+            if str(api_response.get("result")) == "1" or str(api_response.get("RESULT")) == "1":
+                last_document_by_sender.pop(sender, None)
+                pending_task_confirmation.pop(sender, None)
                 return f"Task successfully assigned to {user['name'].title()} (ID: {login_code})."
 
         return f"API Error: {api_response.get('resultmessage', 'Unexpected response format')}"
-        
+
     except Exception as e:
         logger.error(f"assign_new_task_tool error: {str(e)}", exc_info=True)
         return f"System Error: Unable to assign task ({str(e)})"
+    
 
 async def assign_task_by_phone_tool(
     ctx: RunContext[ManagerContext],
@@ -1418,20 +1425,21 @@ def normalize_phone(phone: str) -> str:
     return digits
 
 async def handle_message(command, sender, pid, message=None, full_message=None):
-    # ---- Quick command shortcut ----
-    if command and command.strip().lower() == "delete & add":
-        send_whatsapp_message(
-            sender,
-            "Please resend user details in this format:\n\n"
-            "Add user\nName\nMobile\nEmail",
-            pid
-        )
-        return
-
     try:
         sender = normalize_phone(sender)
+        command = (command or "").strip()
 
-        # ---- Media detection ----
+        # ---------------- QUICK COMMAND ----------------
+        if command.lower() == "delete & add":
+            send_whatsapp_message(
+                sender,
+                "Please resend user details in this format:\n\n"
+                "Add user\nName\nMobile\nEmail",
+                pid
+            )
+            return
+
+        # ---------------- MEDIA HANDLING ----------------
         is_media = False
         if message:
             is_media = any(k in message for k in ["document", "image", "video", "audio", "type"])
@@ -1447,7 +1455,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
             return
 
-        # ---- Role resolution ----
+        # ---------------- ROLE RESOLUTION ----------------
         manager_phone = normalize_phone(os.getenv("MANAGER_PHONE"))
         team = load_team()
 
@@ -1456,9 +1464,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         elif any(normalize_phone(u["phone"]) == sender for u in team):
             role = "employee"
         else:
-            role = None
-
-        if not role:
             send_whatsapp_message(
                 sender,
                 "Access Denied: Your number is not authorized to use this system.",
@@ -1466,20 +1471,43 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
             return
 
-        # ---- Conversation memory (LAST 10 USER MESSAGES) ----
-        if sender not in conversation_history:
-            conversation_history[sender] = []
+        # ---------------- CONFIRMATION GATE ----------------
+        if command.lower() in {"confirm", "yes", "ok"}:
+            pending = pending_task_confirmation.get(sender)
+            if pending:
+                logger.info(f"[CONFIRMATION RECEIVED] user={sender}")
 
+                ctx = RunContext(
+                    deps=ManagerContext(
+                        sender_phone=sender,
+                        role=role,
+                        current_time=datetime.datetime.now(IST),
+                        document_data=last_document_by_sender.get(sender)
+                    )
+                )
+
+                await assign_new_task_tool(
+                    ctx,
+                    name=pending["name"],
+                    task_name=pending["task_name"],
+                    deadline=pending["deadline"]
+                )
+
+                pending_task_confirmation.pop(sender, None)
+                return  
+
+        # ---------------- MEMORY ----------------
+        conversation_history.setdefault(sender, [])
         if command:
             conversation_history[sender].append({
-                "role":"user",
+                "role": "user",
                 "text": command,
                 "handled": False,
-                "timestamp" : datetime.datetime.now(IST).isoformat()
+                "timestamp": datetime.datetime.now(IST).isoformat()
             })
             conversation_history[sender] = conversation_history[sender][-5:]
 
-        # ---- Multi-assignee fast path ----
+        # ---------------- MULTI ASSIGNEE FAST EXIT ----------------
         if command:
             assignees = extract_multiple_assignees(command, team)
             if len(assignees) > 1:
@@ -1492,10 +1520,10 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 )
                 return
 
-        # ---- Agent setup ----
+        # ---------------- AGENT SETUP ----------------
         current_time = datetime.datetime.now(IST)
         history = conversation_history.get(sender, [])
-        dynamic_prompt = get_system_prompt(current_time,history)
+        dynamic_prompt = get_system_prompt(current_time, history)
 
         agent = Agent(
             ai_model,
@@ -1503,7 +1531,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             system_prompt=dynamic_prompt
         )
 
-        # ---- Register tools ----
         agent.tool(get_performance_report_tool)
         agent.tool(get_task_list_tool)
         agent.tool(assign_new_task_tool)
@@ -1516,19 +1543,14 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         agent.tool(delete_user_tool)
         agent.tool(explain_decision_tool)
 
-        # ---- Build context window for agent ---
-
-        history = conversation_history.get(sender,[])
-        messages = [
-           
-            json.dumps({
-                "conversation_history":history,
-                "new_message":command
-            })
-            
-        ]
+        # ---------------- RUN AGENT ----------------
         result = await agent.run(
-            messages,
+            [
+                json.dumps({
+                    "conversation_history": history,
+                    "new_message": command
+                })
+            ],
             deps=ManagerContext(
                 sender_phone=sender,
                 role=role,
@@ -1537,11 +1559,12 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
         )
 
-
+        # ---------------- MARK HANDLED ----------------
         for msg in conversation_history.get(sender, []):
-            if msg["text"] == command and msg["handled"] is False:
+            if msg["text"] == command and not msg["handled"]:
                 msg["handled"] = True
 
+        # ---------------- OUTPUT ----------------
         output_text = (result.output or "").strip()
         if not output_text:
             output_text = (
@@ -1549,26 +1572,20 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 "Please clarify what you want me to do."
             )
 
+        called_tools = {
+            msg.tool_name
+            for msg in result.all_messages()
+            if hasattr(msg, "tool_name") and msg.tool_name
+        }
 
-        # ---- DECIDE WHATSAPP OWNERSHIP BASED ON TOOL CALLS ----
-        called_tools = []
-        for msg in result.all_messages():
-            if hasattr(msg, "tool_name") and msg.tool_name:
-                called_tools.append(msg.tool_name)
-
-        called_tools = list(set(called_tools))  # dedupe
-        
-        send_whatsapp = True
+        send_whatsapp = not any(tool in APPSAVY_OWNED_TOOLS for tool in called_tools)
 
         if send_whatsapp:
             send_whatsapp_message(sender, output_text, pid)
         else:
             logger.info(
-                f"[WHATSAPP-SUPPRESSED] "
-                f"user={sender} "
-                f"tools_called={called_tools}"
+                f"[WHATSAPP-SUPPRESSED] user={sender} tools_called={list(called_tools)}"
             )
 
     except Exception as e:
         logger.error(f"handle_message error: {str(e)}", exc_info=True)
-        logger.error("System error occurred while processing message", exc_info=True)
