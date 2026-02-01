@@ -1242,7 +1242,7 @@ OUTPUT:
             if str(api_response.get("result")) == "1" or str(api_response.get("RESULT")) == "1":
                 last_document_by_sender.pop(sender, None)
                 pending_task_confirmation.pop(sender, None)
-                return f"Task successfully assigned to {user['name'].title()} (ID: {login_code})."
+                return
 
         return f"API Error: {api_response.get('resultmessage', 'Unexpected response format')}"
 
