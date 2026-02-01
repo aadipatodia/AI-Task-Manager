@@ -19,10 +19,12 @@ from googleapiclient.discovery import build
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
-from send_message import send_whatsapp_message, send_whatsapp_document
-from google_auth_oauthlib.flow import Flow
+from send_message import send_whatsapp_message
 import asyncio
-from send_message import send_registration_template
+import time
+from hashlib import sha256
+
+recent_replies: dict[str, dict] = {}
 
 load_dotenv()
 
@@ -33,7 +35,9 @@ SCOPES = ['https://www.googleapis.com/auth/gmail.send']
 
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-1-ugb8.onrender.com/oauth2callback")
 MANAGER_EMAIL = "ankita.mishra@mobineers.com"
+processed_message_ids: set[str] = set()
 
+pending_task_confirmations: dict[str, dict] = {}   
 # Initialize MongoDB Connection
 MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI, tlsCAFile=certifi.where()) if MONGO_URI else None
@@ -223,9 +227,23 @@ Current Time: {current_time_str}
 - If multiple tools seem relevant, choose ONLY the most direct match and ignore others.
 - Never chain tools automatically. Respond once per message.
 
-### TASK ASSIGNMENT:
-* When user wants to assign a task, extract: assignee name, task description, deadline
-* Use 'assign_new_task_tool'
+### TASK ASSIGNMENT — TWO-STEP CONFIRMATION (MANDATORY FOR MANAGERS)
+When the manager wants to assign a new task (regardless of method: name, phone, group, etc.):
+YOU **MUST ALWAYS** DO THE FOLLOWING IN THIS EXACT ORDER:
+1. Extract clearly:
+   - assignee (name / login code / phone)
+   - full task description
+   - expected deadline (convert to ISO format internally)
+2. **NEVER** call assign_new_task_tool or assign_task_by_phone_tool directly on the first message.
+3. Instead:
+   - Call confirm_and_create_task_tool(..., confirmed=False)
+   - This will return a nicely formatted confirmation message
+4. Wait for the user’s next message.
+   - If the user says yes / confirm / ok / proceed / y / 👍 / etc. → call confirm_and_create_task_tool(..., confirmed=True)
+   - If the user says cancel / no / abort / stop → reply "Task assignment cancelled." and do NOT call any creation tool.
+5. Only after receiving explicit confirmation may the task actually be created in Appsavy.
+Do NOT assume confirmation — always wait for explicit yes-type answer.
+- If user (manager) confirms the task, then Use 'assign_new_task_tool'
 * **Deadline Logic:**
   - If time mentioned is later than current time → Use today's date
   - If time has already passed today → Use tomorrow's date
@@ -323,6 +341,9 @@ Performance reporting rules:
 - When a specific employee is mentioned:
   - Use GET_COUNT (SID 616)
   - Do NOT send WhatsApp to the employee
+- The performance_report_tool should be called AT MOST ONCE per user message.
+- If you already called it, do NOT call it again — just use the returned text.
+- For named employees, return a simple text summary using get_task_summary_from_tasks. Do NOT call WHATSAPP_PDF_REPORT for individual users.
 
 Interpretation rules:
 1. If the user does not mention any employee name:
@@ -358,10 +379,40 @@ When asked about users in a group or specific user details:
 - Group IDs start with 'G-' (e.g., G-10343-41)
 - User IDs start with 'D-' (e.g., D-3514-1001)
 
-### ASSIGNEE LOOKUP:
-When needing to list all available assignees:
-- Use 'get_assignee_list_tool'
-- Returns all users who can be assigned tasks
+### ASSIGNEE / EMPLOYEE LIST LOOKUP (CRITICAL):
+When the user asks to see people, employees, assignees, or team members,  
+you MUST interpret it as a request to list assignable users.
+This includes (but is NOT limited to) phrases like:
+- "show me employee list"
+- "employee list"
+- "list employees"
+- "people under me"
+- "my team"
+- "team members"
+- "staff list"
+- "assignees"
+- "who can I assign tasks to"
+- "show users"
+- "list people"
+- "who works here"
+- "who are my employees"
+### RULES:
+1. If the intent is to VIEW a list of people (not details of one specific user):
+   → CALL `get_assignee_list_tool`
+2. Call this tool ONLY ONCE per user message.
+3. Do NOT ask clarifying questions if the intent is clear.
+4. Do NOT summarize, rephrase, or filter the list.
+5. Return the tool output EXACTLY as received.
+6. Do NOT call any other tool in the same message.
+### IMPORTANT:
+- This tool is READ-ONLY.
+- It does NOT create, delete, or modify users.
+- It does NOT require manager confirmation.
+- Any authorized user may view the assignee list unless explicitly restricted.
+If the user asks for details of ONE specific user:
+→ Use `get_users_by_id_tool` instead.
+If the user asks to ADD or REMOVE a user:
+→ Use add_user_tool or delete_user_tool (only with explicit intent).
 
 ### DOCUMENT HANDLING:
 - When file received without task details: Ask for assignee name, task description, and deadline
@@ -468,7 +519,6 @@ class UpdateTaskRequest(BaseModel):
     UPLOAD_DOCUMENT: UploadDocument
     WHATSAPP_MOBILE_NUMBER: str
 
-
 class GetCountRequest(BaseModel):
     Event: str = "107567"
     Child: List[Dict]
@@ -488,6 +538,68 @@ class AddDeleteUserRequest(BaseModel):
     EMAIL: str = ""               # ← made optional with default ""
     MOBILE_NUMBER: str
     NAME: str
+
+def should_send_unique_reply(sender: str, text: str, ttl=60) -> bool:
+    key = sha256(text.lower().strip().encode()).hexdigest()
+    now = time.time()
+
+    last = recent_replies.get(sender)
+    if last and last["key"] == key and now - last["time"] < ttl:
+        logger.warning(f"[DEDUP-OUT] Suppressed duplicate reply to {sender}")
+        return False
+
+    recent_replies[sender] = {"key": key, "time": now}
+    return True
+
+async def confirm_and_create_task_tool(
+    ctx: RunContext[ManagerContext],
+    assignee_name: str,
+    task_description: str,
+    deadline_iso: str,           # already in YYYY-MM-DDTHH:MM:SS
+    confirmed: bool = False      # will be set to True only on second call
+) -> str:
+    sender = ctx.deps.sender_phone
+    
+    if not confirmed:
+        # Step 1: store pending confirmation
+        key = f"confirm_{int(time.time())}"
+        pending_task_confirmations[sender] = {
+            "assignee": assignee_name,
+            "task": task_description,
+            "deadline": deadline_iso,
+            "timestamp": time.time(),
+            "status": "awaiting_confirmation"
+        }
+        
+        human_deadline = datetime.datetime.fromisoformat(deadline_iso).strftime("%d %b %Y, %I:%M %p")
+        
+        return (
+            f"Please confirm the following task assignment:\n\n"
+            f"• Assignee: {assignee_name}\n"
+            f"• Task: {task_description}\n"
+            f"• Deadline: {human_deadline}\n\n"
+            f"Reply with: yes / confirm / ok / proceed\n"
+            f"or 'cancel' to abort."
+        )
+    
+    # Step 2: actually create (confirmed == True)
+    if sender not in pending_task_confirmations:
+        return "No pending task confirmation found. Please start over."
+    
+    data = pending_task_confirmations.pop(sender, None)
+    if not data or time.time() - data["timestamp"] > 600:  # 10 min TTL
+        return "Confirmation timed out. Please assign the task again."
+    
+    # Reuse the original assign_new_task_tool logic here
+    # (you can extract the creation part into a shared function)
+    creation_result = await assign_new_task_tool(
+        ctx,
+        name=data["assignee"],
+        task_name=data["task"],
+        deadline=data["deadline"]
+    )
+    
+    return creation_result
 
 async def add_user_tool(
     ctx: RunContext[ManagerContext],
@@ -638,30 +750,6 @@ def to_appsavy_datetime(iso_dt: str) -> str:
     dt = datetime.datetime.fromisoformat(iso_dt)
     return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
-def send_email(to_email: str, subject: str, body: str) -> bool:
-    """Send email via Gmail API."""
-    try:
-        service = get_gmail_service()
-        if not service:
-            logger.warning("Gmail service unavailable, skipping email")
-            return False
-        
-        message = MIMEMultipart()
-        message['to'] = to_email
-        message['subject'] = subject
-        message.attach(MIMEText(body, 'plain'))
-        
-        raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
-        send_message = service.users().messages().send(
-            userId='me',
-            body={'raw': raw_message}
-        ).execute()
-        
-        logger.info(f"Email sent successfully to {to_email}")
-        return True
-    except Exception as e:
-        logger.error(f"Email sending failed: {str(e)}")
-        return False
 
 def normalize_tasks_response(tasks_data):
     """Normalize Appsavy GET_TASKS response to always return a list"""
@@ -1039,12 +1127,9 @@ async def get_performance_report_tool(
     # Trigger SID 627 (Count) — no data expected
     await get_performance_count_via_627(ctx, user["login_code"])
 
-    # REAL data source
-    counts = await get_task_summary_from_tasks(user["login_code"])
-    return
+    return ("Performance Summary")
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
-    sender_mobile = ctx.deps.sender_phone[-10:]
 
     try:
         team = load_team()
@@ -1205,6 +1290,7 @@ def extract_remark(text: str, task_id: str):
     return t.capitalize() if t else ""
 
 
+
 async def assign_new_task_tool(
     ctx: RunContext[ManagerContext],
     name: str,
@@ -1340,7 +1426,7 @@ async def assign_new_task_tool(
             
             # Check for success (RESULT 1)
             if str(api_response.get('result')) == "1" or str(api_response.get('RESULT')) == "1":
-                return "__TASK_ASSIGNED__"
+                return f"Task successfully assigned to {user['name'].title()} (ID: {login_code})."
 
         return f"API Error: {api_response.get('resultmessage', 'Unexpected response format')}"
         
@@ -1588,6 +1674,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             current_agent.tool(get_performance_report_tool)
             current_agent.tool(get_task_list_tool)
             current_agent.tool(assign_new_task_tool)
+            current_agent.tool(confirm_and_create_task_tool)
             current_agent.tool(assign_task_by_phone_tool)
             current_agent.tool(update_task_status_tool)
             current_agent.tool(get_assignee_list_tool)
@@ -1654,8 +1741,9 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 except Exception:
                     pass
 
-            if should_send_whatsapp(output_text):
+            if should_send_whatsapp(output_text) and should_send_unique_reply(sender, output_text):
                 send_whatsapp_message(sender, output_text, pid)
+
             else:
                 logger.info(
                     f"[WHATSAPP_SUPPRESSED][{sender}] {output_text}"
