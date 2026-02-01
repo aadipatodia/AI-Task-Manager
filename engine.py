@@ -1569,7 +1569,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         # Inject recent conversation (user + assistant)
         for turn in conversation_history.get(sender, []):
-            messages.append(content=turn["content"])
+            messages.append(turn["content"])
 
         # Inject pending task state (single source of truth)
         pending = pending_task_by_sender.get(sender)
