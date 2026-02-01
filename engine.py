@@ -1350,6 +1350,7 @@ async def update_task_status_tool(
 
     AUTHORIZATION RULES:
     - Only task owner (assignee or reporter) can update.
+    - Never ask user if h is assignee or reporter, that is already handled by sid 632, i.e CHECK_OWNERSHIP API
     - Employees CAN use status "Closed".
     - Managers CANNOT use status "Work In Progress".
     - Map intent → status
