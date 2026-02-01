@@ -617,8 +617,6 @@ def normalize_status_for_report(status: str) -> str:
         "in progress": "Partially Closed",
 
         "reported": "Reported Closed",
-
-        # user usually means final completion
         "completed": "Closed",
         "done": "Closed",
         "closed": "Closed"
