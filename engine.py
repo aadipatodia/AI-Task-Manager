@@ -1471,31 +1471,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
             return
 
-        # ---------------- CONFIRMATION GATE ----------------
-        if command.lower() in {"confirm", "yes", "ok"}:
-            pending = pending_task_confirmation.get(sender)
-            if pending:
-                logger.info(f"[CONFIRMATION RECEIVED] user={sender}")
-
-                ctx = RunContext(
-                    deps=ManagerContext(
-                        sender_phone=sender,
-                        role=role,
-                        current_time=datetime.datetime.now(IST),
-                        document_data=last_document_by_sender.get(sender)
-                    )
-                )
-
-                await assign_new_task_tool(
-                    ctx,
-                    name=pending["name"],
-                    task_name=pending["task_name"],
-                    deadline=pending["deadline"]
-                )
-
-                pending_task_confirmation.pop(sender, None)
-                return  
-
         # ---------------- MEMORY ----------------
         conversation_history.setdefault(sender, [])
         if command:
@@ -1507,20 +1482,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             })
             conversation_history[sender] = conversation_history[sender][-5:]
 
-        # ---------------- MULTI ASSIGNEE FAST EXIT ----------------
-        if command:
-            assignees = extract_multiple_assignees(command, team)
-            if len(assignees) > 1:
-                send_whatsapp_message(
-                    sender,
-                    "I found multiple assignees. Please confirm:\n\n"
-                    + "\n".join(assignees)
-                    + "\n\nAlso confirm the task details and deadline.",
-                    pid
-                )
-                return
-
-        # ---------------- AGENT SETUP ----------------
+        # ---------------- AGENT SETUP (MUST BE BEFORE CONFIRM) ----------------
         current_time = datetime.datetime.now(IST)
         history = conversation_history.get(sender, [])
         dynamic_prompt = get_system_prompt(current_time, history)
@@ -1542,6 +1504,43 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         agent.tool(add_user_tool)
         agent.tool(delete_user_tool)
         agent.tool(explain_decision_tool)
+
+        # ---------------- CONFIRMATION GATE ----------------
+        if command.lower() in {"confirm", "yes", "ok"}:
+            pending = pending_task_confirmation.get(sender)
+            if pending:
+                logger.info(f"[CONFIRMATION RECEIVED] user={sender}")
+
+                confirmation_text = (
+                    f"Confirm assignment:\n"
+                    f"Assignee: {pending['name']}\n"
+                    f"Task: {pending['task_name']}\n"
+                    f"Deadline: {pending['deadline']}"
+                )
+
+                await agent.run(
+                    [confirmation_text],
+                    deps=ManagerContext(
+                        sender_phone=sender,
+                        role=role,
+                        current_time=current_time,
+                        document_data=last_document_by_sender.get(sender)
+                    )
+                )
+                return
+
+        # ---------------- MULTI ASSIGNEE FAST EXIT ----------------
+        if command:
+            assignees = extract_multiple_assignees(command, team)
+            if len(assignees) > 1:
+                send_whatsapp_message(
+                    sender,
+                    "I found multiple assignees. Please confirm:\n\n"
+                    + "\n".join(assignees)
+                    + "\n\nAlso confirm the task details and deadline.",
+                    pid
+                )
+                return
 
         # ---------------- RUN AGENT ----------------
         result = await agent.run(
