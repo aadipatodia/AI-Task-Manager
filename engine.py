@@ -12,6 +12,7 @@ from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.gemini import GeminiModel
+from pydantic_ai.messages import ModelResponse, ModelRequest, TextPart, UserPromptPart
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -22,10 +23,6 @@ from send_message import send_whatsapp_message, send_whatsapp_document
 from google_auth_oauthlib.flow import Flow
 import asyncio
 from send_message import send_registration_template
-from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
-
-conversation_history: Dict[str, list] = {}
-
 
 load_dotenv()
 
@@ -560,7 +557,11 @@ async def add_user_tool(
                 )
                 logger.info(f"Successfully synced {name} to MongoDB with ID {login_code}")
                 
-                return
+                type_str = "Created" if is_success else "Synced"
+                return (f" Success: {type_str}!\n\n"
+                        f"Name: {name}\n"
+                        f"Login ID: {login_code}\n"
+                        f"Source: {status_note}")
 
     return f"Failed: I could not find a Login ID for '{name}' in the message or the system list. Please check if the name matches exactly."
 
@@ -663,30 +664,6 @@ def send_email(to_email: str, subject: str, body: str) -> bool:
     except Exception as e:
         logger.error(f"Email sending failed: {str(e)}")
         return False
-
-def add_to_history(sender: str, role: str, content: str):
-    """
-    role: 'user' | 'assistant'
-    """
-    if sender not in conversation_history:
-        conversation_history[sender] = []
-
-    if role == "user":
-        conversation_history[sender].append(
-            ModelRequest(
-                parts=[UserPromptPart(content)]
-            )
-        )
-    else:
-        conversation_history[sender].append(
-            ModelResponse(
-                parts=[TextPart(content)]
-            )
-        )
-
-    # HARD LIMIT to avoid token explosion
-    conversation_history[sender] = conversation_history[sender][-10:]
-
 
 def normalize_tasks_response(tasks_data):
     """Normalize Appsavy GET_TASKS response to always return a list"""
@@ -1090,7 +1067,7 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
                     "Parent": [
                         {"Control_Id": "106825", "Value": "Open,Work In Progress,Close", "Data_Form_Id": ""},  # or leave empty or "Open"
                         {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},           # from date
-                        {"Control_Id": "106827", "Value": login_code, "Data_Form_Id": ""},   # ensure this is correct D-... or whatever Appsavy uses
+                        {"Control_Id": "106827", "Value": login_code, "Data_Form_Id": ""},   # ← ensure this is correct D-... or whatever Appsavy uses
                         {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},           # to date
                         {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},           # assignment type
                         {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""},          # button label / flag
@@ -1170,6 +1147,7 @@ async def get_task_description(task_id: str) -> str:
 
     except Exception as e:
         logger.error(f"Failed to fetch task description for {task_id}: {e}")
+
     return "N/A"
 
 
@@ -1364,7 +1342,7 @@ async def assign_new_task_tool(
             
             # Check for success (RESULT 1)
             if str(api_response.get('result')) == "1" or str(api_response.get('RESULT')) == "1":
-                return
+                return f"Task successfully assigned to {user['name'].title()} (ID: {login_code})."
 
         return f"API Error: {api_response.get('resultmessage', 'Unexpected response format')}"
         
@@ -1463,6 +1441,9 @@ async def update_task_status_tool(
     if not result or not is_authorized(result[0].get("TASK_OWNER")):
         return f"Permission Denied: You are not authorized to update Task {task_id}."
 
+    # ---- Role guard ----
+    if ctx.deps.role == "employee" and status == "Closed":
+        return "Final closure requires manager approval."
 
     # ---- STATUS MAPPING ----
     appsavy_status = APPSAVY_STATUS_MAP.get(status)
@@ -1515,40 +1496,6 @@ def should_send_whatsapp(text: str) -> bool:
 
     t = text.lower()
     return not any(k in t for k in block_keywords)
-
-async def should_use_history_gemini(
-    ai_model,
-    system_prompt: str,
-    user_message: str
-) -> bool:
-    """
-    Asks Gemini whether prior conversation is required to answer correctly.
-    Returns True / False only.
-    """
-
-    decision_agent = Agent(
-        ai_model,
-        system_prompt=(
-            system_prompt
-            + "\n\nYou are a classifier. "
-              "Answer ONLY with 'YES' or 'NO'. "
-              "Do NOT explain."
-        )
-    )
-
-    result = await decision_agent.run(
-        f"""
-Does this message require previous conversation context to answer correctly?
-
-Message:
-\"{user_message}\"
-
-Answer strictly with YES or NO.
-"""
-    )
-
-    return result.output.strip().upper() == "YES"
-
 
 def normalize_phone(phone: str) -> str:
     digits = re.sub(r"\D", "", phone)
@@ -1624,21 +1571,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 current_time = datetime.datetime.now()
                 dynamic_prompt = get_system_prompt(current_time)
             
-                history = conversation_history.get(sender, [])
-
-                use_history = await should_use_history_gemini(
-                    ai_model=ai_model,
-                    system_prompt=dynamic_prompt,
-                    user_message=command
-                )
-
-                current_agent = Agent(
-                    ai_model,
-                    deps_type=ManagerContext,
-                    system_prompt=dynamic_prompt,
-                    message_history=history if use_history else []
-                )
-
+                current_agent = Agent(ai_model, deps_type=ManagerContext, system_prompt=dynamic_prompt)
                 
                 current_agent.tool(get_performance_report_tool)
                 current_agent.tool(get_task_list_tool)
@@ -1650,10 +1583,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 current_agent.tool(send_whatsapp_report_tool)
                 current_agent.tool(add_user_tool)
                 current_agent.tool(delete_user_tool)
-                
-
-                add_to_history(sender, "user", command)
-
             
                 result = await current_agent.run(
                     command,
@@ -1664,9 +1593,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                         document_data=message
                     )
                 )
-                
-                if result.output:
-                    add_to_history(sender, "assistant", result.output)
 
                 conversation_history[sender] = result.all_messages()
             
