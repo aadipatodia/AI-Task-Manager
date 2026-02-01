@@ -1497,7 +1497,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                     + "\n\nAlso confirm the task details and deadline.",
                     pid
                 )
-            return
+                return
 
         # ---- Agent setup ----
         current_time = datetime.datetime.now(IST)
