@@ -410,7 +410,7 @@ OUTPUT:
             new_user = {
                 "name": name.lower().strip(),
                 "phone": normalize_phone(mobile),
-                "email": email or "",
+                "email": "",
                 "login_code": login_code
             }
             
@@ -492,8 +492,7 @@ OUTPUT:
             users_collection.delete_one({"phone": "91" + mobile[-10:]})
             logger.info(f"User with mobile {mobile[-10:]} removed from MongoDB.")
 
-        return "User deleted successfully from system and database."
-    
+        return
     return 
 
 def get_gmail_service():
@@ -1104,7 +1103,6 @@ CRITICAL TASK ASSIGNMENT RULE:
 - If confirmation has NOT been explicitly given by the user,
   DO NOT finalize task assignment.
 - In that case, ask the user to confirm the details instead of assigning.
-
 
 OUTPUT:
 - Single confirmation or single error message
