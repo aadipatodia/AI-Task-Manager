@@ -4,7 +4,6 @@ import certifi
 import json
 from pydantic import RootModel
 import datetime
-from pymongo import ReturnDocument
 import base64
 import requests
 import logging
@@ -41,7 +40,6 @@ client = MongoClient(MONGO_URI, tlsCAFile=certifi.where()) if MONGO_URI else Non
 db = client['ai_task_manager'] if client is not None else None
 users_collection = db['users'] if db is not None else None
 conversation_history: Dict[str, List[Any]] = {}
-last_document_by_sender: Dict[str, Dict] = {}
 
 APPSAVY_BASE_URL = "https://configapps.appsavy.com/api/AppsavyRestService"
 
@@ -165,7 +163,7 @@ API_CONFIGS = {
     }
 }
 
-ai_model = GeminiModel('gemini-2.5-flash-lite')
+ai_model = GeminiModel('gemini-2.5-pro')
 
 class ManagerContext(BaseModel):
     sender_phone: str
@@ -194,34 +192,207 @@ class PerformanceCountResult(BaseModel):
 def get_system_prompt(current_time: datetime.datetime) -> str:
     team = load_team()
     team_description = "\n".join([f"- {u['name']} (Login: {u['login_code']})" for u in team])
+    current_date_str = current_time.strftime("%Y-%m-%d")
+    current_time_str = current_time.strftime("%I:%M %p")
+    day_of_week = current_time.strftime("%A")
     
     return f"""
-You are the Official AI Task Manager Bot.
+### AUTHORIZED TEAM MEMBERS:
+{team_description}
 
-Your role:
-- Understand the user's intent.
-- Select the correct tool.
-- NEVER invent data.
-- NEVER assume permissions.
-- ALWAYS rely on tool responses.
+You are the Official AI Task Manager Bot for the organization.
+Identity: TM_API (Manager).
+You are a precise, professional assistant with natural language understanding capabilities.
 
-Rules:
-- If a task, user, or report action is requested → use a tool.
-- If required data is missing → ask a clarification question.
-- Do not explain internal rules.
-- Do not summarize tool outputs.
-- Do not guess.
-- BEFORE calling ANY business tool, you MUST call `explain_decision_tool` describing which tool you will use and why.
-- When you make a decision or choose a tool, explain your reasoning ONLY by calling the tool `explain_decision_tool`.
-- NEVER include reasoning in the final user-facing response.
+Current Date: {current_date_str} ({day_of_week})
+Current Time: {current_time_str}
 
-Current date: {current_time.strftime("%Y-%m-%d")}
-Current time: {current_time.strftime("%H:%M")}
-day_of_week = current_time.strftime("%A")
+### CORE PRINCIPLES:
+1. **Natural Language Understanding**: Understand user intent from conversational language
+2. **Context Awareness**: Use conversation history to understand references
+3. **Proactive Clarification**: Ask for missing information naturally
+4. **Professional Communication**: Clear, concise, no emojis
+
+### TASK ASSIGNMENT:
+* When user wants to assign a task, extract: assignee name, task description, deadline
+* Use 'assign_new_task_tool'
+* **Deadline Logic:**
+  - If time mentioned is later than current time → Use today's date
+  - If time has already passed today → Use tomorrow's date
+  - "tomorrow" → Next day
+  - "next week" → 7 days from now
+  - No time specified → default to end of current day (23:59)
+  - Always format as ISO: YYYY-MM-DDTHH:MM:SS
+* **Name Resolution**: Map names to login IDs from team directory
+
+### TASK STATUS RULES (API SID 607):
+You must determine the correct 'new_status' string by interpreting the user's intent and role within the conversation context. Do not look for specific keywords; understand the "state" the user is describing.
+
+### USER MANAGEMENT RULES (ADD / DELETE USERS):
+
+- Any authorized user can ADD a new user.
+### ADD USER TOOL (CRITICAL):
+When the user wants to add a user
+(e.g. "add user", "create user", "register user"):
+
+You MUST:
+1. Extract:
+   - name
+   - mobile number (10 digits)
+   - email (optional)
+   
+2. Call the tool add_user_tool
+3. Pass arguments exactly as:
+   - name
+   - mobile
+   - email
+   
+4. Do NOT ask any follow-up questions if all values are present
+5. Execute immediately
+
+- A user can DELETE a user ONLY IF:
+  - The same user originally added that user.
+
+- Deletion is ownership-based, NOT role-based.
+- Managers do NOT have special override permissions for deleting users.
+
+### DELETION OWNERSHIP ENFORCEMENT:
+- Before deleting a user, always verify ownership.
+- Ownership means: the requester is the same user who added the target user.
+- If the requester did NOT add the user:
+  - Deny the request.
+  - Respond with:
+    "Permission Denied: Only the user who added this account can delete it."
+- Do NOT call the delete user API if ownership does not match.
+- If ownership information is missing or unclear, ask for clarification instead of deleting.
+
+### TOOL USAGE CONSTRAINTS:
+- Use 'delete_user_tool' ONLY after confirming ownership.
+- Ownership means: requester mobile number == creator mobile number.
+- Never assume ownership.
+- If ownership information is unavailable, ask for clarification instead of deleting.
+
+### TASK LISTING:
+When user asks to see tasks, list tasks, pending work:
+- Use 'get_task_list_tool'
+- Without name → Show tasks for the requesting user
+- With name (managers only) → Show tasks for specified employee
+- Show the tasks exactly as returned by the API without applying additional sorting
+- IMPORTANT:
+When responding with task lists, return the tool output EXACTLY as-is.
+Do not summarize, rephrase, or omit any fields.
+
+### UPDATE TASK STATUS
+You are a task workflow interpreter for a backend system.
+Your job is to understand the user's intent and determine the correct
+new_status value for API SID 607 based on:
+- The user's role relative to the specific task
+- The meaning of their message
+
+You MUST follow these rules strictly:
+1. Determine the user's role ONLY from the provided context.
+   - Employee = Assignee of the task
+   - Manager = Reporter/Creator of the task
+2. Never allow:
+   - Employees to use: Reopened
+   - Managers to use: Work In Progress
+4. Interpret natural language correctly:
+   - "done", "finished", "completed", "close", "closed", "submit" etc and phrases with similar intent by an employee means submission and final closure, i.e closed tag
+   - "approve", "looks good", "final close", "close", "closed" etc and phrases with similar intent by a manager means final closure, i.e closed tag
+   - "not good", "redo", "reassign", "reopen" etc and phrases with similar intent by a manager means "reopen"
+5. Do NOT ask the user any questions.
+6. Do NOT explain rules.
+7. Do NOT include anything outside valid JSON.
+8. ONCE THE TASK IS CLOSED FROM EMPLOYEE/ASSIGNEE'S SIDE OR MANAGER/REPORTER'S SIDE IT DOESN'T REQUIRE ANY APPROVAL. BOTH ARE CATEGORISED AS "CLOSED"
+
+**DOCUMENT HANDLING:**
+**Case 1 (Manager):** If a document/image is sent while creating a task, use `assign_new_task_tool`. 
+**Case 2 (Employee):** If a document/image is sent with a "completed" or "closed" message, use `update_task_status_tool` with status `Close` .
+**Case 3 (Update):** If a document is sent during work, use `update_task_status_tool` with status `Work In Progress`.
+
+### PERFORMANCE REPORTING:
+When the user asks for performance, statistics, counts, or a performance report:
+Performance reporting rules:
+- When no employee name is mentioned:
+  - Use SID 627 with REPORT_TYPE = "Detail"
+  - Send PDF on WhatsApp
+- When a specific employee is mentioned:
+  - Use GET_COUNT (SID 616)
+  - Do NOT send WhatsApp to the employee
+
+Interpretation rules:
+1. If the user does not mention any employee name:
+- Treat the request as a general performance report.
+- Generate the report for all employees (Managers only).
+- Use SID 627 with REPORT_TYPE = "Detail".
+- Send the PDF report on WhatsApp.
+- The user does not need to explicitly say “PDF”.
+
+2. If the user mentions a specific employee name or login code:
+- Use SID 627 with REPORT_TYPE = "Count".
+- Do not generate or send a PDF.
+
+3. Do not infer PDF intent from keywords.
+- PDF is implied automatically for general (no-name) performance requests.
+- Text summary is implied automatically for named employee requests.
+
+4. Employees may only view their own performance.
+- Managers may view performance for all employees.
+
+5. Return results exactly as provided by SID 627.
+- Do not calculate, derive, or modify counts.
+- Missing values must be treated as zero.
+
+### TASK ASSIGNMENT BY PHONE:
+Support assignment using phone numbers:
+- Extract 10-digit number or full format
+- Use 'assign_task_by_phone_tool'
+
+### USER LOOKUP:
+When asked about users in a group or specific user details:
+- Use 'get_users_by_id_tool' with group ID or user ID
+- Group IDs start with 'G-' (e.g., G-10343-41)
+- User IDs start with 'D-' (e.g., D-3514-1001)
+
+### ASSIGNEE LOOKUP:
+When needing to list all available assignees:
+- Use 'get_assignee_list_tool'
+- Returns all users who can be assigned tasks
+
+### DOCUMENT HANDLING:
+- When file received without task details: Ask for assignee name, task description, and deadline
+- When file received with partial info: Ask for missing details
+- Attach stored file to next task assignment automatically
+
+### MANAGER TASK APPROVAL:
+When manager wants to approve/reject completed work:
+- Understand approval/rejection phrases
+- Use 'update_task_status_tool' with appropriate action
+
+### EMPLOYEES VIEWING TASKS:
+Employees can always view their own tasks
+
+### COMMUNICATION STYLE:
+- Professional and concise
+- No emojis or casual language
+- Don't mention internal tool names
+- Ask clarifying questions when needed
+- Confirm critical actions before executing
+
+### WHATSAPP PDF REPORTS:
+When user asks to send, share, or receive a report on WhatsApp:
+- Use 'send_whatsapp_report_tool'
+- REPORT_TYPE: "Count" or "Detail"
+- STATUS examples: Open, Closed, Reported Closed
+- If no assignee specified, send report for requesting user
+
+### IMPORTANT:
+- YOU DO NOT HAVE TO SEND ANY MESSAGES ON WHATSAPP 
+- Ignore WhatsApp headers like '[7:03 pm, 13/1/2026] ABC:' and focus only on the text after the colon.
 """
 
 def load_team():
-    """This function is 100% dynamic and will fetch users from MongoDB."""
+    """Ab ye function 100% dynamic hai, sirf MongoDB se users fetch karega."""
     if users_collection is None:
         logger.error("MongoDB connection cant be initialized")
         return []
@@ -290,9 +461,9 @@ class UpdateTaskRequest(BaseModel):
     TASK_ID: str
     STATUS: str
     COMMENTS: str
-    UPLOAD_DOCUMENT: str = ""   # filename
-    BASE64: str = ""            # base64 string
+    UPLOAD_DOCUMENT: UploadDocument
     WHATSAPP_MOBILE_NUMBER: str
+
 
 class GetCountRequest(BaseModel):
     Event: str = "107567"
@@ -321,31 +492,6 @@ async def add_user_tool(
     email: Optional[str] = None,
     
 ) -> str:
-    """
-ROLE:
-You create a new user.
-
-REQUIRED FIELDS:
-- Name
-- 10-digit mobile number
-- Email (optional)
-
-FLOW:
-1. Call ADD_DELETE_USER (ACTION=Add)
-2. Extract login ID
-3. Sync user to MongoDB
-
-YOU MUST NOT:
-- Ask follow-up if data is complete
-- Guess login ID
-- Modify mobile number format incorrectly
-
-OUTPUT:
-- Success message with Login ID
-- Or failure reason
-"""
-
-
     # 1. Attempt to add the user to Appsavy
     req = AddDeleteUserRequest(
         ACTION="Add",
@@ -419,14 +565,6 @@ OUTPUT:
 
     return f"Failed: I could not find a Login ID for '{name}' in the message or the system list. Please check if the name matches exactly."
 
-async def explain_decision_tool(reason: str) -> None:
-    """
-    INTERNAL ONLY.
-    Logs AI reasoning for tool selection and decisions.
-    NEVER exposed to the user.
-    """
-    logger.info(f"[AI-REASONING] {reason}")
-
 async def delete_user_tool(
     ctx: RunContext[ManagerContext],
     name: str,
@@ -434,28 +572,6 @@ async def delete_user_tool(
     email: Optional[str] = None,
     
 ) -> str:
-    """
-ROLE:
-You delete an existing user.
-
-ABSOLUTE RULE:
-- Only the creator of the user can delete them
-
-MANDATORY CHECK:
-- requester mobile == creator mobile
-
-IF CHECK FAILS:
-- Deny deletion immediately
-
-NEVER:
-- Allow manager override
-- Assume ownership
-- Delete without verification
-
-OUTPUT:
-- Success or permission denied
-"""
-    
     req = AddDeleteUserRequest(
         ACTION="Delete",
         CREATOR_MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
@@ -810,6 +926,7 @@ async def get_performance_count_via_627(
     It does NOT return counts.
     This function only triggers the report and returns an empty dict.
     """
+
     req = WhatsAppPdfReportRequest(
         ASSIGNED_TO=login_code,
         REPORT_TYPE="Count",
@@ -901,34 +1018,16 @@ async def get_performance_report_tool(
     ctx: RunContext[ManagerContext],
     name: Optional[str] = None
 ) -> str:
-    """
-    PURPOSE:
-    - Provide performance statistics, task counts, or report files.
-
-    WHEN TO USE:
-    - User asks for "performance", "stats", "my count", or "report".
-
-    LOGIC:
-    1. IF NO NAME IS MENTIONED:
-       - Treat as a request for a full organization PDF report.
-       - ONLY allowed for 'manager' role.
-    2. IF A NAME/ID IS MENTIONED:
-       - Fetch specific counts for that employee.
-       - Use 'get_task_summary_from_tasks' internally.
-    
-    RULES:
-    - Employees can ONLY see their own performance.
-    - Managers can see anyone's performance.
-    """
-    
     team = load_team()
-    
+
+    # ---------- NO NAME → PDF ----------
     if not name:
         if ctx.deps.role != "manager":
             return "Permission Denied: Only managers can view full performance reports."
 
         return "Performance report PDF has been sent on WhatsApp."
 
+    # ---------- NAME PRESENT → TEXT ----------
     user = next(
         (u for u in team
          if name.lower() in u["name"].lower()
@@ -947,19 +1046,7 @@ async def get_performance_report_tool(
     return
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
-    """
-    PURPOSE:
-    - Retrieve a list of active or pending tasks.
-
-    WHEN TO USE:
-    - User asks: "show my tasks", "what is my pending work?", "list tasks", or "to-do list".
-
-    RULES:
-    - Without a name: Show tasks for the requesting user (caller).
-    - With a name: Only allowed if the caller is a 'manager'.
-    - Output format: Return the ID, Task Name, and Deadline clearly.
-    - Do NOT summarize or omit tasks returned by the system.
-    """
+    sender_mobile = ctx.deps.sender_phone[-10:]
 
     try:
         team = load_team()
@@ -1096,6 +1183,7 @@ def resolve_status(text: str, role: str):
 
     return None
 
+
 def extract_remark(text: str, task_id: str):
     t = text.lower()
 
@@ -1126,26 +1214,9 @@ async def assign_new_task_tool(
     deadline: str
 ) -> str:
     """
-PURPOSE:
-- Assign a new task to a user or group.
-
-WHEN TO ACT:
-- User wants to assign, give, create, or delegate a task.
-
-REQUIRED INPUT:
-- Assignee (name, login code, or phone)
-- Task description
-- Deadline
-
-RULES:
-- Resolve assignee using MongoDB + Appsavy.
-- If multiple matches → ask clarification.
-- If document exists → attach automatically.
-- NEVER assign without a deadline.
-
-OUTPUT:
-- Single confirmation or single error message
-"""
+    Assigns a new task to a user or group.
+    Fixes: Duplicate name resolution, N/A phone numbers, and Meta 24h window blockage.
+    """
     try:
         # 1. MERGE SOURCES: Fetch candidates from BOTH MongoDB and Appsavy (SID 606)
         team = load_team()
@@ -1245,6 +1316,8 @@ OUTPUT:
                         DOCUMENT_NAME=fname
                     ))
 
+        # 3. Prepare the CreateTaskRequest (SID 604)
+        assignee_mobile = user["phone"][-10:]
         req = CreateTaskRequest(
             ASSIGNEE=login_code,   
             DESCRIPTION=task_name,
@@ -1269,7 +1342,6 @@ OUTPUT:
             
             # Check for success (RESULT 1)
             if str(api_response.get('result')) == "1" or str(api_response.get('RESULT')) == "1":
-                last_document_by_sender.pop(ctx.deps.sender_phone, None)
                 return f"Task successfully assigned to {user['name'].title()} (ID: {login_code})."
 
         return f"API Error: {api_response.get('resultmessage', 'Unexpected response format')}"
@@ -1341,36 +1413,6 @@ async def update_task_status_tool(
     status: str,
     remark: Optional[str] = None
 ) -> str:
-    """
-    PURPOSE:
-    - Update the status of an existing task.
-
-    WHEN TO USE:
-    - User wants to mark a task as done, closed, reopened, or in progress.
-
-    AUTHORIZATION RULES:
-    - Only task owner (assignee or reporter) can update.
-    - Never ask user if h is assignee or reporter, that is already handled by sid 632, i.e CHECK_OWNERSHIP API
-    - Employees CAN use status "Closed".
-    - Managers CANNOT use status "Work In Progress".
-    - Map intent → status
-    - Call UPDATE_STATUS API
-    - Do Attach document if given by the user
-
-    STATUS INTERPRETATION:
-    - Employee phrases like "done", "completed","close" → Closed
-    - Manager phrases like "approved", "final close","close" → Closed
-    - Manager phrases like "redo", "not ok" → Reopened
-    - Employee phrases like "in progress", "pending"-> Work in Progress
-   
-    HARD RULES:
-    - NEVER ask questions.
-    - NEVER invent task IDs.
-    - NEVER bypass ownership check.
-    - ALWAYS call CHECK_OWNERSHIP first.
-
-    OUTPUT:
-    - Return ONLY user-facing confirmation text."""
 
     if not task_id:
         return "Please mention the Task ID you want to update."
@@ -1401,50 +1443,28 @@ async def update_task_status_tool(
 
     # ---- Role guard ----
     if ctx.deps.role == "employee" and status == "Closed":
-        return 
+        return "Final closure requires manager approval."
 
     # ---- STATUS MAPPING ----
     appsavy_status = APPSAVY_STATUS_MAP.get(status)
     if not appsavy_status:
         return f"Unsupported status '{status}'."
 
-    # ---- DOCUMENT HANDLING (WHATSAPP ATTACHMENT) ----
-    filename = ""
-    base64_data = ""
-
-    if ctx.deps.document_data:
-        media_type = ctx.deps.document_data.get("type")
-        media_info = ctx.deps.document_data.get(media_type)
-
-        if media_info:
-            logger.info(f"Downloading document for task update: {media_type}")
-            base64_data = download_and_encode_document(media_info)
-            mime = media_info.get("mime_type", "")
-            if not media_info.get("filename"):
-                if "pdf" in mime:
-                    filename = "attachment.pdf"
-                elif "image" in mime:
-                    filename = "image.jpg"
-                elif "audio" in mime:
-                    filename = "audio.mp3"
-                else:
-                    filename = "attachment.bin"
-            else:
-                filename = media_info["filename"]
-
+    # ---- FINAL PAYLOAD (EXACT FORMAT) ----
     req = UpdateTaskRequest(
         TASK_ID=task_id,
-        STATUS=appsavy_status,
-        COMMENTS=remark or "Updated via WhatsApp",
-        UPLOAD_DOCUMENT=filename,
-        BASE64=base64_data,
+        STATUS=appsavy_status,               # internal code
+        COMMENTS=remark or "Terminal Test",
+        UPLOAD_DOCUMENT={
+            "VALUE": "",
+            "BASE64": ""
+        },
         WHATSAPP_MOBILE_NUMBER=sender_mobile
     )
 
     api_response = await call_appsavy_api("UPDATE_STATUS", req)
 
     if api_response and str(api_response.get("RESULT")) == "1":
-        last_document_by_sender.pop(ctx.deps.sender_phone, None)
         if status == "Close":
             return f"Task {task_id} closed"
         if status == "Closed":
@@ -1501,9 +1521,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         is_media = False
         if message:
             is_media = any(k in message for k in ["document", "image", "video", "audio", "type"])
-            
-        if is_media:
-            last_document_by_sender[sender] = message
     
         if is_media and not command:
             send_whatsapp_message(
@@ -1566,7 +1583,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 current_agent.tool(send_whatsapp_report_tool)
                 current_agent.tool(add_user_tool)
                 current_agent.tool(delete_user_tool)
-                current_agent.tool(explain_decision_tool)
             
                 result = await current_agent.run(
                     command,
@@ -1574,7 +1590,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                         sender_phone=sender,
                         role=role,
                         current_time=current_time,
-                        document_data=last_document_by_sender.get(sender)
+                        document_data=message
                     )
                 )
 
