@@ -557,11 +557,7 @@ async def add_user_tool(
                 )
                 logger.info(f"Successfully synced {name} to MongoDB with ID {login_code}")
                 
-                type_str = "Created" if is_success else "Synced"
-                return (f" Success: {type_str}!\n\n"
-                        f"Name: {name}\n"
-                        f"Login ID: {login_code}\n"
-                        f"Source: {status_note}")
+                return
 
     return f"Failed: I could not find a Login ID for '{name}' in the message or the system list. Please check if the name matches exactly."
 
@@ -1067,7 +1063,7 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
                     "Parent": [
                         {"Control_Id": "106825", "Value": "Open,Work In Progress,Close", "Data_Form_Id": ""},  # or leave empty or "Open"
                         {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},           # from date
-                        {"Control_Id": "106827", "Value": login_code, "Data_Form_Id": ""},   # ← ensure this is correct D-... or whatever Appsavy uses
+                        {"Control_Id": "106827", "Value": login_code, "Data_Form_Id": ""},   # ensure this is correct D-... or whatever Appsavy uses
                         {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},           # to date
                         {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},           # assignment type
                         {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""},          # button label / flag
@@ -1147,7 +1143,6 @@ async def get_task_description(task_id: str) -> str:
 
     except Exception as e:
         logger.error(f"Failed to fetch task description for {task_id}: {e}")
-
     return "N/A"
 
 
@@ -1342,7 +1337,7 @@ async def assign_new_task_tool(
             
             # Check for success (RESULT 1)
             if str(api_response.get('result')) == "1" or str(api_response.get('RESULT')) == "1":
-                return f"Task successfully assigned to {user['name'].title()} (ID: {login_code})."
+                return
 
         return f"API Error: {api_response.get('resultmessage', 'Unexpected response format')}"
         
@@ -1441,9 +1436,6 @@ async def update_task_status_tool(
     if not result or not is_authorized(result[0].get("TASK_OWNER")):
         return f"Permission Denied: You are not authorized to update Task {task_id}."
 
-    # ---- Role guard ----
-    if ctx.deps.role == "employee" and status == "Closed":
-        return "Final closure requires manager approval."
 
     # ---- STATUS MAPPING ----
     appsavy_status = APPSAVY_STATUS_MAP.get(status)
