@@ -522,16 +522,7 @@ def to_appsavy_datetime(iso_dt: str) -> str:
         dt = IST.localize(dt)
     return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
-APPSAVY_OWNED_TOOLS = {
-    "assign_new_task_tool",
-    "assign_task_by_phone_tool",
-    "update_task_status_tool",
-    "send_whatsapp_report_tool",
-    "get_performance_report_tool",
-    "get_performance_report_count",
-    "add_user_tool",
-    "delete_user_tool"
-}
+APPSAVY_OWNED_TOOLS = {}
 
 def normalize_tasks_response(tasks_data):
     """Normalize Appsavy GET_TASKS response to always return a list"""
@@ -660,8 +651,25 @@ async def send_whatsapp_report_tool(
 
 async def get_assignee_list_tool(ctx: RunContext[ManagerContext]) -> str:
     """
-    Retrieves list of all assignees/users available in the system using SID 606.
-    Returns formatted list with Login IDs and Names.
+ASSIGNEE LISTING RULES:
+
+When the user asks for:
+- "my assignees"
+- "assignees added by me"
+- "users I added"
+- "people I created"
+- "my team members"
+- "my users"
+- "show my assignees"
+
+THEN:
+- Call the tool: get_my_added_assignees_tool
+- Do NOT call any other assignee or user list tool
+- Do NOT use MongoDB data
+- Do NOT return global user lists
+- Do NOT ask follow-up questions
+
+The result of get_my_added_assignees_tool is FINAL and user-facing.
     """
     try:
         req = GetAssigneeRequest(
