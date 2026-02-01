@@ -227,6 +227,10 @@ IMPORTANT:
 Current date: {current_time.strftime("%Y-%m-%d")}
 Current time: {current_time.strftime("%H:%M")}
 day_of_week = current_time.strftime("%A")
+
+- If the user says "today", "tomorrow", or a specific time (e.g., "8pm") or "in 2 hours", convert it to 'YYYY-MM-DDTHH:MM:SS' based on the current date/time.
+- Current date: {current_time.strftime("%Y-%m-%d")}
+- Current time: {current_time.strftime("%H:%M")}
 """
 
 def load_team():
@@ -322,6 +326,20 @@ class AddDeleteUserRequest(BaseModel):
     EMAIL: Optional[str] = ""
     MOBILE_NUMBER: str
     NAME: str
+    
+import dateparser
+
+def to_appsavy_datetime(time_str: str) -> str:
+    # Try parsing natural language if ISO fails
+    dt = dateparser.parse(time_str, settings={'PREFER_DATES_FROM': 'future', 'RELATIVE_BASE': datetime.datetime.now(IST)})
+    
+    if not dt:
+        # Fallback to current logic or raise error
+        dt = datetime.datetime.fromisoformat(time_str)
+        
+    if dt.tzinfo is None:
+        dt = IST.localize(dt)
+    return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 async def add_user_tool(
     ctx: RunContext[ManagerContext],
@@ -1085,7 +1103,8 @@ WHEN TO ACT:
 REQUIRED INPUT:
 - Assignee (name, login code, or phone)
 - Task description
-- Deadline
+- Deadline (Format: 'YYYY-MM-DDTHH:MM:SS'. You must convert relative times like '8pm today' or "day fater tomorrow" or "in 5 hours" to this format yourself using the current time context).
+
 
 RULES:
 - Resolve assignee using MongoDB + Appsavy.
