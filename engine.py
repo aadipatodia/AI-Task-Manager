@@ -420,7 +420,7 @@ OUTPUT:
                 logger.info(f"Successfully synced {name} to MongoDB with ID {login_code}")
                 
                 type_str = "Created" if is_success else "Synced"
-                return "OK"
+                return ""
     return "failed"
 
 async def explain_decision_tool(
@@ -491,7 +491,7 @@ OUTPUT:
 
         return "User deleted successfully from system and database."
     
-    return "OK"
+    return ""
 
 def get_gmail_service():
     try:
@@ -651,7 +651,7 @@ async def send_whatsapp_report_tool(
         if isinstance(api_response, dict) and api_response.get("error"):
             return f"API Error: {api_response['error']}"
 
-        return "OK"
+        return ""
 
     except Exception as e:
         logger.error("send_whatsapp_report_tool error", exc_info=True)
@@ -906,7 +906,7 @@ async def get_performance_report_tool(
             )
         )
 
-        return "OK"
+        return ""
 
     user = next(
         (u for u in team
@@ -921,9 +921,7 @@ async def get_performance_report_tool(
     # Trigger SID 627 (Count) — no data expected
     await get_performance_count_via_627(ctx, user["login_code"])
 
-    # REAL data source
-    counts = await get_task_summary_from_tasks(user["login_code"])
-    return "OK"
+    return ""
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
     """
@@ -1551,9 +1549,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 called_tools.append(msg.tool_name)
 
         called_tools = list(set(called_tools))  # dedupe
-
-        send_whatsapp = False
-
+        
         send_whatsapp = True
 
         if send_whatsapp:
