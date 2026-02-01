@@ -163,7 +163,7 @@ API_CONFIGS = {
     }
 }
 
-ai_model = GeminiModel('gemini-2.5-flash-lite')
+ai_model = GeminiModel('gemini-2.5-pro')
 
 class ManagerContext(BaseModel):
     sender_phone: str
@@ -1440,10 +1440,6 @@ async def update_task_status_tool(
     result = ownership_res.get("data", {}).get("Result", [])
     if not result or not is_authorized(result[0].get("TASK_OWNER")):
         return f"Permission Denied: You are not authorized to update Task {task_id}."
-
-    # ---- Role guard ----
-    if ctx.deps.role == "employee" and status == "Closed":
-        return "Final closure requires manager approval."
 
     # ---- STATUS MAPPING ----
     appsavy_status = APPSAVY_STATUS_MAP.get(status)
