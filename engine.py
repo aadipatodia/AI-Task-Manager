@@ -20,7 +20,6 @@ from dotenv import load_dotenv
 from send_message import send_whatsapp_message
 import asyncio
 import pytz
-from pydantic_ai.messages import UserPromptPart
 IST = pytz.timezone("Asia/Kolkata")
 
 #918683005252
@@ -36,12 +35,11 @@ REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-1-ugb8.onrende
 MANAGER_EMAIL = "aadi@mobineers.com"
 
 # Initialize MongoDB Connection
-pending_task_by_sender: Dict[str, Dict] = {}
 MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI, tlsCAFile=certifi.where()) if MONGO_URI else None
 db = client['ai_task_manager'] if client is not None else None
 users_collection = db['users'] if db is not None else None
-conversation_history: Dict[str, List[Dict[str, str]]] = {}
+conversation_history: Dict[str, List[Dict]] = {}
 last_document_by_sender: Dict[str, Dict] = {}
 
 APPSAVY_BASE_URL = "https://configapps.appsavy.com/api/AppsavyRestService"
@@ -193,46 +191,29 @@ class PerformanceCountResult(BaseModel):
     CLOSED_TASK: int = 0
     DELAYED_CLOSED_TASK: int = 0
 
-def get_system_prompt(current_time: datetime.datetime) -> str:
+def get_system_prompt(current_time,history) -> str:
     team = load_team()
     team_description = "\n".join([f"- {u['name']} (Login: {u['login_code']})" for u in team])
     
     return f"""
 You are the Official AI Task Manager Bot.
 
-Your role:
-- Understand the user's intent.
-- Select the correct tool.
-- NEVER invent data.
-- NEVER assume permissions.
-- ALWAYS rely on tool responses.
+You are given:
+1. Conversation history with flags
+2. Information about whether a message was already handled
 
-Rules:
-- If a task, user, or report action is requested → use a tool.
-- If required data is missing → ask a clarification question.
-- Do not explain internal rules.
-- Do not summarize tool outputs.
-- Do not guess.
-- NEVER include reasoning in the final user-facing response.
+RULES:
+- If a message is marked handled=true → DO NOT act on it
+- If the last assistant action asked for confirmation:
+  - Treat next YES/OK/CONFIRM as approval
+- Decide based on STATE, not just latest text
 
-CRITICAL TASK ASSIGNMENT FLOW:
-- When assigning a task, NEVER finalize it in the first response.
-- First, restate assignee, task, and deadline and ask for confirmation.
-- After the user replies (agreement or correction), proceed with assignment.
-- Treat agreement contextually; do NOT rely on specific words.
-
-IMPORTANT:
-- User names may be single-word or informal.
-- Do NOT ask for full name unless the API explicitly fails.
-- Do NOT ask for email unless the user provides it voluntarily.
+Conversation History:
+{json.dumps(history, indent=2)}
 
 Current date: {current_time.strftime("%Y-%m-%d")}
 Current time: {current_time.strftime("%H:%M")}
 day_of_week = current_time.strftime("%A")
-
-- If the user says "today", "tomorrow", or a specific time (e.g., "8pm") or "in 2 hours", convert it to 'YYYY-MM-DDTHH:MM:SS' based on the current date/time.
-- Current date: {current_time.strftime("%Y-%m-%d")}
-- Current time: {current_time.strftime("%H:%M")}
 """
 
 def load_team():
@@ -328,20 +309,6 @@ class AddDeleteUserRequest(BaseModel):
     EMAIL: Optional[str] = ""
     MOBILE_NUMBER: str
     NAME: str
-    
-import dateparser
-
-def to_appsavy_datetime(time_str: str) -> str:
-    # Try parsing natural language if ISO fails
-    dt = dateparser.parse(time_str, settings={'PREFER_DATES_FROM': 'future', 'RELATIVE_BASE': datetime.datetime.now(IST)})
-    
-    if not dt:
-        # Fallback to current logic or raise error
-        dt = datetime.datetime.fromisoformat(time_str)
-        
-    if dt.tzinfo is None:
-        dt = IST.localize(dt)
-    return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 async def add_user_tool(
     ctx: RunContext[ManagerContext],
@@ -1105,8 +1072,7 @@ WHEN TO ACT:
 REQUIRED INPUT:
 - Assignee (name, login code, or phone)
 - Task description
-- Deadline (Format: 'YYYY-MM-DDTHH:MM:SS'. You must convert relative times like '8pm today' or "day fater tomorrow" or "in 5 hours" to this format yourself using the current time context).
-
+- Deadline
 
 RULES:
 - Resolve assignee using MongoDB + Appsavy.
@@ -1123,10 +1089,6 @@ CRITICAL TASK ASSIGNMENT RULE:
 - If confirmation has NOT been explicitly given by the user,
   DO NOT finalize task assignment.
 - In that case, ask the user to confirm the details instead of assigning.
-- If the last bot message asked the user to confirm task details,
-  and the user's next message indicates agreement, acceptance,
-  acknowledgment, or approval (in any wording),
-  treat it as confirmation.
 
 OUTPUT:
 - Single confirmation or single error message
@@ -1136,19 +1098,15 @@ OUTPUT:
         team = load_team()
         mongo_matches = [u for u in team if name.lower() in u["name"].lower() or name.lower() == u["login_code"].lower()]
         
-        sender = ctx.deps.sender_phone
-        if sender not in pending_task_by_sender:
-            pending_task_by_sender[sender] = {
-                "name": name,
-                "task_name": task_name,
-                "deadline": deadline
-            }
+        history = conversation_history.get(ctx.deps.sender_phone, [])
+        pending = [m for m in history if not m["handled"]]
+        if len(pending) < 2:
             return (
-                "Please confirm the task details:\n\n"
+                "Please confirm the task details before I proceed:\n\n"
                 f"Assignee: {name}\n"
                 f"Task: {task_name}\n"
                 f"Deadline: {deadline}\n\n"
-                "Reply YES to confirm or send corrections."
+                "Reply with CONFIRM to proceed, or reply with corrections."
             )
             
         assignee_res = await call_appsavy_api("GET_ASSIGNEE", GetAssigneeRequest(
@@ -1269,31 +1227,14 @@ OUTPUT:
             
             # Check for success (RESULT 1)
             if str(api_response.get('result')) == "1" or str(api_response.get('RESULT')) == "1":
-                pending_task_by_sender.pop(ctx.deps.sender_phone, None)
                 last_document_by_sender.pop(ctx.deps.sender_phone, None)
                 return f"Task successfully assigned to {user['name'].title()} (ID: {login_code})."
+
         return f"API Error: {api_response.get('resultmessage', 'Unexpected response format')}"
         
     except Exception as e:
         logger.error(f"assign_new_task_tool error: {str(e)}", exc_info=True)
         return f"System Error: Unable to assign task ({str(e)})"
-
-def parse_relative_deadline(text: str, now: datetime.datetime) -> Optional[str]:
-    text = text.lower()
-
-    match = re.search(r"in\s+(\d+)\s*(hour|hours|hr|hrs)", text)
-    if match:
-        hours = int(match.group(1))
-        dt = now + datetime.timedelta(hours=hours)
-        return dt.isoformat()
-
-    match = re.search(r"in\s+(\d+)\s*(minute|minutes|min|mins)", text)
-    if match:
-        mins = int(match.group(1))
-        dt = now + datetime.timedelta(minutes=mins)
-        return dt.isoformat()
-
-    return None
 
 async def assign_task_by_phone_tool(
     ctx: RunContext[ManagerContext],
@@ -1477,11 +1418,12 @@ def normalize_phone(phone: str) -> str:
     return digits
 
 async def handle_message(command, sender, pid, message=None, full_message=None):
-    # ---- Manual shortcut ----
+    # ---- Quick command shortcut ----
     if command and command.strip().lower() == "delete & add":
         send_whatsapp_message(
             sender,
-            "Please resend user details in this format:\n\nAdd user\nName\nMobile\nEmail",
+            "Please resend user details in this format:\n\n"
+            "Add user\nName\nMobile\nEmail",
             pid
         )
         return
@@ -1489,7 +1431,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
     try:
         sender = normalize_phone(sender)
 
-        # ---- Detect media ----
+        # ---- Media detection ----
         is_media = False
         if message:
             is_media = any(k in message for k in ["document", "image", "video", "audio", "type"])
@@ -1500,56 +1442,65 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         if is_media and not command:
             send_whatsapp_message(
                 sender,
-                "File received. Please provide assignee, task description, and deadline.",
+                "File received. Please provide the assignee name, task description, and deadline.",
                 pid
             )
             return
 
-        # ---- Resolve role ----
-        team = load_team()
+        # ---- Role resolution ----
         manager_phone = normalize_phone(os.getenv("MANAGER_PHONE"))
+        team = load_team()
 
         if sender == manager_phone:
             role = "manager"
         elif any(normalize_phone(u["phone"]) == sender for u in team):
             role = "employee"
         else:
+            role = None
+
+        if not role:
             send_whatsapp_message(
                 sender,
-                "Access Denied: Your number is not authorized.",
+                "Access Denied: Your number is not authorized to use this system.",
                 pid
             )
             return
 
-        # ---- Conversation memory (STRUCTURED) ----
+        # ---- Conversation memory (LAST 10 USER MESSAGES) ----
         if sender not in conversation_history:
             conversation_history[sender] = []
 
         if command:
             conversation_history[sender].append({
-                "role": "user",
-                "content": command
+                "role":"user",
+                "text": command,
+                "handled": False,
+                "timestamp" : datetime.datetime.now(IST).isoformat()
             })
-            conversation_history[sender] = conversation_history[sender][-6:]
+            conversation_history[sender] = conversation_history[sender][-5:]
 
-        # ---- Multi-assignee clarification (safe exit) ----
-        assignees = extract_multiple_assignees(command, team)
-        if len(assignees) > 1:
-            send_whatsapp_message(
-                sender,
-                "I found multiple assignees:\n\n"
-                + "\n".join(assignees)
-                + "\n\nPlease clarify who this task is for.",
-                pid
-            )
-            return
+        # ---- Multi-assignee fast path ----
+        if command:
+            assignees = extract_multiple_assignees(command, team)
+            if len(assignees) > 1:
+                send_whatsapp_message(
+                    sender,
+                    "I found multiple assignees. Please confirm:\n\n"
+                    + "\n".join(assignees)
+                    + "\n\nAlso confirm the task details and deadline.",
+                    pid
+                )
+                return
 
         # ---- Agent setup ----
         current_time = datetime.datetime.now(IST)
+        history = conversation_history.get(sender, [])
+        dynamic_prompt = get_system_prompt(current_time,history)
+
         agent = Agent(
             ai_model,
             deps_type=ManagerContext,
-            system_prompt=get_system_prompt(current_time)
+            system_prompt=dynamic_prompt
         )
 
         # ---- Register tools ----
@@ -1565,85 +1516,59 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         agent.tool(delete_user_tool)
         agent.tool(explain_decision_tool)
 
-        # ---- Build LLM context (SAFE + ORDERED) ----
-        messages = []
+        # ---- Build context window for agent ---
 
-        # Inject recent conversation (user + assistant)
-        for turn in conversation_history.get(sender, []):
-            if turn["role"] == "user":
-                messages.append(UserPromptPart(content=turn["content"]))
-
-        # Inject pending task state (single source of truth)
-        pending = pending_task_by_sender.get(sender)
-        if pending:
-            messages.append(
-                UserPromptPart(
-                content=
-                "System context:\n"
-                "There is a task awaiting confirmation.\n"
-                f"Assignee: {pending['name']}\n"
-                f"Task: {pending['task_name']}\n"
-                f"Deadline: {pending['deadline']}\n\n"
-                "If the user agrees → finalize.\n"
-                "If the user rejects → cancel.\n"
-                "If the user modifies → update details."
-                )
+        history = conversation_history.get(sender,[])
+        messages = [
+            UserPromptPart(
+                content = json.dumps({
+                    "conversation_history":history,
+                    "new_message":command
+                })
             )
-
-        # Inject resolved relative deadline (if any)
-        relative_deadline = parse_relative_deadline(command, current_time)
-        if relative_deadline:
-            messages.append(
-                UserPromptPart(content=f"System note: Deadline resolved as {relative_deadline}")
+        ]
+        result = await agent.run(
+            messages,
+            deps=ManagerContext(
+                sender_phone=sender,
+                role=role,
+                current_time=current_time,
+                document_data=last_document_by_sender.get(sender)
             )
+        )
 
-        if command:
-            messages.append(UserPromptPart(content=command))
 
-        # ---- Run agent ----
-        try:
-            result = await agent.run(
-                messages,
-                deps=ManagerContext(
-                    sender_phone=sender,
-                    role=role,
-                    current_time=current_time,
-                    document_data=last_document_by_sender.get(sender)
-                )
-            )
-        except Exception:
-            logger.error("Agent execution failed", exc_info=True)
-            return  # silent: Appsavy may already respond
-
-        if not result:
-            return
+        for msg in conversation_history.get(sender, []):
+            if msg["text"] == command and msg["handled"] is False:
+                msg["handled"] = True
 
         output_text = (result.output or "").strip()
+        if not output_text:
+            output_text = (
+                "I couldn’t identify a task, update, or request in that message. "
+                "Please clarify what you want me to do."
+            )
 
-        # ---- Store assistant reply in history ----
-        if output_text:
-            conversation_history[sender].append({
-                "role": "assistant",
-                "content": output_text
-            })
-            conversation_history[sender] = conversation_history[sender][-6:]
 
-        # ---- Send WhatsApp ONLY if clarification/info ----
-        if output_text:
+        # ---- DECIDE WHATSAPP OWNERSHIP BASED ON TOOL CALLS ----
+        called_tools = []
+        for msg in result.all_messages():
+            if hasattr(msg, "tool_name") and msg.tool_name:
+                called_tools.append(msg.tool_name)
+
+        called_tools = list(set(called_tools))  # dedupe
+        
+        send_whatsapp = True
+
+        if send_whatsapp:
             send_whatsapp_message(sender, output_text, pid)
-            
-        if pending_task_by_sender.get(sender):
-            if output_text and any(
-                phrase in output_text.lower()
-                for phrase in ["cancelled", "not assigning", "task cancelled", "won't assign"]
-            ):
-                pending_task_by_sender.pop(sender, None)
-                last_document_by_sender.pop(sender, None)
+        else:
+            logger.info(
+                f"[WHATSAPP-SUPPRESSED] "
+                f"user={sender} "
+                f"tools_called={called_tools}"
+            )
 
     except Exception as e:
-        logger.error(f"handle_message fatal error: {str(e)}", exc_info=True)
-        send_whatsapp_message(
-            sender,
-            "A system error occurred. Please try again shortly.",
-            pid
-        )
+        logger.error(f"handle_message error: {str(e)}", exc_info=True)
+        logger.error("System error occurred while processing message", exc_info=True)
