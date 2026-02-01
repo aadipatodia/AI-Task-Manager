@@ -1340,7 +1340,7 @@ async def assign_new_task_tool(
             
             # Check for success (RESULT 1)
             if str(api_response.get('result')) == "1" or str(api_response.get('RESULT')) == "1":
-                return f"Task successfully assigned to {user['name'].title()} (ID: {login_code})."
+                return "__TASK_ASSIGNED__"
 
         return f"API Error: {api_response.get('resultmessage', 'Unexpected response format')}"
         
@@ -1515,139 +1515,160 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
     try:
         sender = normalize_phone(sender)
-    
+
+        # ---------------- MEDIA HANDLING ----------------
         is_media = False
         if message:
             is_media = any(k in message for k in ["document", "image", "video", "audio", "type"])
-    
+
         if is_media and not command:
             send_whatsapp_message(
                 sender,
-               "File received. Please provide the assignee name, task description, and deadline to complete the assignment.",
+                "File received. Please provide the assignee name, task description, and deadline to complete the assignment.",
                 pid
             )
             return
-    
+
+        # ---------------- ROLE RESOLUTION ----------------
         manager_phone = os.getenv("MANAGER_PHONE")
         team = load_team()
-    
+
         if sender == manager_phone:
             role = "manager"
-        elif any(
-            normalize_phone(u['phone']) == normalize_phone(sender)
-            for u in team
-        ):
+        elif any(normalize_phone(u["phone"]) == sender for u in team):
             role = "employee"
-
         else:
             role = None
-    
+
         if not role:
-            send_whatsapp_message(sender, "Access Denied: Your number is not authorized to use this system.", pid)
+            send_whatsapp_message(
+                sender,
+                "Access Denied: Your number is not authorized to use this system.",
+                pid
+            )
             return
-    
+
         if sender not in conversation_history:
             conversation_history[sender] = []
-    
-        if command:
-            try:
-                assignees = extract_multiple_assignees(command, team)
-                if len(assignees) > 1:
-                    for name in assignees:
-                        await assign_new_task_tool(
-                            ctx=ManagerContext(
+
+        # ---------------- COMMAND HANDLING ----------------
+        if not command:
+            return
+
+        task_assigned = False  # 🔴 SINGLE SOURCE OF TRUTH
+
+        try:
+            # -------- MULTI ASSIGNEE SHORT-CIRCUIT --------
+            assignees = extract_multiple_assignees(command, team)
+            if len(assignees) > 1:
+                for name in assignees:
+                    await assign_new_task_tool(
+                        ctx=ManagerContext(
                             sender_phone=sender,
                             role=role,
                             current_time=datetime.datetime.now()
-                            ),
-                            name=name,
-                            task_name=command,
-                            deadline=datetime.datetime.now().strftime("%Y-%m-%d")
-                        )
-                    return  
-
-                current_time = datetime.datetime.now()
-                dynamic_prompt = get_system_prompt(current_time)
-            
-                current_agent = Agent(ai_model, deps_type=ManagerContext, system_prompt=dynamic_prompt)
-                
-                current_agent.tool(get_performance_report_tool)
-                current_agent.tool(get_task_list_tool)
-                current_agent.tool(assign_new_task_tool)
-                current_agent.tool(assign_task_by_phone_tool)
-                current_agent.tool(update_task_status_tool)
-                current_agent.tool(get_assignee_list_tool)
-                current_agent.tool(get_users_by_id_tool)
-                current_agent.tool(send_whatsapp_report_tool)
-                current_agent.tool(add_user_tool)
-                current_agent.tool(delete_user_tool)
-
-                history_parts = []
-                recent_history = conversation_history.get(sender, [])[-5:]  # last 5 turns
-                for msg in recent_history:
-                    if isinstance(msg, UserPromptPart):
-                        history_parts.append(f"User: {msg.content}")
-                    elif isinstance(msg, ModelResponse):
-                        bot_text = getattr(msg, 'output', None)
-                        if bot_text is None:
-                            bot_text = getattr(msg, 'text', '') or getattr(msg, 'generated_text', '') or str(msg)
-                        history_parts.append(f"Bot: {bot_text.strip()}")
-                    elif hasattr(msg, 'content'):
-                        history_parts.append(f"Message: {msg.content}")
-                    else:
-                        history_parts.append(f"Unknown message: {str(msg)}")
-                        
-                    logger.debug(f"Message type: {type(msg).__name__}, dir: {dir(msg)[:20]}...")  # first 10 attrs
-
-                full_prompt = "\n".join(history_parts) + "\n\nCurrent user message: " + command.strip()
-
-                logger.debug(f"Full prompt sent to agent for {sender}:\n{full_prompt}")
-                
-                result = await current_agent.run(
-                    full_prompt,
-                    deps=ManagerContext(
-                        sender_phone=sender,
-                        role=role,
-                        current_time=current_time,
-                        document_data=message
+                        ),
+                        name=name,
+                        task_name=command,
+                        deadline=datetime.datetime.now().strftime("%Y-%m-%d")
                     )
+                return
+
+            # ---------------- AGENT SETUP ----------------
+            current_time = datetime.datetime.now()
+            dynamic_prompt = get_system_prompt(current_time)
+
+            current_agent = Agent(
+                ai_model,
+                deps_type=ManagerContext,
+                system_prompt=dynamic_prompt
+            )
+
+            # Register tools
+            current_agent.tool(get_performance_report_tool)
+            current_agent.tool(get_task_list_tool)
+            current_agent.tool(assign_new_task_tool)
+            current_agent.tool(assign_task_by_phone_tool)
+            current_agent.tool(update_task_status_tool)
+            current_agent.tool(get_assignee_list_tool)
+            current_agent.tool(get_users_by_id_tool)
+            current_agent.tool(send_whatsapp_report_tool)
+            current_agent.tool(add_user_tool)
+            current_agent.tool(delete_user_tool)
+
+            # ---------------- CONTEXT BUILDING ----------------
+            history_parts = []
+            recent_history = conversation_history.get(sender, [])[-5:]
+
+            for msg in recent_history:
+                if isinstance(msg, UserPromptPart):
+                    history_parts.append(f"User: {msg.content}")
+                elif isinstance(msg, ModelResponse):
+                    bot_text = getattr(msg, "output", "") or ""
+                    history_parts.append(f"Bot: {bot_text.strip()}")
+
+            full_prompt = (
+                "\n".join(history_parts)
+                + "\n\nCurrent user message: "
+                + command.strip()
+            )
+
+            logger.debug(f"Full prompt sent to agent for {sender}:\n{full_prompt}")
+
+            # ---------------- AGENT EXECUTION ----------------
+            result = await current_agent.run(
+                full_prompt,
+                deps=ManagerContext(
+                    sender_phone=sender,
+                    role=role,
+                    current_time=current_time,
+                    document_data=message
+                )
+            )
+
+            conversation_history[sender] = result.all_messages()[-10:]
+
+            # ---------------- DETECT TASK ASSIGNMENT ----------------
+            for msg in result.all_messages():
+                if isinstance(msg, ModelResponse):
+                    text = getattr(msg, "output", "") or ""
+                    if "__TASK_ASSIGNED__" in text:
+                        task_assigned = True
+                        break
+
+            output_text = result.output or ""
+            if task_assigned:
+                logger.info(
+                    f"[GEMINI][TASK_ASSIGNED][{sender}] {output_text}"
+                )
+                return  
+
+            # ---------------- NORMAL WHATSAPP FLOW ----------------
+            if output_text.strip().startswith("{"):
+                try:
+                    data = json.loads(output_text)
+                    if "task_id" in data and "status" in data:
+                        task_id = data["task_id"]
+                        status = data["status"]
+                        output_text = f"Task {task_id} updated ({status})."
+                except Exception:
+                    pass
+
+            if should_send_whatsapp(output_text):
+                send_whatsapp_message(sender, output_text, pid)
+            else:
+                logger.info(
+                    f"[WHATSAPP_SUPPRESSED][{sender}] {output_text}"
                 )
 
-                conversation_history[sender] = result.all_messages()
-            
-                if len(conversation_history[sender]) > 10:
-                    
-                    conversation_history[sender] = conversation_history[sender][-10:]
-            
-                output_text = result.output
-                if output_text.strip().startswith("{"):
-                    try:
-                        data = json.loads(output_text)
-                        if "task_id" in data and "status" in data:
-                            status = data["status"]
-                            task_id = data["task_id"]
-                            if status == "Close":
-                                output_text = (
-                                    f"Task {task_id} has been closed successfully"
-                                )
-                            elif status == "Closed":
-                                output_text = f"Task {task_id} has been closed successfully."
-                            elif status == "Reopened":
-                                output_text = f"Task {task_id} has been reopened."
-                            else:
-                                output_text = f"Task {task_id} updated to {status}."
-
-                    except Exception:
-                        pass
-                if should_send_whatsapp(output_text):
-                    send_whatsapp_message(sender, output_text, pid)
-                else:
-                    logger.warning(f"WhatsApp suppressed message to {sender}: {output_text}")
-            
-            except Exception as e:
-                logger.error(f"Agent execution failed: {str(e)}", exc_info=True)
-                logger.error("System error occurred while processing message", exc_info=True)
+        except Exception as e:
+            logger.error(
+                f"Agent execution failed: {str(e)}",
+                exc_info=True
+            )
 
     except Exception as e:
-        logger.error(f"handle_message error: {str(e)}", exc_info=True)
-        logger.error("System error occurred while processing message", exc_info=True)
+        logger.error(
+            f"handle_message error: {str(e)}",
+            exc_info=True
+        )
