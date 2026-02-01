@@ -1571,14 +1571,14 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         # Inject recent conversation (user + assistant)
         for turn in conversation_history.get(sender, []):
             if turn["role"] == "user":
-                messages.append(UserPromptPart(text=turn["content"]))
+                messages.append(UserPromptPart(content=turn["content"]))
 
         # Inject pending task state (single source of truth)
         pending = pending_task_by_sender.get(sender)
         if pending:
             messages.append(
                 UserPromptPart(
-                text=
+                content=
                 "System context:\n"
                 "There is a task awaiting confirmation.\n"
                 f"Assignee: {pending['name']}\n"
@@ -1594,11 +1594,11 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         relative_deadline = parse_relative_deadline(command, current_time)
         if relative_deadline:
             messages.append(
-                UserPromptPart(text=f"System note: Deadline resolved as {relative_deadline}")
+                UserPromptPart(content=f"System note: Deadline resolved as {relative_deadline}")
             )
 
         if command:
-            messages.append(UserPromptPart(text=command))
+            messages.append(UserPromptPart(content=command))
 
         # ---- Run agent ----
         try:
