@@ -422,7 +422,6 @@ OUTPUT:
                 )
                 logger.info(f"Successfully synced {name} to MongoDB with ID {login_code}")
                 
-                type_str = "Created" if is_success else "Synced"
                 return 
     return "failed"
 
@@ -1535,8 +1534,14 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 document_data=last_document_by_sender.get(sender)
             )
         )
+        
+        output_text = (result.output or "").strip()
+        if not output_text:
+            output_text = (
+                "I couldn’t identify a task, update, or request in that message. "
+                "Please clarify what you want me to do."
+            )
 
-        output_text = result.output or ""
 
         # ---- DECIDE WHATSAPP OWNERSHIP BASED ON TOOL CALLS ----
         called_tools = []
