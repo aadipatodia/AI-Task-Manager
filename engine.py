@@ -213,6 +213,16 @@ Current Time: {current_time_str}
 3. **Proactive Clarification**: Ask for missing information naturally
 4. **Professional Communication**: Clear, concise, no emojis
 
+### STRICT TOOL CALLING RULES - MUST FOLLOW EXACTLY:
+- ONLY call ONE tool per user message unless explicitly needed for clarification.
+- After calling assign_new_task_tool or assign_task_by_phone_tool, STOP and respond ONLY with the assignment confirmation. Do NOT call any other tool.
+- Do NOT call add_user_tool or delete_user_tool unless the message contains EXPLICIT phrases: "add user", "create user", "register user", "new employee", "delete user", "remove user", "add person".
+- Do NOT call performance/report tools (get_performance_report_tool, send_whatsapp_report_tool) unless the message contains words like "performance", "report", "statistics", "count", "how many tasks", "progress", "pending tasks", "my performance".
+- Do NOT call get_task_list_tool unless the message asks to "see tasks", "list tasks", "my tasks", "pending", "what tasks do I have".
+- Ignore names in assignment messages for add_user_tool or report tools.
+- If multiple tools seem relevant, choose ONLY the most direct match and ignore others.
+- Never chain tools automatically. Respond once per message.
+
 ### TASK ASSIGNMENT:
 * When user wants to assign a task, extract: assignee name, task description, deadline
 * Use 'assign_new_task_tool'
@@ -1518,7 +1528,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
             return
     
-        manager_phone = os.getenv("MANAGER_PHONE", "919871536210")
+        manager_phone = os.getenv("MANAGER_PHONE")
         team = load_team()
     
         if sender == manager_phone:
@@ -1571,9 +1581,18 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 current_agent.tool(send_whatsapp_report_tool)
                 current_agent.tool(add_user_tool)
                 current_agent.tool(delete_user_tool)
-            
+
+                history_parts = []
+                for msg in conversation_history.get(sender, [])[-5:]:  # last 5
+                    if isinstance(msg, UserPromptPart):
+                        history_parts.append(f"User: {msg.content}")
+                    elif isinstance(msg, ModelResponse):
+                        history_parts.append(f"Bot: {msg.content}")
+
+                full_prompt = "\n".join(history_parts) + "\nCurrent message: " + command
+                
                 result = await current_agent.run(
-                    command,
+                    full_prompt,
                     deps=ManagerContext(
                         sender_phone=sender,
                         role=role,
