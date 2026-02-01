@@ -1591,7 +1591,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                         
         except Exception as e:
             logger.error("Agent execution failed", exc_info=True)
-            return
+            send_whatsapp_message( sender, "A system error occurred. Please try again shortly.", pid )
 
         output_text = (result.output or "").strip()
         if not output_text:
