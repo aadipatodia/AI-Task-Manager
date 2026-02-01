@@ -219,6 +219,11 @@ CRITICAL TASK ASSIGNMENT FLOW:
 - After the user replies (agreement or correction), proceed with assignment.
 - Treat agreement contextually; do NOT rely on specific words.
 
+IMPORTANT:
+- User names may be single-word or informal.
+- Do NOT ask for full name unless the API explicitly fails.
+- Do NOT ask for email unless the user provides it voluntarily.
+
 Current date: {current_time.strftime("%Y-%m-%d")}
 Current time: {current_time.strftime("%H:%M")}
 day_of_week = current_time.strftime("%A")
@@ -321,8 +326,7 @@ class AddDeleteUserRequest(BaseModel):
 async def add_user_tool(
     ctx: RunContext[ManagerContext],
     name: str,
-    mobile: str,
-    email: Optional[str] = None,
+    mobile: str
     
 ) -> str:
     await explain_decision_tool(
@@ -359,7 +363,7 @@ OUTPUT:
         ACTION="Add",
         CREATOR_MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
         NAME=name,
-        EMAIL=email or "",
+        EMAIL= "",
         MOBILE_NUMBER=mobile[-10:]
     )
 
@@ -368,7 +372,6 @@ OUTPUT:
     
     msg = res.get("resultmessage", "")
     login_code = None
-    status_note = ""
 
     # Check for Success (1) or Already Exists
     is_success = str(res.get("result")) == "1" or str(res.get("RESULT")) == "1"
