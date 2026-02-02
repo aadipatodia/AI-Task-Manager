@@ -1395,7 +1395,7 @@ async def assign_task_by_phone_tool(
 APPSAVY_STATUS_MAP = {
     "Open": "Open",
     "Work In Progress": "Work In Progress",
-    "Close": "CLosed",
+    "Close": "Closed",
     "Closed": "Closed",
     "Reopened": "Reopen"
 }
@@ -1430,14 +1430,13 @@ async def update_task_status_tool(
         RootModel(ownership_payload)
     )
 
+    if not ownership_res or "data" not in ownership_res:
+        return "Unable to verify task ownership."
     result = ownership_res.get("data", {}).get("Result", [])
+
     if not result or not is_authorized(result[0].get("TASK_OWNER")):
         return f"Permission Denied: You are not authorized to update Task {task_id}."
-
-    # ---- Role guard ----
-    if ctx.deps.role == "employee" and status == "Closed":
-        return "Final closure requires manager approval."
-
+    
     # ---- STATUS MAPPING ----
     appsavy_status = APPSAVY_STATUS_MAP.get(status)
     if not appsavy_status:
@@ -1446,7 +1445,7 @@ async def update_task_status_tool(
     # ---- FINAL PAYLOAD (EXACT FORMAT) ----
     req = UpdateTaskRequest(
         TASK_ID=task_id,
-        STATUS=appsavy_status,               # internal code
+        STATUS=appsavy_status,
         COMMENTS=remark or "Terminal Test",
         UPLOAD_DOCUMENT={
             "VALUE": "",
@@ -1600,12 +1599,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                         if "task_id" in data and "status" in data:
                             status = data["status"]
                             task_id = data["task_id"]
-                            if status == "Close":
-                                output_text = (
-                                    f"Task {task_id} has been marked as completed "
-                                    "and sent for manager approval."
-                                )
-                            elif status == "Closed":
+                            if status == "Closed" or status == "Close":
                                 output_text = f"Task {task_id} has been closed successfully."
                             elif status == "Reopened":
                                 output_text = f"Task {task_id} has been reopened."
@@ -1626,4 +1620,3 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
     except Exception as e:
         logger.error(f"handle_message error: {str(e)}", exc_info=True)
         logger.error("System error occurred while processing message", exc_info=True)
-        
