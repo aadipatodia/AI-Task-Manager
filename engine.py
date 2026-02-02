@@ -1583,7 +1583,14 @@ def normalize_phone(phone: str) -> str:
         return digits
     return digits
 
+def did_call_tool(messages, tool_names: set[str]) -> bool:
+    for m in messages:
+        if hasattr(m, "tool_name") and m.tool_name in tool_names:
+            return True
+    return False
+
 async def handle_message(command, sender, pid, message=None, full_message=None):
+    # --- Special hard-coded command ---
     if command and command.strip().lower() == "delete & add":
         send_whatsapp_message(
             sender,
@@ -1595,123 +1602,125 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
     try:
         sender = normalize_phone(sender)
-    
-        is_media = False
-        if message:
-            is_media = any(k in message for k in ["document", "image", "video", "audio", "type"])
-    
-        if is_media and not command:
+
+        # --- Media handling ---
+        if message and any(k in message for k in ["document", "image", "video", "audio", "type"]) and not command:
             send_whatsapp_message(
                 sender,
-               "File received. Please provide the assignee name, task description, and deadline to complete the assignment.",
+                "File received. Please provide the assignee name, task description, and deadline to complete the assignment.",
                 pid
             )
             return
-    
+
+        # --- Authorization ---
         manager_phone = os.getenv("MANAGER_PHONE")
         team = load_team()
-    
+
         if sender == manager_phone:
             role = "manager"
-        elif any(
-            normalize_phone(u['phone']) == normalize_phone(sender)
-            for u in team
-        ):
+        elif any(normalize_phone(u["phone"]) == sender for u in team):
             role = "employee"
-
         else:
-            role = None
-    
-        if not role:
-            send_whatsapp_message(sender, "Access Denied: Your number is not authorized to use this system.", pid)
+            send_whatsapp_message(
+                sender,
+                "Access Denied: Your number is not authorized to use this system.",
+                pid
+            )
             return
-    
-        if sender not in conversation_history:
-            conversation_history[sender] = []
-    
-        if command:
+
+        # --- Conversation memory ---
+        conversation_history.setdefault(sender, [])
+
+        if not command:
+            return
+
+        # ================= AGENT EXECUTION =================
+        current_time = datetime.datetime.now(IST)
+        dynamic_prompt = get_system_prompt(current_time)
+
+        agent = Agent(ai_model, deps_type=ManagerContext, system_prompt=dynamic_prompt)
+
+        agent.tool(get_performance_report_tool)
+        agent.tool(get_task_list_tool)
+        agent.tool(assign_new_task_tool)
+        agent.tool(assign_task_by_phone_tool)
+        agent.tool(update_task_status_tool)
+        agent.tool(get_assignee_list_tool)
+        agent.tool(get_users_by_id_tool)
+        agent.tool(send_whatsapp_report_tool)
+        agent.tool(add_user_tool)
+        agent.tool(delete_user_tool)
+
+        result = await agent.run(
+            command,
+            deps=ManagerContext(
+                sender_phone=sender,
+                role=role,
+                current_time=current_time,
+                document_data=message
+            )
+        )
+
+        messages = result.all_messages()
+        conversation_history[sender] = messages[-10:]
+
+        output_text = result.output or ""
+
+        # ================= INTENT DETECTION =================
+        TASK_MUTATION_TOOLS = {
+            "assign_new_task_tool",
+            "assign_task_by_phone_tool",
+            "update_task_status_tool",
+            "add_user_tool",
+            "delete_user_tool",
+        }
+
+        PERFORMANCE_TOOLS = {
+            "get_performance_report_tool",
+        }
+
+        def did_call_tool(msgs, tool_names):
+            for m in msgs:
+                if hasattr(m, "tool_name") and m.tool_name in tool_names:
+                    return True
+            return False
+
+        is_task_action = did_call_tool(messages, TASK_MUTATION_TOOLS)
+        is_performance_query = did_call_tool(messages, PERFORMANCE_TOOLS)
+
+        # ================= SUPPRESSION =================
+        if is_performance_query and not is_task_action:
+            logger.info("Performance flow detected — WhatsApp output suppressed")
+            return
+
+        # ================= FINAL SEND =================
+        if output_text.startswith("[FINAL]"):
+            send_whatsapp_message(
+                sender,
+                output_text.replace("[FINAL]\n", "", 1),
+                pid
+            )
+            return
+
+        # JSON → human text
+        if output_text.strip().startswith("{"):
             try:
-                current_time = datetime.datetime.now(IST)
-                dynamic_prompt = get_system_prompt(current_time)
-                
-                is_performance_query = False
-                perf_triggers = [
-                    "performance",
-                    "pending tasks for",
-                    "task report",
-                    "tasks report",
-                    "show pending",
-                    "pending tasks",
-                    "report"
-                ]
+                data = json.loads(output_text)
+                if "task_id" in data and "status" in data:
+                    task_id = data["task_id"]
+                    status = data["status"]
+                    if status in ("Closed", "Close"):
+                        output_text = f"Task {task_id} has been closed successfully."
+                    elif status == "Reopened":
+                        output_text = f"Task {task_id} has been reopened."
+                    else:
+                        output_text = f"Task {task_id} updated to {status}."
+            except Exception:
+                pass
 
-                cmd_l = command.lower()
-                if any(t in cmd_l for t in perf_triggers):
-                    is_performance_query = True
-
-            
-                current_agent = Agent(ai_model, deps_type=ManagerContext, system_prompt=dynamic_prompt)
-                
-                current_agent.tool(get_performance_report_tool)
-                current_agent.tool(get_task_list_tool)
-                current_agent.tool(assign_new_task_tool)
-                current_agent.tool(assign_task_by_phone_tool)
-                current_agent.tool(update_task_status_tool)
-                current_agent.tool(get_assignee_list_tool)
-                current_agent.tool(get_users_by_id_tool)
-                current_agent.tool(send_whatsapp_report_tool)
-                current_agent.tool(add_user_tool)
-                current_agent.tool(delete_user_tool)
-            
-                result = await current_agent.run(
-                    command,
-                    deps=ManagerContext(
-                        sender_phone=sender,
-                        role=role,
-                        current_time=current_time,
-                        document_data=message
-                    )
-                )
-
-                conversation_history[sender] = result.all_messages()
-            
-                if len(conversation_history[sender]) > 10:
-                    
-                    conversation_history[sender] = conversation_history[sender][-10:]
-            
-                output_text = result.output
-                
-                if is_performance_query:
-                    logger.info(
-                        f"Performance flow detected — suppressing Gemini WhatsApp output: {output_text}"
-                    )
-                    return
-                
-                if output_text.startswith("[FINAL]"):
-                    clean_text = output_text.replace("[FINAL]\n", "", 1)
-                    send_whatsapp_message(sender, clean_text, pid)
-                    return
-                
-                if output_text.strip().startswith("{"):
-                    try:
-                        data = json.loads(output_text)
-                        if "task_id" in data and "status" in data:
-                            status = data["status"]
-                            task_id = data["task_id"]
-                            if status == "Closed" or status == "Close":
-                                output_text = f"Task {task_id} has been closed successfully."
-                            elif status == "Reopened":
-                                output_text = f"Task {task_id} has been reopened."
-                            else:
-                                output_text = f"Task {task_id} updated to {status}."
-
-                    except Exception:
-                        pass
-            
-            except Exception as e:
-                logger.error(f"Agent execution failed: {str(e)}", exc_info=True)
-                logger.error("System error occurred while processing message", exc_info=True)
+        if should_send_whatsapp(output_text):
+            send_whatsapp_message(sender, output_text, pid)
+            return
 
     except Exception as e:
-        logger.error(f"handle_message error: {str(e)}", exc_info=True)
-        logger.error("System error occurred while processing message", exc_info=True)
+        logger.error("handle_message failed", exc_info=True)
