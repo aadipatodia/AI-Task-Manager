@@ -256,10 +256,6 @@ You MUST:
 ### DELETION OWNERSHIP ENFORCEMENT:
 - Before deleting a user, always verify ownership.
 - Ownership means: the requester is the same user who added the target user.
-- If the requester did NOT add the user:
-  - Deny the request.
-  - Respond with:
-    "Permission Denied: Only the user who added this account can delete it."
 - Do NOT call the delete user API if ownership does not match.
 - If ownership information is missing or unclear, ask for clarification instead of deleting.
 
@@ -1382,7 +1378,25 @@ async def assign_new_task_tool(
             
             # Check for success (RESULT 1)
             if str(api_response.get('result')) == "1" or str(api_response.get('RESULT')) == "1":
-                return
+                task_id = None
+                msg = api_response.get("resultmessage", "")
+                match = re.search(r"task\s*id[:\s]*([0-9]+)", msg, re.IGNORECASE)
+                if match:
+                    task_id = match.group(1)
+                else:
+                    task_id = "N/A"
+                try:
+                    deadline_dt = datetime.datetime.fromisoformat(deadline)
+                    deadline_str = deadline_dt.strftime("%d-%b-%Y %I:%M %p")
+                except Exception:
+                    deadline_str = deadline
+
+                return (
+                    f"Task id: {task_id}\n"
+                    f"Task Description: {task_name}\n"
+                    f"Assigned To: {user['name']}\n"
+                    f"Deadline: {deadline_str}"
+                )
 
         return f"API Error: {api_response.get('resultmessage', 'Unexpected response format')}"
         
