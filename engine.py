@@ -849,8 +849,16 @@ async def send_whatsapp_report_tool(
 
 async def get_assignee_list_tool(ctx: RunContext[ManagerContext]) -> str:
     """
-    Retrieves list of all assignees/users available in the system using SID 606.
-    Returns formatted list with Login IDs and Names.
+    Use this tool when the user asks for:
+    - employee list
+    - assignee list
+    - team list
+    - list of users
+    - show employees
+    - available members
+    - who can tasks be assigned to
+
+    Retrieves the complete list of assignees/users using Appsavy SID 606.
     """
     try:
         req = GetAssigneeRequest(
