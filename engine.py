@@ -1634,6 +1634,21 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             try:
                 current_time = datetime.datetime.now(IST)
                 dynamic_prompt = get_system_prompt(current_time)
+                
+                is_performance_query = False
+                perf_triggers = [
+                    "performance",
+                    "pending tasks for",
+                    "task report",
+                    "tasks report",
+                    "show pending",
+                    "pending tasks"
+                ]
+
+                cmd_l = command.lower()
+                if any(t in cmd_l for t in perf_triggers):
+                    is_performance_query = True
+
             
                 current_agent = Agent(ai_model, deps_type=ManagerContext, system_prompt=dynamic_prompt)
                 
@@ -1666,8 +1681,10 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             
                 output_text = result.output
                 
-                if output_text == "__PERFORMANCE_REPORT_TRIGGERED__":
-                    logger.info("Performance report triggered — WhatsApp response suppressed.")
+                if is_performance_query:
+                    logger.info(
+                        f"Performance flow detected — suppressing Gemini WhatsApp output: {output_text}"
+                    )
                     return
                 
                 if output_text.startswith("[FINAL]"):
