@@ -1654,10 +1654,15 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                     conversation_history[sender] = conversation_history[sender][-10:]
             
                 output_text = result.output
+                
                 if output_text.startswith("[FINAL]"):
                     clean_text = output_text.replace("[FINAL]\n", "", 1)
                     send_whatsapp_message(sender, clean_text, pid)
                     return
+
+                if should_send_whatsapp(output_text):
+                    send_whatsapp_message(sender, output_text, pid)
+                
                 if output_text.strip().startswith("{"):
                     try:
                         data = json.loads(output_text)
@@ -1677,10 +1682,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                     send_whatsapp_message(sender, output_text, pid)
                 else:
                     logger.warning(f"WhatsApp suppressed message to {sender}: {output_text}")
-                    
-                if result.tool_name == "assign_new_task_tool":
-                    send_whatsapp_message(sender, output_text, pid)
-                    return
             
             except Exception as e:
                 logger.error(f"Agent execution failed: {str(e)}", exc_info=True)
