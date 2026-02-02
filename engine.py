@@ -1643,6 +1643,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                     "tasks report",
                     "show pending",
                     "pending tasks"
+                    "report"
                 ]
 
                 cmd_l = command.lower()
