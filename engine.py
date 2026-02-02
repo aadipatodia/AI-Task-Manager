@@ -308,7 +308,7 @@ You MUST follow these rules strictly:
 **Case 3 (Update):** If a document is sent during work, use `update_task_status_tool` with status `Work In Progress`.
 
 ### PERFORMANCE REPORTING:
-When the user asks for performance, statistics, counts, or a performance report:
+When the user asks for performance, statistics, counts, or a performance report or pending tasks for specific employee pr pending tasks count for a specific employee:
 Performance reporting rules:
 - When no employee name is mentioned:
   - Use SID 627 with REPORT_TYPE = "Detail"
@@ -553,13 +553,8 @@ async def add_user_tool(
                     {"$set": new_user},
                     upsert=True
                 )
-                logger.info(f"Successfully synced {name} to MongoDB with ID {login_code}")
-                
-                type_str = "Created" if is_success else "Synced"
-                return (f" Success: {type_str}!\n\n"
-                        f"Name: {name}\n"
-                        f"Login ID: {login_code}\n"
-                        f"Source: {status_note}")
+                logger.info(f"Successfully synced {name} to MongoDB with ID {login_code}") 
+                return
 
     return f"Failed: I could not find a Login ID for '{name}' in the message or the system list. Please check if the name matches exactly."
 
@@ -595,7 +590,7 @@ async def delete_user_tool(
             users_collection.delete_one({"phone": "91" + mobile[-10:]})
             logger.info(f"User with mobile {mobile[-10:]} removed from MongoDB.")
 
-        return "User deleted successfully from system and database."
+        return 
     
     return f"Failed to delete user: {res.get('resultmessage')}"
 
@@ -778,7 +773,6 @@ async def send_whatsapp_report_tool(
             ASSIGNED_BY="",
             REFERENCE="WHATSAPP"
         )
-
 
         api_response = await call_appsavy_api("WHATSAPP_PDF_REPORT", req)
 
@@ -1327,15 +1321,15 @@ async def assign_new_task_tool(
         api_response = await call_appsavy_api("CREATE_TASK", req)
         
         if not api_response:
-            return "API failure: No response from server during task creation."
+            return "failure: No response from server during task creation."
         
         if isinstance(api_response, dict):
             if api_response.get('error'):
-                return f"API failure: {api_response.get('error')}"
+                return f"Failed"
             
             # Check for success (RESULT 1)
             if str(api_response.get('result')) == "1" or str(api_response.get('RESULT')) == "1":
-                return f"Task successfully assigned to {user['name'].title()} (ID: {login_code})."
+                return
 
         return f"API Error: {api_response.get('resultmessage', 'Unexpected response format')}"
         
