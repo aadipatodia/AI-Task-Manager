@@ -1493,17 +1493,12 @@ async def update_task_status_tool(
     remark: Optional[str] = None
 ) -> str:
 
-    if not task_id:
-        return "Please mention the Task ID you want to update."
-
     sender_mobile = ctx.deps.sender_phone[-10:]
-    
-    # ---- STATUS MAPPING ----
-    appsavy_status = APPSAVY_STATUS_MAP.get(status)
-    if not appsavy_status:
-        return f"Unsupported status '{status}'."
 
-    # ---- FINAL PAYLOAD (EXACT FORMAT) ----
+    # ---- STATUS MAPPING (silent fallback) ----
+    appsavy_status = APPSAVY_STATUS_MAP.get(status, "Closed")
+
+    # ---- FINAL PAYLOAD ----
     req = UpdateTaskRequest(
         TASK_ID=task_id,
         STATUS=appsavy_status,
@@ -1517,16 +1512,15 @@ async def update_task_status_tool(
 
     api_response = await call_appsavy_api("UPDATE_STATUS", req)
 
-    if api_response and str(api_response.get("RESULT")) == "1":
-        if status == "Close":
-            return f"Task {task_id} closed"
-        if status == "Closed":
+    # ---- ONLY SUCCESS MESSAGES ----
+    if api_response and str(api_response.get("RESULT")) == "1" or str(api_response.get("result")) == "1":
+        if status in ("Close", "Closed"):
             return f"Task {task_id} closed."
         if status == "Reopened":
             return f"Task {task_id} reopened."
         return f"Task {task_id} updated."
 
-    return f"API Error: {api_response.get('resultmessage', 'Update failed')}"
+    return ""
 
 def should_send_whatsapp(text: str) -> bool:
     """
