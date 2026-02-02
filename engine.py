@@ -1405,7 +1405,7 @@ async def assign_new_task_tool(
                 deadline_str = deadline
 
             return (
-                f"Task id: {task_id}\n"
+                f"Task created successfully.\n"
                 f"Task Description: {task_name}\n"
                 f"Assigned To: {user['name']}\n"
                 f"Deadline: {deadline_str}"
@@ -1672,6 +1672,10 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                     send_whatsapp_message(sender, output_text, pid)
                 else:
                     logger.warning(f"WhatsApp suppressed message to {sender}: {output_text}")
+                    
+                if result.tool_name == "assign_new_task_tool":
+                    send_whatsapp_message(sender, output_text, pid)
+                    return
             
             except Exception as e:
                 logger.error(f"Agent execution failed: {str(e)}", exc_info=True)
