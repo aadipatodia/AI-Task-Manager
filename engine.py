@@ -21,7 +21,8 @@ from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
 from send_message import send_whatsapp_message, send_whatsapp_document
 from google_auth_oauthlib.flow import Flow
-import asynciofrom datetime import timezone, timedelta
+import asyncio 
+from datetime import timezone, timedelta
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -728,10 +729,12 @@ def normalize_task(task: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 def is_authorized(task_owner) -> bool:
-    try:
-        return int(task_owner) > 0
-    except (TypeError, ValueError):
+
+    if task_owner is None:
         return False
+
+    return str(task_owner).strip() != "0"
+
 
 async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
     """Universal wrapper for Appsavy POST requests - 100% API dependency."""
@@ -1063,7 +1066,8 @@ async def get_performance_report_tool(
         if ctx.deps.role != "manager":
             return "Permission Denied: Only managers can view full performance reports."
 
-        return "Performance report PDF has been sent on WhatsApp."
+        # PDF is triggered internally (SID 627)
+        return "__PERFORMANCE_REPORT_TRIGGERED__"
 
     # ---------- NAME PRESENT → TEXT ----------
     user = next(
@@ -1076,15 +1080,12 @@ async def get_performance_report_tool(
     if not user:
         return f"User '{name}' not found."
 
-    # Trigger SID 627 (Count) — no data expected
     await get_performance_count_via_627(ctx, user["login_code"])
 
-    # REAL data source
-    counts = await get_task_summary_from_tasks(user["login_code"])
-    return
+    return "__PERFORMANCE_REPORT_TRIGGERED__"
+
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
-    sender_mobile = ctx.deps.sender_phone[-10:]
 
     try:
         team = load_team()
@@ -1656,6 +1657,10 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                     conversation_history[sender] = conversation_history[sender][-10:]
             
                 output_text = result.output
+                
+                if output_text == "__PERFORMANCE_REPORT_TRIGGERED__":
+                    logger.info("Performance report triggered — WhatsApp response suppressed.")
+                    return
                 
                 if output_text.startswith("[FINAL]"):
                     clean_text = output_text.replace("[FINAL]\n", "", 1)
