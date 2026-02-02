@@ -193,6 +193,11 @@ class PerformanceCountResult(BaseModel):
     CLOSED_TASK: int = 0
     DELAYED_CLOSED_TASK: int = 0
 
+def get_sender_phone(ctx):
+    if hasattr(ctx, "deps"):
+        return ctx.deps.sender_phone
+    return ctx.sender_phone
+
 def get_system_prompt(current_time: datetime.datetime) -> str:
     team = load_team()
     team_description = "\n".join([f"- {u['name']} (Login: {u['login_code']})" for u in team])
@@ -539,6 +544,7 @@ class AddDeleteUserRequest(BaseModel):
     MOBILE_NUMBER: str
     NAME: str
 
+
 def should_send_unique_reply(sender: str, text: str, ttl=60) -> bool:
     key = sha256(text.lower().strip().encode()).hexdigest()
     now = time.time()
@@ -558,7 +564,7 @@ async def confirm_and_create_task_tool(
     deadline_iso: str,           # already in YYYY-MM-DDTHH:MM:SS
     confirmed: bool = False      # will be set to True only on second call
 ) -> str:
-    sender = ctx.deps.sender_phone
+    sender = get_sender_phone(ctx)
     
     if not confirmed:
         # Step 1: store pending confirmation
@@ -612,7 +618,7 @@ async def add_user_tool(
 
     req = AddDeleteUserRequest(
         ACTION="Add",
-        CREATOR_MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
+        CREATOR_MOBILE_NUMBER=get_sender_phone(ctx)[-10:],
         NAME=name.strip(),
         EMAIL=email.strip() if email else "",   # ← safe handling
         MOBILE_NUMBER=mobile_clean
@@ -686,7 +692,7 @@ async def delete_user_tool(
 ) -> str:
     req = AddDeleteUserRequest(
         ACTION="Delete",
-        CREATOR_MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
+        CREATOR_MOBILE_NUMBER=get_sender_phone(ctx)[-10:],
         NAME=name.strip(),
         EMAIL=email.strip() if email else "",
         MOBILE_NUMBER=mobile[-10:]
@@ -847,6 +853,7 @@ async def send_whatsapp_report_tool(
     """
     try:
         team = load_team()
+        sender_phone = get_sender_phone(ctx)
 
         # Resolve user
         if assigned_to:
@@ -858,7 +865,7 @@ async def send_whatsapp_report_tool(
             if not user:
                 return f"User '{assigned_to}' not found."
         else:
-            user = next((u for u in team if u["phone"] == normalize_phone(ctx.deps.sender_phone)), None)
+            user = next((u for u in team if u["phone"] == normalize_phone(sender_phone)), None)
 
         if not user:
             return "Unable to resolve user for report."
@@ -1017,7 +1024,7 @@ async def get_performance_count_via_627(
         ASSIGNED_TO=login_code,
         REPORT_TYPE="Count",
         STATUS="",
-        MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
+        MOBILE_NUMBER=get_sender_phone(ctx)[-10:],
         ASSIGNED_BY="",
         REFERENCE="WHATSAPP"
     )
@@ -1108,7 +1115,7 @@ async def get_performance_report_tool(
 
     # ---------- NO NAME → PDF ----------
     if not name:
-        if ctx.deps.role != "manager":
+        if ctx.role != "manager":
             return "Permission Denied: Only managers can view full performance reports."
 
         return "Performance report PDF has been sent on WhatsApp."
@@ -1133,7 +1140,8 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
 
     try:
         team = load_team()
-        user = next((u for u in team if u["phone"] == normalize_phone(ctx.deps.sender_phone)), None)
+        sender_phone = get_sender_phone(ctx)
+        user = next((u for u in team if u["phone"] == normalize_phone(sender_phone)), None)
 
         if not user:
             return "Unable to identify your profile."
@@ -1154,7 +1162,7 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
                         {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},           # to date
                         {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},           # assignment type
                         {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""},          # button label / flag
-                        {"Control_Id": "146515", "Value": ctx.deps.sender_phone[-10:], "Data_Form_Id": ""}  # ← ADD THIS LINE – critical for WhatsApp context
+                        {"Control_Id": "146515", "Value": sender_phone[-10:], "Data_Form_Id": ""}  # ← ADD THIS LINE – critical for WhatsApp context
                     ]
                 }]
             )
@@ -1349,6 +1357,8 @@ async def assign_new_task_tool(
                         "Parent": [{"Control_Id": "106771", "Value": candidate["login_code"], "Data_Form_Id": ""}]
                     }]
                 ))
+                if not details_res or isinstance(details_res, dict) and details_res.get("error"):
+                        continue
                 
                 # If API succeeds, extract phone and office data
                 if isinstance(details_res, list) and len(details_res) > 0:
@@ -1383,10 +1393,11 @@ async def assign_new_task_tool(
 
         # 2. Handle Document Attachment
         documents_child = []
-        document_data = getattr(getattr(ctx, "deps", None), "document_data", None)
+        document_data =  ctx.document_data
+
         if document_data:            
-            media_type = ctx.deps.document_data.get("type")
-            media_info = ctx.deps.document_data.get(media_type)
+            media_type = document_data.get("type")
+            media_info = document_data.get(media_type)
             if media_info:
                 logger.info(f"Downloading attachment for new task: {media_type}")
                 base64_data = download_and_encode_document(media_info)
@@ -1402,12 +1413,14 @@ async def assign_new_task_tool(
 
         # 3. Prepare the CreateTaskRequest (SID 604)
         assignee_mobile = user["phone"][-10:]
+        sender_phone = get_sender_phone(ctx)
         req = CreateTaskRequest(
             ASSIGNEE=login_code,   
             DESCRIPTION=task_name,
             TASK_NAME=task_name,
             EXPECTED_END_DATE=to_appsavy_datetime(deadline),
-            MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
+            
+            MOBILE_NUMBER=sender_phone[-10:],
             DETAILS=Details(
                 CHILD=[]
             ),
@@ -1501,7 +1514,7 @@ async def update_task_status_tool(
     if not task_id:
         return "Please mention the Task ID you want to update."
 
-    sender_mobile = ctx.deps.sender_phone[-10:]
+    sender_mobile = get_sender_phone(ctx)[-10:]
 
     # ---- Ownership check (SID 632) ----
     ownership_payload = {
@@ -1526,7 +1539,7 @@ async def update_task_status_tool(
         return f"Permission Denied: You are not authorized to update Task {task_id}."
 
     # ---- Role guard ----
-    if ctx.deps.role == "employee" and status == "Closed":
+    if ctx.role == "employee" and status == "Closed":
         return "Final closure requires manager approval."
 
     # ---- STATUS MAPPING ----
