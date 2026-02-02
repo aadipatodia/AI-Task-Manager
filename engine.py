@@ -229,24 +229,23 @@ Current Time: {current_time_str}
 You must determine the correct 'new_status' string by interpreting the user's intent and role within the conversation context. Do not look for specific keywords; understand the "state" the user is describing.
 
 ### USER MANAGEMENT RULES (ADD / DELETE USERS):
-
 - Any authorized user can ADD a new user.
 ### ADD USER TOOL (CRITICAL):
 When the user wants to add a user
 (e.g. "add user", "create user", "register user"):
-
 You MUST:
 1. Extract:
    - name
    - mobile number (10 digits)
-   - email
+   - email (optional)
 2. Call the tool add_user_tool
 3. Pass arguments exactly as:
    - name
-   - email
    - mobile
-4. Do NOT ask any follow-up questions if all values are present
-5. Execute immediately
+   - email (optional)
+4. Do NOT ask follow-up questions if name and mobile are present.
+5. Email is optional.
+6. Execute immediately
 
 - A user can DELETE a user ONLY IF:
   - The same user originally added that user.
@@ -481,22 +480,22 @@ class AddDeleteUserRequest(BaseModel):
     SID: str = "629"
     ACTION: str            
     CREATOR_MOBILE_NUMBER: str
-    EMAIL: str
+    EMAIL: Optional[str] = ""
     MOBILE_NUMBER: str
     NAME: str
 
 async def add_user_tool(
     ctx: RunContext[ManagerContext],
     name: str,
-    email: str,
-    mobile: str
+    mobile: str,
+    email: Optional[str] = None
 ) -> str:
-    # 1. Attempt to add the user to Appsavy
+    
     req = AddDeleteUserRequest(
         ACTION="Add",
         CREATOR_MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
         NAME=name,
-        EMAIL=email,
+        EMAIL=email or "",
         MOBILE_NUMBER=mobile[-10:]
     )
 
@@ -544,7 +543,7 @@ async def add_user_tool(
             new_user = {
                 "name": name.lower().strip(),
                 "phone": normalize_phone(mobile),
-                "email": email,
+                "email": email or None,
                 "login_code": login_code
             }
             
@@ -567,14 +566,15 @@ async def add_user_tool(
 async def delete_user_tool(
     ctx: RunContext[ManagerContext],
     name: str,
-    email: str,
-    mobile: str
+    mobile: str,
+    email: Optional[str] = None
 ) -> str:
+    
     req = AddDeleteUserRequest(
         ACTION="Delete",
         CREATOR_MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
         NAME=name,
-        EMAIL=email,
+        EMAIL=email or "",
         MOBILE_NUMBER=mobile[-10:]
     )
 
@@ -592,7 +592,6 @@ async def delete_user_tool(
         
         # --- MongoDB se bhi hatane ka logic ---
         if users_collection is not None:
-            # Phone number ke base par document delete karein
             users_collection.delete_one({"phone": "91" + mobile[-10:]})
             logger.info(f"User with mobile {mobile[-10:]} removed from MongoDB.")
 
@@ -620,13 +619,9 @@ def normalize_status_for_report(status: str) -> str:
     report_status_map = {
         "open": "Open",
         "pending": "Open",
-
         "partial": "Partially Closed",
         "in progress": "Partially Closed",
-
-        "reported": "Reported Closed",
-
-        # user usually means final completion
+        "reported": "Closed",
         "completed": "Closed",
         "done": "Closed",
         "closed": "Closed"
@@ -1508,7 +1503,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         send_whatsapp_message(
             sender,
             "Please resend user details in this format:\n\n"
-            "Add user\nName\nMobile\nEmail",
+            "Add user\nName\nMobile\nEmail (optional)",
             pid
         )
         return
@@ -1528,7 +1523,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
             return
     
-        manager_phone = os.getenv("MANAGER_PHONE", "919871536210")
+        manager_phone = os.getenv("MANAGER_PHONE")
         team = load_team()
     
         if sender == manager_phone:
