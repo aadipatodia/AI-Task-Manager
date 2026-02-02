@@ -21,8 +21,9 @@ from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
 from send_message import send_whatsapp_message, send_whatsapp_document
 from google_auth_oauthlib.flow import Flow
-import asyncio
-from send_message import send_registration_template
+import asynciofrom datetime import timezone, timedelta
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 load_dotenv()
 
@@ -168,7 +169,7 @@ ai_model = GeminiModel('gemini-2.5-pro')
 class ManagerContext(BaseModel):
     sender_phone: str
     role: str
-    current_time: datetime.datetime = Field(default_factory=datetime.datetime.now)
+    current_time: datetime.datetime = Field(default_factory=lambda: datetime.datetime.now(IST))
     document_data: Optional[Dict] = None
     
 class WhatsAppPdfReportRequest(BaseModel):
@@ -206,6 +207,7 @@ You are a precise, professional assistant with natural language understanding ca
 
 Current Date: {current_date_str} ({day_of_week})
 Current Time: {current_time_str}
+if time_mentioned > current_time:
 
 ### CORE PRINCIPLES:
 1. **Natural Language Understanding**: Understand user intent from conversational language
@@ -1621,7 +1623,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
     
         if command:
             try:
-                current_time = datetime.datetime.now()
+                current_time = datetime.datetime.now(IST)
                 dynamic_prompt = get_system_prompt(current_time)
             
                 current_agent = Agent(ai_model, deps_type=ManagerContext, system_prompt=dynamic_prompt)
