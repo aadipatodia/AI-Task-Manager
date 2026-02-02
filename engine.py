@@ -1497,31 +1497,6 @@ async def update_task_status_tool(
         return "Please mention the Task ID you want to update."
 
     sender_mobile = ctx.deps.sender_phone[-10:]
-
-    # ---- Ownership check (SID 632) ----
-    ownership_payload = {
-        "Event": "146560",
-        "Child": [{
-            "Control_Id": "146561",
-            "AC_ID": "201877",
-            "Parent": [
-                {"Control_Id": "146559", "Value": task_id, "Data_Form_Id": ""},
-                {"Control_Id": "146562", "Value": sender_mobile, "Data_Form_Id": ""}
-            ]
-        }]
-    }
-
-    ownership_res = await call_appsavy_api(
-        "CHECK_OWNERSHIP",
-        RootModel(ownership_payload)
-    )
-
-    if not ownership_res or "data" not in ownership_res:
-        return "Unable to verify task ownership."
-    result = ownership_res.get("data", {}).get("Result", [])
-
-    if not result or not is_authorized(result[0].get("TASK_OWNER")):
-        return f"Permission Denied: You are not authorized to update Task {task_id}."
     
     # ---- STATUS MAPPING ----
     appsavy_status = APPSAVY_STATUS_MAP.get(status)
