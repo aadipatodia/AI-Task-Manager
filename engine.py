@@ -19,12 +19,10 @@ from googleapiclient.discovery import build
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
-from send_message import send_whatsapp_message
+from send_message import send_whatsapp_message, send_whatsapp_document
+from google_auth_oauthlib.flow import Flow
 import asyncio
-import time
-from hashlib import sha256
-
-recent_replies: dict[str, dict] = {}
+from send_message import send_registration_template
 
 load_dotenv()
 
@@ -35,9 +33,7 @@ SCOPES = ['https://www.googleapis.com/auth/gmail.send']
 
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-1-ugb8.onrender.com/oauth2callback")
 MANAGER_EMAIL = "ankita.mishra@mobineers.com"
-processed_message_ids: set[str] = set()
 
-pending_task_confirmations: dict[str, dict] = {}   
 # Initialize MongoDB Connection
 MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI, tlsCAFile=certifi.where()) if MONGO_URI else None
@@ -193,11 +189,6 @@ class PerformanceCountResult(BaseModel):
     CLOSED_TASK: int = 0
     DELAYED_CLOSED_TASK: int = 0
 
-def get_sender_phone(ctx):
-    if hasattr(ctx, "deps"):
-        return ctx.deps.sender_phone
-    return ctx.sender_phone
-
 def get_system_prompt(current_time: datetime.datetime) -> str:
     team = load_team()
     team_description = "\n".join([f"- {u['name']} (Login: {u['login_code']})" for u in team])
@@ -222,33 +213,9 @@ Current Time: {current_time_str}
 3. **Proactive Clarification**: Ask for missing information naturally
 4. **Professional Communication**: Clear, concise, no emojis
 
-### STRICT TOOL CALLING RULES - MUST FOLLOW EXACTLY:
-- ONLY call ONE tool per user message unless explicitly needed for clarification.
-- After calling assign_new_task_tool or assign_task_by_phone_tool, STOP and respond ONLY with the assignment confirmation. Do NOT call any other tool.
-- Do NOT call add_user_tool or delete_user_tool unless the message contains EXPLICIT phrases: "add user", "create user", "register user", "new employee", "delete user", "remove user", "add person".
-- Do NOT call performance/report tools (get_performance_report_tool, send_whatsapp_report_tool) unless the message contains words like "performance", "report", "statistics", "count", "how many tasks", "progress", "pending tasks", "my performance".
-- Do NOT call get_task_list_tool unless the message asks to "see tasks", "list tasks", "my tasks", "pending", "what tasks do I have".
-- Ignore names in assignment messages for add_user_tool or report tools.
-- If multiple tools seem relevant, choose ONLY the most direct match and ignore others.
-- Never chain tools automatically. Respond once per message.
-
-### TASK ASSIGNMENT — TWO-STEP CONFIRMATION (MANDATORY FOR MANAGERS)
-When the manager wants to assign a new task (regardless of method: name, phone, group, etc.):
-YOU **MUST ALWAYS** DO THE FOLLOWING IN THIS EXACT ORDER:
-1. Extract clearly:
-   - assignee (name / login code / phone)
-   - full task description
-   - expected deadline (convert to ISO format internally)
-2. **NEVER** call assign_new_task_tool or assign_task_by_phone_tool directly on the first message.
-3. Instead:
-   - Call confirm_and_create_task_tool(..., confirmed=False)
-   - This will return a nicely formatted confirmation message
-4. Wait for the user’s next message.
-   - If the user says yes / confirm / ok / proceed / y / 👍 / etc. → call confirm_and_create_task_tool(..., confirmed=True)
-   - If the user says cancel / no / abort / stop → reply "Task assignment cancelled." and do NOT call any creation tool.
-5. Only after receiving explicit confirmation may the task actually be created in Appsavy.
-Do NOT assume confirmation — always wait for explicit yes-type answer.
-- If user (manager) confirms the task, then Use 'assign_new_task_tool'
+### TASK ASSIGNMENT:
+* When user wants to assign a task, extract: assignee name, task description, deadline
+* Use 'assign_new_task_tool'
 * **Deadline Logic:**
   - If time mentioned is later than current time → Use today's date
   - If time has already passed today → Use tomorrow's date
@@ -262,24 +229,27 @@ Do NOT assume confirmation — always wait for explicit yes-type answer.
 You must determine the correct 'new_status' string by interpreting the user's intent and role within the conversation context. Do not look for specific keywords; understand the "state" the user is describing.
 
 ### USER MANAGEMENT RULES (ADD / DELETE USERS):
-- - Email is optional when adding and deleting users. Do not ask for it unless the user explicitly provides it or asks about email features.
-- Any authorized user can ADD a new user.
 
+- Any authorized user can ADD a new user.
 ### ADD USER TOOL (CRITICAL):
 When the user wants to add a user
 (e.g. "add user", "create user", "register user"):
 
 You MUST:
 1. Extract:
-   - name (required)
-   - mobile number (10 digits, required)
-   - email (optional)
-2. Call the tool add_user_tool with:
    - name
+   - mobile number (10 digits)
+   - email
+2. Call the tool add_user_tool
+3. Pass arguments exactly as:
+   - name
+   - email
    - mobile
-   - email (only if provided, otherwise omit or pass None/empty)
-3. Do NOT ask for email if it's missing
-4. Execute immediately if name + mobile are present
+4. Do NOT ask any follow-up questions if all values are present
+5. Execute immediately
+
+- A user can DELETE a user ONLY IF:
+  - The same user originally added that user.
 
 - Deletion is ownership-based, NOT role-based.
 - Managers do NOT have special override permissions for deleting users.
@@ -287,7 +257,6 @@ You MUST:
 ### DELETION OWNERSHIP ENFORCEMENT:
 - Before deleting a user, always verify ownership.
 - Ownership means: the requester is the same user who added the target user.
-- BUT NEVER ASK THE USER IF HE IS THE ONE WHO ADDED THAT USER OR NOT
 - If the requester did NOT add the user:
   - Deny the request.
   - Respond with:
@@ -299,6 +268,7 @@ You MUST:
 - Use 'delete_user_tool' ONLY after confirming ownership.
 - Ownership means: requester mobile number == creator mobile number.
 - Never assume ownership.
+- If ownership information is unavailable, ask for clarification instead of deleting.
 
 ### TASK LISTING:
 When user asks to see tasks, list tasks, pending work:
@@ -311,6 +281,7 @@ When responding with task lists, return the tool output EXACTLY as-is.
 Do not summarize, rephrase, or omit any fields.
 
 ### UPDATE TASK STATUS
+You are a task workflow interpreter for a backend system.
 Your job is to understand the user's intent and determine the correct
 new_status value for API SID 607 based on:
 - The user's role relative to the specific task
@@ -345,10 +316,8 @@ Performance reporting rules:
   - Send PDF on WhatsApp
 - When a specific employee is mentioned:
   - Use GET_COUNT (SID 616)
+  - Show text summary to the requester
   - Do NOT send WhatsApp to the employee
-- The performance_report_tool should be called AT MOST ONCE per user message.
-- If you already called it, do NOT call it again — just use the returned text.
-- For named employees, return a simple text summary using get_task_summary_from_tasks. Do NOT call WHATSAPP_PDF_REPORT for individual users.
 
 Interpretation rules:
 1. If the user does not mention any employee name:
@@ -360,6 +329,7 @@ Interpretation rules:
 
 2. If the user mentions a specific employee name or login code:
 - Use SID 627 with REPORT_TYPE = "Count".
+- Show the count summary AND pending tasks in text format.
 - Do not generate or send a PDF.
 
 3. Do not infer PDF intent from keywords.
@@ -384,40 +354,10 @@ When asked about users in a group or specific user details:
 - Group IDs start with 'G-' (e.g., G-10343-41)
 - User IDs start with 'D-' (e.g., D-3514-1001)
 
-### ASSIGNEE / EMPLOYEE LIST LOOKUP (CRITICAL):
-When the user asks to see people, employees, assignees, or team members,  
-you MUST interpret it as a request to list assignable users.
-This includes (but is NOT limited to) phrases like:
-- "show me employee list"
-- "employee list"
-- "list employees"
-- "people under me"
-- "my team"
-- "team members"
-- "staff list"
-- "assignees"
-- "who can I assign tasks to"
-- "show users"
-- "list people"
-- "who works here"
-- "who are my employees"
-### RULES:
-1. If the intent is to VIEW a list of people (not details of one specific user):
-   → CALL `get_assignee_list_tool`
-2. Call this tool ONLY ONCE per user message.
-3. Do NOT ask clarifying questions if the intent is clear.
-4. Do NOT summarize, rephrase, or filter the list.
-5. Return the tool output EXACTLY as received.
-6. Do NOT call any other tool in the same message.
-### IMPORTANT:
-- This tool is READ-ONLY.
-- It does NOT create, delete, or modify users.
-- It does NOT require manager confirmation.
-- Any authorized user may view the assignee list unless explicitly restricted.
-If the user asks for details of ONE specific user:
-→ Use `get_users_by_id_tool` instead.
-If the user asks to ADD or REMOVE a user:
-→ Use add_user_tool or delete_user_tool (only with explicit intent).
+### ASSIGNEE LOOKUP:
+When needing to list all available assignees:
+- Use 'get_assignee_list_tool'
+- Returns all users who can be assigned tasks
 
 ### DOCUMENT HANDLING:
 - When file received without task details: Ask for assignee name, task description, and deadline
@@ -524,6 +464,7 @@ class UpdateTaskRequest(BaseModel):
     UPLOAD_DOCUMENT: UploadDocument
     WHATSAPP_MOBILE_NUMBER: str
 
+
 class GetCountRequest(BaseModel):
     Event: str = "107567"
     Child: List[Dict]
@@ -540,161 +481,100 @@ class AddDeleteUserRequest(BaseModel):
     SID: str = "629"
     ACTION: str            
     CREATOR_MOBILE_NUMBER: str
-    EMAIL: str = ""               # ← made optional with default ""
+    EMAIL: str
     MOBILE_NUMBER: str
     NAME: str
-
-
-def should_send_unique_reply(sender: str, text: str, ttl=60) -> bool:
-    key = sha256(text.lower().strip().encode()).hexdigest()
-    now = time.time()
-
-    last = recent_replies.get(sender)
-    if last and last["key"] == key and now - last["time"] < ttl:
-        logger.warning(f"[DEDUP-OUT] Suppressed duplicate reply to {sender}")
-        return False
-
-    recent_replies[sender] = {"key": key, "time": now}
-    return True
-
-async def confirm_and_create_task_tool(
-    ctx: RunContext[ManagerContext],
-    assignee_name: str,
-    task_description: str,
-    deadline_iso: str,           # already in YYYY-MM-DDTHH:MM:SS
-    confirmed: bool = False      # will be set to True only on second call
-) -> str:
-    sender = get_sender_phone(ctx)
-    
-    if not confirmed:
-        # Step 1: store pending confirmation
-        key = f"confirm_{int(time.time())}"
-        pending_task_confirmations[sender] = {
-            "assignee": assignee_name,
-            "task": task_description,
-            "deadline": deadline_iso,
-            "timestamp": time.time(),
-            "status": "awaiting_confirmation"
-        }
-        
-        human_deadline = datetime.datetime.fromisoformat(deadline_iso).strftime("%d %b %Y, %I:%M %p")
-        
-        return (
-            f"Please confirm the following task assignment:\n\n"
-            f"• Assignee: {assignee_name}\n"
-            f"• Task: {task_description}\n"
-            f"• Deadline: {human_deadline}\n\n"
-            f"Reply with: yes / confirm / ok / proceed\n"
-            f"or 'cancel' to abort."
-        )
-    
-    # Step 2: actually create (confirmed == True)
-    if sender not in pending_task_confirmations:
-        return "No pending task confirmation found. Please start over."
-    
-    data = pending_task_confirmations.pop(sender, None)
-    if not data or time.time() - data["timestamp"] > 600:  # 10 min TTL
-        return "Confirmation timed out. Please assign the task again."
-    
-    # Reuse the original assign_new_task_tool logic here
-    # (you can extract the creation part into a shared function)
-    creation_result = await assign_new_task_tool(
-        ctx,
-        name=data["assignee"],
-        task_name=data["task"],
-        deadline=data["deadline"]
-    )
-    
-    return creation_result
 
 async def add_user_tool(
     ctx: RunContext[ManagerContext],
     name: str,
-    mobile: str,
-    email: Optional[str] = None   # ← now optional
+    email: str,
+    mobile: str
 ) -> str:
-    # Normalize mobile
-    mobile_clean = mobile[-10:] if len(mobile) >= 10 else mobile
-
+    # 1. Attempt to add the user to Appsavy
     req = AddDeleteUserRequest(
         ACTION="Add",
-        CREATOR_MOBILE_NUMBER=get_sender_phone(ctx)[-10:],
-        NAME=name.strip(),
-        EMAIL=email.strip() if email else "",   # ← safe handling
-        MOBILE_NUMBER=mobile_clean
+        CREATOR_MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
+        NAME=name,
+        EMAIL=email,
+        MOBILE_NUMBER=mobile[-10:]
     )
 
     res = await call_appsavy_api("ADD_DELETE_USER", req)
-    if not isinstance(res, dict):
-        return f"Failed to add user: {res}"
-
+    if not isinstance(res, dict): return f"Failed to add user: {res}"
+    
     msg = res.get("resultmessage", "")
     login_code = None
     status_note = ""
 
-    is_success = str(res.get("result", "")) in ("1", "SUCCESS")
+    # Check for Success (1) or Already Exists
+    is_success = str(res.get("result")) == "1" or str(res.get("RESULT")) == "1"
     is_existing = "already exists" in msg.lower()
 
     if is_success or is_existing:
-        # Try to extract Login Code from message
+        # STEP 1: Try to extract Login ID from the message text (Regex)
         match = re.search(r"login Code:\s*([A-Z0-9-]+)", msg, re.IGNORECASE)
         login_code = match.group(1) if match else None
-
+        
+        if login_code:
+            status_note = "ID extracted from API message"
+        
+        # STEP 2: BACKUP - If ID is missing from the message, ALWAYS check the list
         if not login_code:
-            # Fallback: search assignee list
-            assignee_res = await call_appsavy_api(
-                "GET_ASSIGNEE",
-                GetAssigneeRequest(Event="0", Child=[{"Control_Id": "106771", "AC_ID": "111057"}])
-            )
+            logger.info(f"ID missing from message. Fetching list to find: '{name}'")
+            assignee_res = await call_appsavy_api("GET_ASSIGNEE", GetAssigneeRequest(Event="0", Child=[{"Control_Id": "106771", "AC_ID": "111057"}]))
+            
             result_list = []
             if isinstance(assignee_res, dict):
                 result_list = assignee_res.get("data", {}).get("Result", [])
             elif isinstance(assignee_res, list):
                 result_list = assignee_res
 
-            target_name = name.lower().strip()
-            for item in result_list:
-                item_name = str(item.get("NAME", "")).lower().strip()
-                if target_name in item_name or item_name in target_name:
-                    login_code = item.get("ID") or item.get("LOGIN_ID")
-                    status_note = "ID fetched from system list"
-                    break
+            if result_list:
+                target_name = name.lower().strip()
+                for item in result_list:
+                    item_name = str(item.get("NAME", "")).lower().strip()
+                    if target_name in item_name or item_name in target_name:
+                        login_code = item.get("ID") or item.get("LOGIN_ID")
+                        status_note = "ID fetched from system list"
+                        break
 
+        # STEP 3: If we have an ID, save to MongoDB
         if login_code:
             new_user = {
                 "name": name.lower().strip(),
                 "phone": normalize_phone(mobile),
-                "email": email.strip() if email else None,   # ← store None if missing
+                "email": email,
                 "login_code": login_code
             }
-
+            
             if users_collection is not None:
                 users_collection.update_one(
                     {"phone": new_user["phone"]},
                     {"$set": new_user},
                     upsert=True
                 )
-                logger.info(f"Synced user {name} → Login: {login_code}")
+                logger.info(f"Successfully synced {name} to MongoDB with ID {login_code}")
+                
+                type_str = "Created" if is_success else "Synced"
+                return (f" Success: {type_str}!\n\n"
+                        f"Name: {name}\n"
+                        f"Login ID: {login_code}\n"
+                        f"Source: {status_note}")
 
-            action_word = "Created" if is_success else "Synced (already existed)"
-            email_part = f"\nEmail: {email}" if email else ""
-            return (
-                f"Success"
-            )
-
-    return f"Failed to add user '{name}'"
+    return f"Failed: I could not find a Login ID for '{name}' in the message or the system list. Please check if the name matches exactly."
 
 async def delete_user_tool(
     ctx: RunContext[ManagerContext],
     name: str,
-    mobile: str,
-    email: Optional[str] = None   # optional here too
+    email: str,
+    mobile: str
 ) -> str:
     req = AddDeleteUserRequest(
         ACTION="Delete",
-        CREATOR_MOBILE_NUMBER=get_sender_phone(ctx)[-10:],
-        NAME=name.strip(),
-        EMAIL=email.strip() if email else "",
+        CREATOR_MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
+        NAME=name,
+        EMAIL=email,
         MOBILE_NUMBER=mobile[-10:]
     )
 
@@ -745,6 +625,8 @@ def normalize_status_for_report(status: str) -> str:
         "in progress": "Partially Closed",
 
         "reported": "Reported Closed",
+
+        # user usually means final completion
         "completed": "Closed",
         "done": "Closed",
         "closed": "Closed"
@@ -756,6 +638,30 @@ def to_appsavy_datetime(iso_dt: str) -> str:
     dt = datetime.datetime.fromisoformat(iso_dt)
     return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
+def send_email(to_email: str, subject: str, body: str) -> bool:
+    """Send email via Gmail API."""
+    try:
+        service = get_gmail_service()
+        if not service:
+            logger.warning("Gmail service unavailable, skipping email")
+            return False
+        
+        message = MIMEMultipart()
+        message['to'] = to_email
+        message['subject'] = subject
+        message.attach(MIMEText(body, 'plain'))
+        
+        raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
+        send_message = service.users().messages().send(
+            userId='me',
+            body={'raw': raw_message}
+        ).execute()
+        
+        logger.info(f"Email sent successfully to {to_email}")
+        return True
+    except Exception as e:
+        logger.error(f"Email sending failed: {str(e)}")
+        return False
 
 def normalize_tasks_response(tasks_data):
     """Normalize Appsavy GET_TASKS response to always return a list"""
@@ -853,7 +759,6 @@ async def send_whatsapp_report_tool(
     """
     try:
         team = load_team()
-        sender_phone = get_sender_phone(ctx)
 
         # Resolve user
         if assigned_to:
@@ -865,7 +770,7 @@ async def send_whatsapp_report_tool(
             if not user:
                 return f"User '{assigned_to}' not found."
         else:
-            user = next((u for u in team if u["phone"] == normalize_phone(sender_phone)), None)
+            user = next((u for u in team if u["phone"] == normalize_phone(ctx.deps.sender_phone)), None)
 
         if not user:
             return "Unable to resolve user for report."
@@ -1024,7 +929,7 @@ async def get_performance_count_via_627(
         ASSIGNED_TO=login_code,
         REPORT_TYPE="Count",
         STATUS="",
-        MOBILE_NUMBER=get_sender_phone(ctx)[-10:],
+        MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
         ASSIGNED_BY="",
         REFERENCE="WHATSAPP"
     )
@@ -1115,7 +1020,7 @@ async def get_performance_report_tool(
 
     # ---------- NO NAME → PDF ----------
     if not name:
-        if ctx.role != "manager":
+        if ctx.deps.role != "manager":
             return "Permission Denied: Only managers can view full performance reports."
 
         return "Performance report PDF has been sent on WhatsApp."
@@ -1134,14 +1039,16 @@ async def get_performance_report_tool(
     # Trigger SID 627 (Count) — no data expected
     await get_performance_count_via_627(ctx, user["login_code"])
 
-    return ("Performance Summary")
+    # REAL data source
+    counts = await get_task_summary_from_tasks(user["login_code"])
+    return
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
+    sender_mobile = ctx.deps.sender_phone[-10:]
 
     try:
         team = load_team()
-        sender_phone = get_sender_phone(ctx)
-        user = next((u for u in team if u["phone"] == normalize_phone(sender_phone)), None)
+        user = next((u for u in team if u["phone"] == normalize_phone(ctx.deps.sender_phone)), None)
 
         if not user:
             return "Unable to identify your profile."
@@ -1162,7 +1069,7 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
                         {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},           # to date
                         {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},           # assignment type
                         {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""},          # button label / flag
-                        {"Control_Id": "146515", "Value": sender_phone[-10:], "Data_Form_Id": ""}  # ← ADD THIS LINE – critical for WhatsApp context
+                        {"Control_Id": "146515", "Value": ctx.deps.sender_phone[-10:], "Data_Form_Id": ""}  # ← ADD THIS LINE – critical for WhatsApp context
                     ]
                 }]
             )
@@ -1298,7 +1205,6 @@ def extract_remark(text: str, task_id: str):
     return t.capitalize() if t else ""
 
 
-
 async def assign_new_task_tool(
     ctx: RunContext[ManagerContext],
     name: str,
@@ -1357,8 +1263,6 @@ async def assign_new_task_tool(
                         "Parent": [{"Control_Id": "106771", "Value": candidate["login_code"], "Data_Form_Id": ""}]
                     }]
                 ))
-                if not details_res or isinstance(details_res, dict) and details_res.get("error"):
-                        continue
                 
                 # If API succeeds, extract phone and office data
                 if isinstance(details_res, list) and len(details_res) > 0:
@@ -1393,11 +1297,10 @@ async def assign_new_task_tool(
 
         # 2. Handle Document Attachment
         documents_child = []
-        document_data =  ctx.document_data
-
+        document_data = getattr(getattr(ctx, "deps", None), "document_data", None)
         if document_data:            
-            media_type = document_data.get("type")
-            media_info = document_data.get(media_type)
+            media_type = ctx.deps.document_data.get("type")
+            media_info = ctx.deps.document_data.get(media_type)
             if media_info:
                 logger.info(f"Downloading attachment for new task: {media_type}")
                 base64_data = download_and_encode_document(media_info)
@@ -1413,14 +1316,12 @@ async def assign_new_task_tool(
 
         # 3. Prepare the CreateTaskRequest (SID 604)
         assignee_mobile = user["phone"][-10:]
-        sender_phone = get_sender_phone(ctx)
         req = CreateTaskRequest(
             ASSIGNEE=login_code,   
             DESCRIPTION=task_name,
             TASK_NAME=task_name,
             EXPECTED_END_DATE=to_appsavy_datetime(deadline),
-            
-            MOBILE_NUMBER=sender_phone[-10:],
+            MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
             DETAILS=Details(
                 CHILD=[]
             ),
@@ -1514,7 +1415,7 @@ async def update_task_status_tool(
     if not task_id:
         return "Please mention the Task ID you want to update."
 
-    sender_mobile = get_sender_phone(ctx)[-10:]
+    sender_mobile = ctx.deps.sender_phone[-10:]
 
     # ---- Ownership check (SID 632) ----
     ownership_payload = {
@@ -1539,7 +1440,7 @@ async def update_task_status_tool(
         return f"Permission Denied: You are not authorized to update Task {task_id}."
 
     # ---- Role guard ----
-    if ctx.role == "employee" and status == "Closed":
+    if ctx.deps.role == "employee" and status == "Closed":
         return "Final closure requires manager approval."
 
     # ---- STATUS MAPPING ----
@@ -1614,162 +1515,120 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
     try:
         sender = normalize_phone(sender)
-
-        # ---------------- MEDIA HANDLING ----------------
+    
         is_media = False
         if message:
             is_media = any(k in message for k in ["document", "image", "video", "audio", "type"])
-
+    
         if is_media and not command:
             send_whatsapp_message(
                 sender,
-                "File received. Please provide the assignee name, task description, and deadline to complete the assignment.",
+               "File received. Please provide the assignee name, task description, and deadline to complete the assignment.",
                 pid
             )
             return
-
-        # ---------------- ROLE RESOLUTION ----------------
-        manager_phone = os.getenv("MANAGER_PHONE")
+    
+        manager_phone = os.getenv("MANAGER_PHONE", "919871536210")
         team = load_team()
-
+    
         if sender == manager_phone:
             role = "manager"
-        elif any(normalize_phone(u["phone"]) == sender for u in team):
+        elif any(
+            normalize_phone(u['phone']) == normalize_phone(sender)
+            for u in team
+        ):
             role = "employee"
+
         else:
             role = None
-
+    
         if not role:
-            send_whatsapp_message(
-                sender,
-                "Access Denied: Your number is not authorized to use this system.",
-                pid
-            )
+            send_whatsapp_message(sender, "Access Denied: Your number is not authorized to use this system.", pid)
             return
-
+    
         if sender not in conversation_history:
             conversation_history[sender] = []
-
-        # ---------------- COMMAND HANDLING ----------------
-        if not command:
-            return
-
-        task_assigned = False  # 🔴 SINGLE SOURCE OF TRUTH
-
-        try:
-            # -------- MULTI ASSIGNEE SHORT-CIRCUIT --------
-            assignees = extract_multiple_assignees(command, team)
-            if len(assignees) > 1:
-                for name in assignees:
-                    await assign_new_task_tool(
-                        ctx=ManagerContext(
+    
+        if command:
+            try:
+                assignees = extract_multiple_assignees(command, team)
+                if len(assignees) > 1:
+                    for name in assignees:
+                        await assign_new_task_tool(
+                            ctx=ManagerContext(
                             sender_phone=sender,
                             role=role,
                             current_time=datetime.datetime.now()
-                        ),
-                        name=name,
-                        task_name=command,
-                        deadline=datetime.datetime.now().strftime("%Y-%m-%d")
+                            ),
+                            name=name,
+                            task_name=command,
+                            deadline=datetime.datetime.now().strftime("%Y-%m-%d")
+                        )
+                    return  
+
+                current_time = datetime.datetime.now()
+                dynamic_prompt = get_system_prompt(current_time)
+            
+                current_agent = Agent(ai_model, deps_type=ManagerContext, system_prompt=dynamic_prompt)
+                
+                current_agent.tool(get_performance_report_tool)
+                current_agent.tool(get_task_list_tool)
+                current_agent.tool(assign_new_task_tool)
+                current_agent.tool(assign_task_by_phone_tool)
+                current_agent.tool(update_task_status_tool)
+                current_agent.tool(get_assignee_list_tool)
+                current_agent.tool(get_users_by_id_tool)
+                current_agent.tool(send_whatsapp_report_tool)
+                current_agent.tool(add_user_tool)
+                current_agent.tool(delete_user_tool)
+            
+                result = await current_agent.run(
+                    command,
+                    deps=ManagerContext(
+                        sender_phone=sender,
+                        role=role,
+                        current_time=current_time,
+                        document_data=message
                     )
-                return
-
-            # ---------------- AGENT SETUP ----------------
-            current_time = datetime.datetime.now()
-            dynamic_prompt = get_system_prompt(current_time)
-
-            current_agent = Agent(
-                ai_model,
-                deps_type=ManagerContext,
-                system_prompt=dynamic_prompt
-            )
-
-            # Register tools
-            current_agent.tool(get_performance_report_tool)
-            current_agent.tool(get_task_list_tool)
-            current_agent.tool(assign_new_task_tool)
-            current_agent.tool(confirm_and_create_task_tool)
-            current_agent.tool(assign_task_by_phone_tool)
-            current_agent.tool(update_task_status_tool)
-            current_agent.tool(get_assignee_list_tool)
-            current_agent.tool(get_users_by_id_tool)
-            current_agent.tool(send_whatsapp_report_tool)
-            current_agent.tool(add_user_tool)
-            current_agent.tool(delete_user_tool)
-
-            # ---------------- CONTEXT BUILDING ----------------
-            history_parts = []
-            recent_history = conversation_history.get(sender, [])[-5:]
-
-            for msg in recent_history:
-                if isinstance(msg, UserPromptPart):
-                    history_parts.append(f"User: {msg.content}")
-                elif isinstance(msg, ModelResponse):
-                    bot_text = getattr(msg, "output", "") or ""
-                    history_parts.append(f"Bot: {bot_text.strip()}")
-
-            full_prompt = (
-                "\n".join(history_parts)
-                + "\n\nCurrent user message: "
-                + command.strip()
-            )
-
-            logger.debug(f"Full prompt sent to agent for {sender}:\n{full_prompt}")
-
-            # ---------------- AGENT EXECUTION ----------------
-            result = await current_agent.run(
-                full_prompt,
-                deps=ManagerContext(
-                    sender_phone=sender,
-                    role=role,
-                    current_time=current_time,
-                    document_data=message
-                )
-            )
-
-            conversation_history[sender] = result.all_messages()[-10:]
-
-            # ---------------- DETECT TASK ASSIGNMENT ----------------
-            for msg in result.all_messages():
-                if isinstance(msg, ModelResponse):
-                    text = getattr(msg, "output", "") or ""
-                    if "__TASK_ASSIGNED__" in text:
-                        task_assigned = True
-                        break
-
-            output_text = result.output or ""
-            if task_assigned:
-                logger.info(
-                    f"[GEMINI][TASK_ASSIGNED][{sender}] {output_text}"
-                )
-                return  
-
-            # ---------------- NORMAL WHATSAPP FLOW ----------------
-            if output_text.strip().startswith("{"):
-                try:
-                    data = json.loads(output_text)
-                    if "task_id" in data and "status" in data:
-                        task_id = data["task_id"]
-                        status = data["status"]
-                        output_text = f"Task {task_id} updated ({status})."
-                except Exception:
-                    pass
-
-            if should_send_whatsapp(output_text) and should_send_unique_reply(sender, output_text):
-                send_whatsapp_message(sender, output_text, pid)
-
-            else:
-                logger.info(
-                    f"[WHATSAPP_SUPPRESSED][{sender}] {output_text}"
                 )
 
-        except Exception as e:
-            logger.error(
-                f"Agent execution failed: {str(e)}",
-                exc_info=True
-            )
+                conversation_history[sender] = result.all_messages()
+            
+                if len(conversation_history[sender]) > 10:
+                    
+                    conversation_history[sender] = conversation_history[sender][-10:]
+            
+                output_text = result.output
+                if output_text.strip().startswith("{"):
+                    try:
+                        data = json.loads(output_text)
+                        if "task_id" in data and "status" in data:
+                            status = data["status"]
+                            task_id = data["task_id"]
+                            if status == "Close":
+                                output_text = (
+                                    f"Task {task_id} has been marked as completed "
+                                    "and sent for manager approval."
+                                )
+                            elif status == "Closed":
+                                output_text = f"Task {task_id} has been closed successfully."
+                            elif status == "Reopened":
+                                output_text = f"Task {task_id} has been reopened."
+                            else:
+                                output_text = f"Task {task_id} updated to {status}."
+
+                    except Exception:
+                        pass
+                if should_send_whatsapp(output_text):
+                    send_whatsapp_message(sender, output_text, pid)
+                else:
+                    logger.warning(f"WhatsApp suppressed message to {sender}: {output_text}")
+            
+            except Exception as e:
+                logger.error(f"Agent execution failed: {str(e)}", exc_info=True)
+                logger.error("System error occurred while processing message", exc_info=True)
 
     except Exception as e:
-        logger.error(
-            f"handle_message error: {str(e)}",
-            exc_info=True
-        )
+        logger.error(f"handle_message error: {str(e)}", exc_info=True)
+        logger.error("System error occurred while processing message", exc_info=True)
+        
