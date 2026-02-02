@@ -585,7 +585,7 @@ async def add_user_tool(
                 target_name = name.lower().strip()
                 for item in result_list:
                     item_name = str(item.get("NAME", "")).lower().strip()
-                    if target_name in item_name or item_name in target_name:
+                    if re.fullmatch(rf"{re.escape(target_name)}", item_name):
                         login_code = item.get("ID") or item.get("LOGIN_ID")
                         status_note = "ID fetched from system list"
                         break
@@ -606,8 +606,7 @@ async def add_user_tool(
                     upsert=True
                 )
                 logger.info(f"Successfully synced {name} to MongoDB with ID {login_code}") 
-                return
-
+                return "[FINAL]\nUser has been added successfully."
     return f"Failed: I could not find a Login ID for '{name}' in the message or the system list. Please check if the name matches exactly."
 
 async def delete_user_tool(
@@ -642,7 +641,7 @@ async def delete_user_tool(
             users_collection.delete_one({"phone": "91" + mobile[-10:]})
             logger.info(f"User with mobile {mobile[-10:]} removed from MongoDB.")
 
-        return 
+        return "[FINAL]\nUser has been deleted successfully."
     
     return f"Failed to delete user: {res.get('resultmessage')}"
 
@@ -1642,7 +1641,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                     "task report",
                     "tasks report",
                     "show pending",
-                    "pending tasks"
+                    "pending tasks",
                     "report"
                 ]
 
@@ -1692,9 +1691,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                     clean_text = output_text.replace("[FINAL]\n", "", 1)
                     send_whatsapp_message(sender, clean_text, pid)
                     return
-
-                if should_send_whatsapp(output_text):
-                    send_whatsapp_message(sender, output_text, pid)
                 
                 if output_text.strip().startswith("{"):
                     try:
@@ -1711,10 +1707,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
                     except Exception:
                         pass
-                if should_send_whatsapp(output_text):
-                    send_whatsapp_message(sender, output_text, pid)
-                else:
-                    logger.warning(f"WhatsApp suppressed message to {sender}: {output_text}")
             
             except Exception as e:
                 logger.error(f"Agent execution failed: {str(e)}", exc_info=True)
