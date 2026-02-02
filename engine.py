@@ -1147,9 +1147,13 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
 def extract_multiple_assignees(text: str, team: list) -> list[str]:
     text = text.lower()
     found = []
+
     for member in team:
-        if member["name"].lower() in text:
+        name = member["name"].lower()
+        # enforce word boundary match
+        if re.search(rf"\b{name}\b", text):
             found.append(member["name"])
+
     return list(set(found))
 
 async def get_task_description(task_id: str) -> str:
@@ -1242,7 +1246,6 @@ def extract_remark(text: str, task_id: str):
 
     return t.capitalize() if t else ""
 
-
 async def assign_new_task_tool(
     ctx: RunContext[ManagerContext],
     name: str,
@@ -1251,158 +1254,169 @@ async def assign_new_task_tool(
 ) -> str:
     """
     Assigns a new task to a user or group.
-    Fixes: Duplicate name resolution, N/A phone numbers, and Meta 24h window blockage.
+    Correctly resolves assignee using Appsavy as authority
+    and prevents substring name collisions (Aadi vs Ariya).
     """
     try:
-        # 1. MERGE SOURCES: Fetch candidates from BOTH MongoDB and Appsavy (SID 606)
         team = load_team()
-        mongo_matches = [u for u in team if name.lower() in u["name"].lower() or name.lower() == u["login_code"].lower()]
+        name_l = name.lower().strip()
 
-        assignee_res = await call_appsavy_api("GET_ASSIGNEE", GetAssigneeRequest(
-            Event="0", 
-            Child=[{"Control_Id": "106771", "AC_ID": "111057"}]
-        ))
-        
+        assignee_res = await call_appsavy_api(
+            "GET_ASSIGNEE",
+            GetAssigneeRequest(
+                Event="0",
+                Child=[{"Control_Id": "106771", "AC_ID": "111057"}]
+            )
+        )
+
         appsavy_users = []
         if isinstance(assignee_res, dict):
             appsavy_users = assignee_res.get("data", {}).get("Result", [])
         elif isinstance(assignee_res, list):
             appsavy_users = assignee_res
 
-        appsavy_matches = [
-            {"name": u.get("NAME") or u.get("PARTICIPANT_NAME"), "login_code": u.get("ID") or u.get("LOGIN_ID"), "phone": "N/A"} 
-            for u in appsavy_users if name.lower() in str(u.get("NAME", "")).lower()
-        ]
-
-        # Deduplicate using Login ID to ensure we catch every unique instance
-        combined = {}
-        for u in mongo_matches:
-            combined[u["login_code"]] = u
+        appsavy_matches = []
+        for u in appsavy_users:
+            uname = str(u.get("NAME", "")).lower()
+            if re.search(rf"\b{name_l}\b", uname):
+                appsavy_matches.append({
+                    "name": u.get("NAME"),
+                    "login_code": u.get("ID"),
+                    "phone": "N/A"
+                })
+                
+        mongo_matches = []
+        for u in team:
+            if re.search(rf"\b{name_l}\b", u["name"].lower()):
+                mongo_matches.append({
+                    "name": u["name"],
+                    "login_code": u["login_code"],
+                    "phone": u.get("phone", "N/A")
+                })
+                
+        combined: dict[str, dict] = {}
 
         for u in appsavy_matches:
-            if u["login_code"] not in combined:
-                combined[u["login_code"]] = u
+            combined[u["login_code"]] = u
+
+        for u in mongo_matches:
+            combined.setdefault(u["login_code"], u)
 
         matches = list(combined.values())
 
         if not matches:
-            return f"Error: User or Group '{name}' not found in the authorized directory."
+            return f"Error: User '{name}' not found in the authorized directory."
 
-        # 2. DEEP LOOKUP & HIERARCHY: If multiple matches, fetch REAL details (SID 609)
         if len(matches) > 1:
             final_options = []
+
             for candidate in matches:
-                # Call Detail API (SID 609) to get Mobile + Division + Zone
-                details_res = await call_appsavy_api("GET_USERS_BY_ID", GetUsersByIdRequest(
-                    Event="107018",
-                    Child=[{
-                        "Control_Id": "107019",
-                        "AC_ID": "111271",
-                        "Parent": [{"Control_Id": "106771", "Value": candidate["login_code"], "Data_Form_Id": ""}]
-                    }]
-                ))
-                
-                # If API succeeds, extract phone and office data
-                if isinstance(details_res, list) and len(details_res) > 0:
-                    detail = details_res[0]
-                    candidate["phone"] = detail.get("MOBILE") or detail.get("PHONE") or "N/A"
-                    # Capture Hierarchy levels
-                    office_parts = [
-                        detail.get("ZONE_NAME"),
-                        detail.get("CIRCLE_NAME"),
-                        detail.get("DIVISION_NAME")
-                    ]
-                    candidate["office"] = " > ".join([p for p in office_parts if p]) or "Office N/A"
-                elif isinstance(details_res, dict) and "data" in details_res:
+                details_res = await call_appsavy_api(
+                    "GET_USERS_BY_ID",
+                    GetUsersByIdRequest(
+                        Event="107018",
+                        Child=[{
+                            "Control_Id": "107019",
+                            "AC_ID": "111271",
+                            "Parent": [{
+                                "Control_Id": "106771",
+                                "Value": candidate["login_code"],
+                                "Data_Form_Id": ""
+                            }]
+                        }]
+                    )
+                )
+
+                if isinstance(details_res, dict):
                     res_list = details_res.get("data", {}).get("Result", [])
-                    if res_list:
-                        candidate["phone"] = res_list[0].get("MOBILE") or "N/A"
-                        candidate["office"] = res_list[0].get("DIVISION_NAME") or "Office N/A"
-                
+                else:
+                    res_list = details_res or []
+
+                if res_list:
+                    d = res_list[0]
+                    candidate["phone"] = d.get("MOBILE", "N/A")
+                    candidate["office"] = " > ".join(
+                        filter(None, [
+                            d.get("ZONE_NAME"),
+                            d.get("CIRCLE_NAME"),
+                            d.get("DIVISION_NAME")
+                        ])
+                    ) or "Office N/A"
+
                 final_options.append(candidate)
 
-            # Format clarification message with Hierarchy and Phone Numbers
-            options_text = "\n".join([f"- {u['name']} ({u.get('office', 'Office N/A')}): {u['phone']}" for u in final_options])
+            options_text = "\n".join(
+                f"- {u['name']} ({u.get('office', 'Office N/A')}): {u['phone']}"
+                for u in final_options
+            )
+
             return (
                 f"I found multiple users named '{name}'. Who should I assign this to?\n\n"
                 f"{options_text}\n\n"
                 "Please reply with the correct 10-digit phone number."
             )
 
-        # 3. SINGLE MATCH FOUND: Proceed with Assignment (SID 604)
         user = matches[0]
         login_code = user["login_code"]
 
-        # 2. Handle Document Attachment
+        # ---- Attach document if present ----
         documents_child = []
-        document_data = getattr(getattr(ctx, "deps", None), "document_data", None)
-        if document_data:            
-            media_type = ctx.deps.document_data.get("type")
-            media_info = ctx.deps.document_data.get(media_type)
+        document_data = getattr(ctx.deps, "document_data", None)
+
+        if document_data:
+            media_type = document_data.get("type")
+            media_info = document_data.get(media_type)
             if media_info:
-                logger.info(f"Downloading attachment for new task: {media_type}")
                 base64_data = download_and_encode_document(media_info)
                 if base64_data:
-                    fname = media_info.get("filename") or (
-                        f"task_image_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png" 
-                        if media_type == "image" else "task_document.pdf"
+                    fname = media_info.get("filename") or "attachment"
+                    documents_child.append(
+                        DocumentItem(
+                            DOCUMENT=DocumentInfo(VALUE=fname, BASE64=base64_data),
+                            DOCUMENT_NAME=fname
+                        )
                     )
-                    documents_child.append(DocumentItem(
-                        DOCUMENT=DocumentInfo(VALUE=fname, BASE64=base64_data),
-                        DOCUMENT_NAME=fname
-                    ))
 
-        # 3. Prepare the CreateTaskRequest (SID 604)
-        assignee_mobile = user["phone"][-10:]
         req = CreateTaskRequest(
-            ASSIGNEE=login_code,   
+            ASSIGNEE=login_code,
             DESCRIPTION=task_name,
             TASK_NAME=task_name,
             EXPECTED_END_DATE=to_appsavy_datetime(deadline),
             MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
-            DETAILS=Details(
-                CHILD=[]
-            ),
+            DETAILS=Details(CHILD=[]),
             DOCUMENTS=Documents(CHILD=documents_child)
         )
-        
-        # 4. Execute API Call
+
         api_response = await call_appsavy_api("CREATE_TASK", req)
-        
+
         if not api_response:
-            return "failure: No response from server during task creation."
-        
-        if isinstance(api_response, dict):
-            if api_response.get('error'):
-                return f"Failed"
-            
-            # Check for success (RESULT 1)
-            if str(api_response.get('result')) == "1" or str(api_response.get('RESULT')) == "1":
-                task_id = None
-                msg = api_response.get("resultmessage", "")
-                match = re.search(r"task\s*id[:\s]*([0-9]+)", msg, re.IGNORECASE)
-                if match:
-                    task_id = match.group(1)
-                else:
-                    task_id = "N/A"
-                try:
-                    deadline_dt = datetime.datetime.fromisoformat(deadline)
-                    deadline_str = deadline_dt.strftime("%d-%b-%Y %I:%M %p")
-                except Exception:
-                    deadline_str = deadline
+            return "Failure: No response from server."
 
-                return (
-                    f"Task id: {task_id}\n"
-                    f"Task Description: {task_name}\n"
-                    f"Assigned To: {user['name']}\n"
-                    f"Deadline: {deadline_str}"
+        if str(api_response.get("result")) == "1":
+            msg = api_response.get("resultmessage", "")
+            match = re.search(r"task\s*id[:\s]*([0-9]+)", msg, re.I)
+            task_id = match.group(1) if match else "N/A"
+
+            try:
+                deadline_str = datetime.datetime.fromisoformat(deadline).strftime(
+                    "%d-%b-%Y %I:%M %p"
                 )
+            except Exception:
+                deadline_str = deadline
 
-        return f"API Error: {api_response.get('resultmessage', 'Unexpected response format')}"
-        
+            return (
+                f"Task id: {task_id}\n"
+                f"Task Description: {task_name}\n"
+                f"Assigned To: {user['name']}\n"
+                f"Deadline: {deadline_str}"
+            )
+
+        return f"API Error: {api_response.get('resultmessage')}"
+
     except Exception as e:
-        logger.error(f"assign_new_task_tool error: {str(e)}", exc_info=True)
+        logger.error("assign_new_task_tool failed", exc_info=True)
         return f"System Error: Unable to assign task ({str(e)})"
+
 
 async def assign_task_by_phone_tool(
     ctx: RunContext[ManagerContext],
@@ -1606,21 +1620,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
     
         if command:
             try:
-                assignees = extract_multiple_assignees(command, team)
-                if len(assignees) > 1:
-                    for name in assignees:
-                        await assign_new_task_tool(
-                            ctx=ManagerContext(
-                            sender_phone=sender,
-                            role=role,
-                            current_time=datetime.datetime.now()
-                            ),
-                            name=name,
-                            task_name=command,
-                            deadline=datetime.datetime.now().strftime("%Y-%m-%d")
-                        )
-                    return  
-
                 current_time = datetime.datetime.now()
                 dynamic_prompt = get_system_prompt(current_time)
             
