@@ -12,14 +12,15 @@ from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.gemini import GeminiModel
-from pydantic_ai.messages import ModelResponse, ModelRequest, TextPart
+from pydantic_ai.messages import ModelResponse, ModelRequest, TextPart, UserPromptPart
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
-from send_message import send_whatsapp_message
+from send_message import send_whatsapp_message, send_whatsapp_document
+from google_auth_oauthlib.flow import Flow
 import asyncio 
 from datetime import timezone, timedelta
 
@@ -228,7 +229,6 @@ if time_mentioned > current_time:
 2. **Context Awareness**: Use conversation history to understand references
 3. **Proactive Clarification**: Ask for missing information naturally
 4. **Professional Communication**: Clear, concise, no emojis
-5. If an intent is resolved via tools and no user message is required, **do not produce any textual output.**
 
 ### TASK ASSIGNMENT:
 * When user wants to assign a task, extract: assignee name, task description, deadline
@@ -1484,6 +1484,7 @@ async def assign_new_task_tool(
         logger.error("assign_new_task_tool failed", exc_info=True)
         return f"System Error: Unable to assign task ({str(e)})"
 
+
 async def assign_task_by_phone_tool(
     ctx: RunContext[ManagerContext],
     phone: str,
@@ -1731,6 +1732,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             "role": role,
             "command": command
         })
+
         
         result = await agent.run(
             command,
@@ -1780,29 +1782,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         PERFORMANCE_TOOLS = {
             "get_performance_report_tool",
         }
-        
-        SILENT_TOOLS = {
-            "get_performance_report_tool",
-            "send_whatsapp_report_tool",
-        }
-
-        def is_silent_resolution(messages) -> bool:
-            for m in messages:
-                if hasattr(m, "tool_name") and m.tool_name in SILENT_TOOLS:
-                    return True
-                if isinstance(m, ModelRequest):
-                    for p in m.parts:
-                        if isinstance(p, TextPart) and "__SILENT_REPORT_TRIGGERED__" in p.content:
-                            return True
-            return False
-        
-        # ===== SILENT INTENT ENFORCEMENT =====
-        if is_silent_resolution(messages):
-            log_reasoning("SILENT_EXIT", {
-                "reason": "Gemini resolved intent silently",
-                "final_output": output_text
-            })
-            return
 
         is_task_action = did_call_tool(messages, TASK_MUTATION_TOOLS)
         is_performance_query = did_call_tool(messages, PERFORMANCE_TOOLS)
