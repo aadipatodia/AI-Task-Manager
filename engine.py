@@ -561,6 +561,13 @@ async def add_user_tool(
     email: Optional[str] = None
 ) -> str:
     
+    log_reasoning("ADD_USER_START", {
+        "name": name,
+        "mobile": mobile,
+        "email": email,
+        "requested_by": ctx.deps.sender_phone
+    })
+    
     req = AddDeleteUserRequest(
         ACTION="Add",
         CREATOR_MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
@@ -679,6 +686,13 @@ def get_gmail_service():
         logger.error(f"Gmail Error: {e}")
         return None
 
+def log_reasoning(step: str, details: dict | str):
+    logger.info(
+        "[GEMINI_REASONING] %s | %s",
+        step,
+        json.dumps(details, ensure_ascii=False) if isinstance(details, dict) else details
+    )
+
 
 def normalize_status_for_report(status: str) -> str:
     report_status_map = {
@@ -759,6 +773,12 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
     config = API_CONFIGS[key]
     try:
         logger.info(f"Calling API {key} with payload: {payload.model_dump()}")
+        
+        log_reasoning("API_CALL_DECISION", {
+            "api_key": key,
+            "trigger": "Gemini tool execution",
+            "payload_type": payload.__class__.__name__
+        })
         
         res = await asyncio.to_thread(
             requests.post,
@@ -1288,6 +1308,12 @@ async def assign_new_task_tool(
     try:
         team = load_team()
         name_l = name.lower().strip()
+        log_reasoning("ASSIGN_TASK_START", {
+            "input_name": name,
+            "task": task_name,
+            "deadline": deadline,
+            "sender": ctx.deps.sender_phone
+        })
 
         assignee_res = await call_appsavy_api(
             "GET_ASSIGNEE",
@@ -1331,12 +1357,20 @@ async def assign_new_task_tool(
             combined.setdefault(u["login_code"], u)
 
         matches = list(combined.values())
+        log_reasoning("ASSIGNEE_MATCHES_FOUND", {
+            "count": len(matches),
+            "matches": matches
+        })
 
         if not matches:
             return f"Error: User '{name}' not found in the authorized directory."
 
         if len(matches) > 1:
             final_options = []
+            log_reasoning("ASSIGNEE_AMBIGUOUS", {
+                "reason": "Multiple users matched same name",
+                "candidates": matches
+            })
 
             for candidate in matches:
                 details_res = await call_appsavy_api(
@@ -1386,6 +1420,10 @@ async def assign_new_task_tool(
 
         user = matches[0]
         login_code = user["login_code"]
+        log_reasoning("ASSIGNEE_RESOLVED", {
+            "login_code": login_code,
+            "user": user
+        })
 
         # ---- Attach document if present ----
         documents_child = []
@@ -1552,6 +1590,13 @@ async def update_task_status_tool(
     status: str,
     remark: Optional[str] = None
 ) -> str:
+    
+    log_reasoning("UPDATE_TASK_STATUS_START", {
+        "task_id": task_id,
+        "requested_status": status,
+        "mapped_status": APPSAVY_STATUS_MAP.get(status),
+        "by": ctx.deps.role
+    })
 
     sender_mobile = ctx.deps.sender_phone[-10:]
 
@@ -1573,7 +1618,7 @@ async def update_task_status_tool(
     api_response = await call_appsavy_api("UPDATE_STATUS", req)
 
     # ---- ONLY SUCCESS MESSAGES ----
-    if api_response and str(api_response.get("RESULT")) == "1" or str(api_response.get("result")) == "1":
+    if api_response and (str(api_response.get("RESULT")) == "1" or str(api_response.get("result")) == "1"):
         if status in ("Close", "Closed"):
             return f"Task {task_id} closed."
         if status == "Reopened":
@@ -1619,7 +1664,7 @@ def did_call_tool(messages, tool_names: set[str]) -> bool:
     return False
 
 async def handle_message(command, sender, pid, message=None, full_message=None):
-    # --- Special hard-coded command ---
+
     if command and command.strip().lower() == "delete & add":
         send_whatsapp_message(
             sender,
@@ -1631,6 +1676,8 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
     try:
         sender = normalize_phone(sender)
+        trace_id = f"{sender}-{int(datetime.datetime.now().timestamp())}"
+        log_reasoning("TRACE_START", trace_id)
 
         # --- Media handling ---
         if message and any(k in message for k in ["document", "image", "video", "audio", "type"]) and not command:
@@ -1680,7 +1727,14 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         agent.tool(send_whatsapp_report_tool)
         agent.tool(add_user_tool)
         agent.tool(delete_user_tool)
+        
+        log_reasoning("INPUT_RECEIVED", {
+            "sender": sender,
+            "role": role,
+            "command": command
+        })
 
+        
         result = await agent.run(
             command,
             deps=ManagerContext(
@@ -1692,6 +1746,26 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         )
 
         messages = result.all_messages()
+        
+        for i, msg in enumerate(messages):
+            if isinstance(msg, ModelRequest):
+                log_reasoning("MODEL_REQUEST", {
+                    "index": i,
+                    "content": [p.content for p in msg.parts if hasattr(p, "content")]
+                })
+
+            elif isinstance(msg, ModelResponse):
+                log_reasoning("MODEL_RESPONSE", {
+                    "index": i,
+                    "content": [p.content for p in msg.parts if hasattr(p, "content")]
+                })
+
+            elif hasattr(msg, "tool_name"):
+                log_reasoning("TOOL_SELECTED", {
+                    "tool": msg.tool_name,
+                    "arguments": getattr(msg, "tool_args", {})
+                })
+
         conversation_history[sender] = messages[-10:]
         
         output_text = result.output or ""
@@ -1710,24 +1784,31 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             "get_performance_report_tool",
         }
 
-        def did_call_tool(msgs, tool_names):
-            for m in msgs:
-                if hasattr(m, "tool_name") and m.tool_name in tool_names:
-                    return True
-            return False
-
         is_task_action = did_call_tool(messages, TASK_MUTATION_TOOLS)
         is_performance_query = did_call_tool(messages, PERFORMANCE_TOOLS)
+        
+        log_reasoning("INTENT_CLASSIFIED", {
+            "is_task_action": is_task_action,
+            "is_performance_query": is_performance_query,
+            "tools_called": [
+                m.tool_name for m in messages if hasattr(m, "tool_name")
+            ]
+        })
 
         # ================= UPDATED SUPPRESSION =================
-        # This prevents the 1st (prose) and 3rd (tool return) messages.
         if is_performance_query and not is_task_action:
-            logger.info("Performance flow detected — WhatsApp output suppressed")
+            log_reasoning("OUTPUT_SUPPRESSED", {
+                "reason": "Performance report auto-triggered",
+                "tools_called": [
+                    m.tool_name for m in messages if hasattr(m, "tool_name")
+                ]
+            })
             return
+
 
         # Special check for the silent flag string
         if "__SILENT_REPORT_TRIGGERED__" in output_text:
-            logger.info("Silence flag detected. Exiting.")
+            log_reasoning("SILENT_EXIT", "SID 627 report triggered, no WhatsApp reply required")
             return
 
         # ================= FINAL SEND =================
@@ -1758,6 +1839,11 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         # Final check: if it's still a performance query, don't send anything else.
         if is_performance_query:
             return
+        
+        log_reasoning("WHATSAPP_SEND_DECISION", {
+            "will_send": should_send_whatsapp(output_text),
+            "message_preview": output_text[:150]
+        })
 
         if should_send_whatsapp(output_text):
             send_whatsapp_message(sender, output_text, pid)
