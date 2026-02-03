@@ -355,6 +355,8 @@ Interpretation rules:
 - Do not calculate, derive, or modify counts.
 - Missing values must be treated as zero.
 
+CRITICAL: **DO NOT SHOW ANY SUPPORTIVE MESSAGES, EXAMPLE: "DONE", "TRYING TO FETCH REPORT" OR ANYTHING LIKE THIS, YOU ARE ONLY ALLOWED TO CROSS QUESTION BUT YOU ARE NOT ALLOWED TO SEND ANY OTHER MESSAGE FROM YOUR SIDE WHILE GENERATING PERFORMANCE REPORT**
+
 ### TASK ASSIGNMENT BY PHONE:
 Support assignment using phone numbers:
 - Extract 10-digit number or full format
