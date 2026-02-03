@@ -137,6 +137,20 @@ API_CONFIGS = {
             "TokenKey": "75c6ec2e-9f9c-48fa-be24-d8eb612f4c03"
         }
     },
+
+    "GET_USERS_BY_WHATSAPP": {
+        "url": f"{APPSAVY_BASE_URL}/GetDataJSONClient",
+        "headers": {
+            "sid": "635",
+            "pid": "309",
+            "fid": "13618",
+            "cid": "64",
+            "uid": "TM_API",
+            "roleid": "1627",
+            "TokenKey": "f097a996-b7cd-42c8-ad02-2e7d77f20988"
+        }
+    },
+
     
     "GET_USERS_BY_ID": {
         "url": f"{APPSAVY_BASE_URL}/GetDataJSONClient",
@@ -499,6 +513,10 @@ class CreateTaskRequest(BaseModel):
     DETAILS: Details = Details(CHILD=[])
     DOCUMENTS: Documents = Documents(CHILD=[])
 
+class GetUsersByWhatsappRequest(BaseModel):
+    Event: str = "146760"
+    Child: List[Dict]
+
 class GetTasksRequest(BaseModel):
     Event: str = "106830"
     Child: List[Dict]
@@ -660,6 +678,7 @@ def get_gmail_service():
     except Exception as e:
         logger.error(f"Gmail Error: {e}")
         return None
+
 
 def normalize_status_for_report(status: str) -> str:
     report_status_map = {
@@ -1486,6 +1505,49 @@ APPSAVY_STATUS_MAP = {
     "Reopened": "Reopen"
 }
 
+async def get_users_created_by_me_tool(
+    ctx: RunContext[ManagerContext]
+) -> str:
+    """
+    Shows only users created by the logged-in WhatsApp number
+    """
+
+    sender_mobile = ctx.deps.sender_phone[-10:]
+
+    req = GetUsersByWhatsappRequest(
+        Child=[{
+            "Control_Id": "146761",
+            "AC_ID": "202131",
+            "Parent": [{
+                "Control_Id": "146759",
+                "Value": sender_mobile,
+                "Data_Form_Id": ""
+            }]
+        }]
+    )
+
+    res = await call_appsavy_api("GET_USERS_BY_WHATSAPP", req)
+
+    if not res or "data" not in res:
+        return "You have not added any users."
+
+    users = res["data"].get("Result", [])
+
+    if not users:
+        return "You have not added any users."
+
+    output = "Users added by you:\n\n"
+
+    for u in users:
+        output += (
+            f"Name: {u.get('NAME')}\n"
+            f"Mobile: {u.get('MOBILE')}\n"
+            f"Login ID: {u.get('LOGIN_ID')}\n\n"
+        )
+
+    return output.strip()
+
+
 async def update_task_status_tool(
     ctx: RunContext[ManagerContext],
     task_id: str,
@@ -1615,6 +1677,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         agent.tool(assign_task_by_phone_tool)
         agent.tool(update_task_status_tool)
         agent.tool(get_assignee_list_tool)
+        agent.tool(get_users_created_by_me_tool)
         agent.tool(get_users_by_id_tool)
         agent.tool(send_whatsapp_report_tool)
         agent.tool(add_user_tool)
