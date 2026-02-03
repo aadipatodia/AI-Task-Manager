@@ -1092,14 +1092,15 @@ async def get_performance_report_tool(
         if ctx.deps.role != "manager":
             return "Permission Denied: Only managers can view full performance reports."
 
-        # PDF is triggered internally (SID 627)
-        return "__PERFORMANCE_REPORT_TRIGGERED__"
+        # Trigger SID 627 (Report is sent by Appsavy's backend)
+        await get_performance_count_via_627(ctx, "") 
+        return "__SILENT_REPORT_TRIGGERED__"
 
     # ---------- NAME PRESENT → TEXT ----------
     user = next(
-        (u for u in team
-         if name.lower() in u["name"].lower()
-         or name.lower() == u["login_code"].lower()),
+        (u for u in team 
+         if name.lower() in u["name"].lower() 
+         or name.lower() == u["login_code"].lower()), 
         None
     )
 
@@ -1107,9 +1108,7 @@ async def get_performance_report_tool(
         return f"User '{name}' not found."
 
     await get_performance_count_via_627(ctx, user["login_code"])
-
-    return "__PERFORMANCE_REPORT_TRIGGERED__"
-
+    return "__SILENT_REPORT_TRIGGERED__"
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
 
@@ -1541,8 +1540,7 @@ async def get_users_created_by_me_tool(
     for u in users:
         output += (
             f"Name: {u.get('NAME')}\n"
-            f"Mobile: {u.get('MOBILE')}\n"
-            f"Login ID: {u.get('LOGIN_ID')}\n\n"
+            f"Mobile: {u.get('MOBILE')}\n\n"
         )
 
     return output.strip()
@@ -1695,16 +1693,17 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         messages = result.all_messages()
         conversation_history[sender] = messages[-10:]
-
+        
         output_text = result.output or ""
 
-        # ================= INTENT DETECTION =================
+        # ================= INTENT DETECTION (Kept exactly as you requested) =================
         TASK_MUTATION_TOOLS = {
             "assign_new_task_tool",
             "assign_task_by_phone_tool",
             "update_task_status_tool",
             "add_user_tool",
             "delete_user_tool",
+            "get_users_created_by_me_tool"
         }
 
         PERFORMANCE_TOOLS = {
@@ -1720,9 +1719,15 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         is_task_action = did_call_tool(messages, TASK_MUTATION_TOOLS)
         is_performance_query = did_call_tool(messages, PERFORMANCE_TOOLS)
 
-        # ================= SUPPRESSION =================
+        # ================= UPDATED SUPPRESSION =================
+        # This prevents the 1st (prose) and 3rd (tool return) messages.
         if is_performance_query and not is_task_action:
             logger.info("Performance flow detected — WhatsApp output suppressed")
+            return
+
+        # Special check for the silent flag string
+        if "__SILENT_REPORT_TRIGGERED__" in output_text:
+            logger.info("Silence flag detected. Exiting.")
             return
 
         # ================= FINAL SEND =================
@@ -1749,6 +1754,10 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                         output_text = f"Task {task_id} updated to {status}."
             except Exception:
                 pass
+
+        # Final check: if it's still a performance query, don't send anything else.
+        if is_performance_query:
+            return
 
         if should_send_whatsapp(output_text):
             send_whatsapp_message(sender, output_text, pid)
