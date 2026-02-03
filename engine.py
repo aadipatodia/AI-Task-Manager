@@ -1781,6 +1781,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         PERFORMANCE_TOOLS = {
             "get_performance_report_tool",
+            "send_whatsapp_report_tool"
         }
 
         is_task_action = did_call_tool(messages, TASK_MUTATION_TOOLS)
@@ -1834,9 +1835,14 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                         output_text = f"Task {task_id} updated to {status}."
             except Exception:
                 pass
-
-        # Final check: if it's still a performance query, don't send anything else.
+            
         if is_performance_query:
+            log_reasoning("PERFORMANCE_SUPPRESSION", {
+                "reason": "Performance handled by backend only",
+                "tools_called": [
+                    m.tool_name for m in messages if hasattr(m, "tool_name")
+                ]
+            })
             return
         
         log_reasoning("WHATSAPP_SEND_DECISION", {
