@@ -561,6 +561,21 @@ class AddDeleteUserRequest(BaseModel):
     EMAIL: Optional[str] = ""
     MOBILE_NUMBER: str
     NAME: str
+    
+from pydantic_ai.messages import TextPart
+
+def extract_final_from_messages(messages):
+    for msg in messages:
+        # Covers ModelRequest, ModelResponse, ToolReturn
+        if hasattr(msg, "parts"):
+            for p in msg.parts:
+                if isinstance(p, TextPart):
+                    text = p.content.strip()
+                    if text.startswith("[FINAL]"):
+                        return text
+    return None
+
+
 
 async def add_user_tool(
     ctx: RunContext[ManagerContext],
@@ -1796,12 +1811,14 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
         )
         
-        final_output = result.output or ""
-        if final_output.startswith("[FINAL]"):
-            clean = final_output.replace("[FINAL]\n", "", 1)
+        messages = result.all_messages()
+        final_text = extract_final_from_messages(messages)
+        if final_text:
+            clean = final_text.replace("[FINAL]\n", "", 1)
             send_whatsapp_message(sender, clean, pid)
             end_session(login_code, session_id)
             return
+        
 
         if result.output:
             append_message(session_id, "assistant", result.output)
