@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Dict
 from pymongo.collection import Collection
 import re
 
@@ -9,15 +9,11 @@ def normalize_phone(phone: str) -> str:
     return digits
 
 def resolve_user_by_phone(
-    users_collection: Collection,
-    sender_phone: str
-) -> Optional[dict]:
-    """
-    Returns full user document from MongoDB using phone number
-    """
-    normalized = normalize_phone(sender_phone)
-    user = users_collection.find_one(
-        {"phone": normalized},
-        {"_id": 0}
-    )
-    return user
+    users_collection: Optional[Collection],
+    phone: str
+) -> Optional[Dict]:
+    if users_collection is None:
+        return None
+
+    normalized = normalize_phone(phone)
+    return users_collection.find_one({"phone": normalized})

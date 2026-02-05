@@ -1699,7 +1699,8 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             return
 
         # ---------- Authorization ----------
-        manager_phone = os.getenv("MANAGER_PHONE")
+        manager_phone = normalize_phone(os.getenv("MANAGER_PHONE", ""))
+
         team = load_team()
 
         if sender == manager_phone:
@@ -1715,16 +1716,27 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             return
 
         # ---------- Resolve user from MongoDB (SINGLE SOURCE OF TRUTH) ----------
-        user = resolve_user_by_phone(users_collection, sender)
-        if not user:
-            send_whatsapp_message(
-                sender,
-                "Access Denied: Your number is not registered.",
-                pid
-            )
-            return
+        if sender == manager_phone:
+           # Manager fallback user
+            user = resolve_user_by_phone(users_collection, sender)
+            if not user:
+                user = {
+                    "login_code": "MANAGER",
+                    "phone": sender,
+                    "name": "Manager"
+                }
+        else:
+            user = resolve_user_by_phone(users_collection, sender)
+            if not user:
+                send_whatsapp_message(
+                    sender,
+                    "Access Denied: Your number is not registered.",
+                    pid
+                )
+                return
 
         login_code = user["login_code"]
+
 
         # ---------- Redis session ----------
         session_id = get_or_create_session(login_code)
