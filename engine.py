@@ -1795,6 +1795,13 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 document_data=message
             )
         )
+        
+        final_output = result.output or ""
+        if final_output.startswith("[FINAL]"):
+            clean = final_output.replace("[FINAL]\n", "", 1)
+            send_whatsapp_message(sender, clean, pid)
+            end_session(login_code, session_id)
+            return
 
         if result.output:
             append_message(session_id, "assistant", result.output)
