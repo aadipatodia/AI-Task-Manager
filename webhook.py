@@ -1,14 +1,8 @@
 from fastapi import FastAPI, Request, HTTPException, Query
-from fastapi.responses import HTMLResponse
 import os
-import json 
 from dotenv import load_dotenv
 from google_auth_oauthlib.flow import Flow # Added missing import 
-
-# Import functions from engine.py
-# Removed 'tokens_col' from this list to fix the ImportError 
 from engine import handle_message, SCOPES, REDIRECT_URI
-from send_message import send_whatsapp_message 
 
 load_dotenv()
 app = FastAPI()

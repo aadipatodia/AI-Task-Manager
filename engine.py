@@ -19,8 +19,14 @@ from googleapiclient.discovery import build
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
-from send_message import send_whatsapp_message, send_whatsapp_document
-from google_auth_oauthlib.flow import Flow
+from send_message import send_whatsapp_message
+from redis_session import (
+    get_or_create_session,
+    append_message,
+    get_session_history,
+    end_session
+)
+from user_resolver import resolve_user_by_phone
 import asyncio 
 from datetime import timezone, timedelta
 
@@ -34,14 +40,12 @@ logger = logging.getLogger(__name__)
 SCOPES = ['https://www.googleapis.com/auth/gmail.send']
 
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-1-ugb8.onrender.com/oauth2callback")
-MANAGER_EMAIL = "ankita.mishra@mobineers.com"
 
 # Initialize MongoDB Connection
 MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI, tlsCAFile=certifi.where()) if MONGO_URI else None
 db = client['ai_task_manager'] if client is not None else None
 users_collection = db['users'] if db is not None else None
-conversation_history: Dict[str, List[Any]] = {}
 
 APPSAVY_BASE_URL = "https://configapps.appsavy.com/api/AppsavyRestService"
 
@@ -374,11 +378,14 @@ When the user asks to:
 - list assignees
 - show available users
 - show employees
+- employee list
 - who can I assign tasks to
 - assignee list
 - team list
 - user directory
 - available members
+
+or any other statement with same semantic meaning
 
 You MUST follow these rules:
 
@@ -1666,6 +1673,7 @@ def did_call_tool(messages, tool_names: set[str]) -> bool:
 
 async def handle_message(command, sender, pid, message=None, full_message=None):
 
+    # ---------- Special shortcut ----------
     if command and command.strip().lower() == "delete & add":
         send_whatsapp_message(
             sender,
@@ -1676,11 +1684,12 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         return
 
     try:
+        # ---------- Normalize sender ----------
         sender = normalize_phone(sender)
         trace_id = f"{sender}-{int(datetime.datetime.now().timestamp())}"
         log_reasoning("TRACE_START", trace_id)
 
-        # --- Media handling ---
+        # ---------- Media-only handling ----------
         if message and any(k in message for k in ["document", "image", "video", "audio", "type"]) and not command:
             send_whatsapp_message(
                 sender,
@@ -1689,7 +1698,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
             return
 
-        # --- Authorization ---
+        # ---------- Authorization ----------
         manager_phone = os.getenv("MANAGER_PHONE")
         team = load_team()
 
@@ -1705,17 +1714,37 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
             return
 
-        # --- Conversation memory ---
-        conversation_history.setdefault(sender, [])
+        # ---------- Resolve user from MongoDB (SINGLE SOURCE OF TRUTH) ----------
+        user = resolve_user_by_phone(users_collection, sender)
+        if not user:
+            send_whatsapp_message(
+                sender,
+                "Access Denied: Your number is not registered.",
+                pid
+            )
+            return
+
+        login_code = user["login_code"]
+
+        # ---------- Redis session ----------
+        session_id = get_or_create_session(login_code)
+        log_reasoning("SESSION_ACTIVE", {
+            "login_code": login_code,
+            "session_id": session_id
+        })
 
         if not command:
             return
 
-        # ================= AGENT EXECUTION =================
+        # ---------- Agent setup ----------
         current_time = datetime.datetime.now(IST)
         dynamic_prompt = get_system_prompt(current_time)
 
-        agent = Agent(ai_model, deps_type=ManagerContext, system_prompt=dynamic_prompt)
+        agent = Agent(
+            ai_model,
+            deps_type=ManagerContext,
+            system_prompt=dynamic_prompt
+        )
 
         agent.tool(get_performance_report_tool)
         agent.tool(get_task_list_tool)
@@ -1728,16 +1757,26 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         agent.tool(send_whatsapp_report_tool)
         agent.tool(add_user_tool)
         agent.tool(delete_user_tool)
-        
+
         log_reasoning("INPUT_RECEIVED", {
             "sender": sender,
             "role": role,
             "command": command
         })
 
-        
+        # ---------- Store user message ----------
+        append_message(session_id, "user", command)
+
+        # ---------- Build LLM input from Redis ----------
+        history = get_session_history(session_id)
+        llm_input = "\n".join(
+            f"{m['role'].upper()}: {m['content']}"
+            for m in history
+        )
+
+        # ---------- Run Gemini ----------
         result = await agent.run(
-            command,
+            llm_input,
             deps=ManagerContext(
                 sender_phone=sender,
                 role=role,
@@ -1746,32 +1785,32 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
         )
 
+        if result.output:
+            append_message(session_id, "assistant", result.output)
+
         messages = result.all_messages()
-        
+
+        # ---------- Debug logging ----------
         for i, msg in enumerate(messages):
             if isinstance(msg, ModelRequest):
                 log_reasoning("MODEL_REQUEST", {
                     "index": i,
                     "content": [p.content for p in msg.parts if hasattr(p, "content")]
                 })
-
             elif isinstance(msg, ModelResponse):
                 log_reasoning("MODEL_RESPONSE", {
                     "index": i,
                     "content": [p.content for p in msg.parts if hasattr(p, "content")]
                 })
-
             elif hasattr(msg, "tool_name"):
                 log_reasoning("TOOL_SELECTED", {
                     "tool": msg.tool_name,
                     "arguments": getattr(msg, "tool_args", {})
                 })
 
-        conversation_history[sender] = messages[-10:]
-        
         output_text = result.output or ""
 
-        # ================= INTENT DETECTION (Kept exactly as you requested) =================
+        # ---------- Intent detection ----------
         TASK_MUTATION_TOOLS = {
             "assign_new_task_tool",
             "assign_task_by_phone_tool",
@@ -1788,7 +1827,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         is_task_action = did_call_tool(messages, TASK_MUTATION_TOOLS)
         is_performance_query = did_call_tool(messages, PERFORMANCE_TOOLS)
-        
+
         log_reasoning("INTENT_CLASSIFIED", {
             "is_task_action": is_task_action,
             "is_performance_query": is_performance_query,
@@ -1797,23 +1836,26 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             ]
         })
 
-        # ================= UPDATED SUPPRESSION =================
+        if "__SILENT_REPORT_TRIGGERED__" in output_text:
+            log_reasoning("SILENT_EXIT", "SID 627 report triggered")
+            end_session(login_code, session_id)
+            return
+
         if is_performance_query and not is_task_action:
             log_reasoning("OUTPUT_SUPPRESSED", {
-                "reason": "Performance report auto-triggered",
-                "tools_called": [
-                    m.tool_name for m in messages if hasattr(m, "tool_name")
-                ]
+                "reason": "Performance handled by backend only"
             })
+            end_session(login_code, session_id)
             return
 
+        if is_task_action or is_performance_query:
+            log_reasoning("SESSION_END", {
+                "login_code": login_code,
+                "session_id": session_id,
+                "reason": "Appsavy API invoked"
+            })
+            end_session(login_code, session_id)
 
-        # Special check for the silent flag string
-        if "__SILENT_REPORT_TRIGGERED__" in output_text:
-            log_reasoning("SILENT_EXIT", "SID 627 report triggered, no WhatsApp reply required")
-            return
-
-        # ================= FINAL SEND =================
         if output_text.startswith("[FINAL]"):
             send_whatsapp_message(
                 sender,
@@ -1821,8 +1863,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 pid
             )
             return
-
-        # JSON → human text
+        
         if output_text.strip().startswith("{"):
             try:
                 data = json.loads(output_text)
@@ -1837,16 +1878,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                         output_text = f"Task {task_id} updated to {status}."
             except Exception:
                 pass
-            
-        if is_performance_query:
-            log_reasoning("PERFORMANCE_SUPPRESSION", {
-                "reason": "Performance handled by backend only",
-                "tools_called": [
-                    m.tool_name for m in messages if hasattr(m, "tool_name")
-                ]
-            })
-            return
-        
+
         log_reasoning("WHATSAPP_SEND_DECISION", {
             "will_send": should_send_whatsapp(output_text),
             "message_preview": output_text[:150]
@@ -1854,7 +1886,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         if should_send_whatsapp(output_text):
             send_whatsapp_message(sender, output_text, pid)
-            return
 
-    except Exception as e:
+    except Exception:
         logger.error("handle_message failed", exc_info=True)
