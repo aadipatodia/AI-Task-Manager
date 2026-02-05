@@ -2,7 +2,8 @@ import os
 import json
 import redis
 from datetime import datetime, timezone, timedelta
-from typing import List, Dict
+from typing import List, Dict, Optional
+
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -13,22 +14,22 @@ redis_client = redis.Redis(
     decode_responses=True
 )
 
-def create_session(login_code: str) -> str:
-    counter_key = f"user_session_counter:{login_code}"
+def create_session(session_key: str) -> str:
+    counter_key = f"user_session_counter:{session_key}"
     counter = redis_client.incr(counter_key)
-    session_id = f"sess{counter:03d}_{login_code}"
+    session_id = f"sess{counter:03d}_{session_key}"
+
     redis_client.set(
-        f"user_active_session:{login_code}",
+        f"user_active_session:{session_key}",
         session_id
     )
     return session_id
 
-def get_or_create_session(login_code: str) -> str:
-    session_id = redis_client.get(f"user_active_session:{login_code}")
+def get_or_create_session(session_key: str) -> str:
+    session_id = redis_client.get(f"user_active_session:{session_key}")
     if session_id:
         return session_id
-    return create_session(login_code)
-
+    return create_session(session_key)
 
 def append_message(session_id: str, role: str, content: str):
     redis_client.rpush(
@@ -40,11 +41,26 @@ def append_message(session_id: str, role: str, content: str):
         })
     )
 
+def set_pending_task(session_id: str, data: dict, ttl: int = 300):
+    redis_client.setex(
+        f"pending_task:{session_id}",
+        ttl,
+        json.dumps(data)
+    )
+
+def get_pending_task(session_id: str) -> dict | None:
+    raw = redis_client.get(f"pending_task:{session_id}")
+    return json.loads(raw) if raw else None
+
+def clear_pending_task(session_id: str):
+    redis_client.delete(f"pending_task:{session_id}")
+
+
 def get_session_history(session_id: str) -> List[Dict]:
     raw = redis_client.lrange(f"session:{session_id}", 0, -1)
     return [json.loads(x) for x in raw]
 
-def end_session(login_code: str, session_id: str):
+def end_session(session_key: str, session_id: str):
     """
     End the active Redis session for a user
     """
@@ -53,7 +69,8 @@ def end_session(login_code: str, session_id: str):
         redis_client.delete(f"session:{session_id}")
 
         # delete active session pointer
-        redis_client.delete(f"user_active_session:{login_code}")
+        redis_client.delete(f"user_active_session:{session_key}")
 
     except Exception as e:
         print(f"[REDIS] Failed to end session {session_id}: {e}")
+
