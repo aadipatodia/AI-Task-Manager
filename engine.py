@@ -24,10 +24,7 @@ from redis_session import (
     get_or_create_session,
     append_message,
     get_session_history,
-    end_session,
-    set_pending_task,
-    get_pending_task,
-    clear_pending_task
+    end_session
 )
 from user_resolver import resolve_user_by_phone
 import asyncio 
@@ -157,6 +154,7 @@ API_CONFIGS = {
             "TokenKey": "f097a996-b7cd-42c8-ad02-2e7d77f20988"
         }
     },
+
     
     "GET_USERS_BY_ID": {
         "url": f"{APPSAVY_BASE_URL}/GetDataJSONClient",
@@ -190,7 +188,6 @@ ai_model = GeminiModel('gemini-2.5-pro')
 class ManagerContext(BaseModel):
     sender_phone: str
     role: str
-    requester_login_code: Optional[str] = None
     current_time: datetime.datetime = Field(default_factory=lambda: datetime.datetime.now(IST))
     document_data: Optional[Dict] = None
     
@@ -724,44 +721,30 @@ def to_appsavy_datetime(iso_dt: str) -> str:
     dt = datetime.datetime.fromisoformat(iso_dt)
     return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
-def resolve_unique_user_by_name(name: str, team: list[dict]) -> dict | None | list:
-    """
-    Returns:
-    - dict → exactly one user matched
-    - list → multiple users matched
-    - None → no user matched
-    """
-    name_l = name.lower().strip()
-
-    matches = [
-        u for u in team
-        if re.search(rf"\b{name_l}\b", u["name"].lower())
-    ]
-
-    if not matches:
-        return None
-
-    if len(matches) == 1:
-        return matches[0]
-
-    return matches
-
-def format_user_disambiguation(name: str, users: list[dict]) -> str:
-    options = []
-
-    for i, u in enumerate(users, 1):
-        options.append(
-            f"{i}. {u.get('name')}\n"
-            f"   Phone: {u.get('phone', 'N/A')}\n"
-            f"   Email: {u.get('email', 'N/A')}"
-        )
-
-    return (
-        f"I found multiple users named '{name}'.\n\n"
-        + "\n\n".join(options)
-        + "\n\nPlease reply with the correct number or exact phone number."
-    )
-
+def send_email(to_email: str, subject: str, body: str) -> bool:
+    """Send email via Gmail API."""
+    try:
+        service = get_gmail_service()
+        if not service:
+            logger.warning("Gmail service unavailable, skipping email")
+            return False
+        
+        message = MIMEMultipart()
+        message['to'] = to_email
+        message['subject'] = subject
+        message.attach(MIMEText(body, 'plain'))
+        
+        raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
+        send_message = service.users().messages().send(
+            userId='me',
+            body={'raw': raw_message}
+        ).execute()
+        
+        logger.info(f"Email sent successfully to {to_email}")
+        return True
+    except Exception as e:
+        logger.error(f"Email sending failed: {str(e)}")
+        return False
 
 def normalize_tasks_response(tasks_data):
     """Normalize Appsavy GET_TASKS response to always return a list"""
@@ -1275,7 +1258,7 @@ def extract_multiple_assignees(text: str, team: list) -> list[str]:
     for member in team:
         name = member["name"].lower()
         # enforce word boundary match
-        if re.search(rf"\b{re.escape(name.split()[0])}\b", text):
+        if re.search(rf"\b{name}\b", text):
             found.append(member["name"])
 
     return list(set(found))
@@ -1377,18 +1360,13 @@ async def assign_new_task_tool(
     deadline: str
 ) -> str:
     """
-    PRE-CONFIRMATION TASK ASSIGNMENT TOOL
-
-    - Resolves assignee safely using Appsavy + Mongo
-    - Prevents substring collisions (Aadi vs Ariya)
-    - Stores pending task in Redis
-    - NEVER creates task without explicit user confirmation
+    Assigns a new task to a user or group.
+    Correctly resolves assignee using Appsavy as authority
+    and prevents substring name collisions (Aadi vs Ariya).
     """
-
     try:
         team = load_team()
         name_l = name.lower().strip()
-
         log_reasoning("ASSIGN_TASK_START", {
             "input_name": name,
             "task": task_name,
@@ -1396,7 +1374,6 @@ async def assign_new_task_tool(
             "sender": ctx.deps.sender_phone
         })
 
-        # ---------------- FETCH ASSIGNEES ----------------
         assignee_res = await call_appsavy_api(
             "GET_ASSIGNEE",
             GetAssigneeRequest(
@@ -1411,7 +1388,6 @@ async def assign_new_task_tool(
         elif isinstance(assignee_res, list):
             appsavy_users = assignee_res
 
-        # ---------------- MATCH USERS ----------------
         appsavy_matches = []
         for u in appsavy_users:
             uname = str(u.get("NAME", "")).lower()
@@ -1421,7 +1397,7 @@ async def assign_new_task_tool(
                     "login_code": u.get("ID"),
                     "phone": "N/A"
                 })
-
+                
         mongo_matches = []
         for u in team:
             if re.search(rf"\b{name_l}\b", u["name"].lower()):
@@ -1430,16 +1406,16 @@ async def assign_new_task_tool(
                     "login_code": u["login_code"],
                     "phone": u.get("phone", "N/A")
                 })
-
-        # ---------------- MERGE MATCHES ----------------
+                
         combined: dict[str, dict] = {}
+
         for u in appsavy_matches:
             combined[u["login_code"]] = u
+
         for u in mongo_matches:
             combined.setdefault(u["login_code"], u)
 
         matches = list(combined.values())
-
         log_reasoning("ASSIGNEE_MATCHES_FOUND", {
             "count": len(matches),
             "matches": matches
@@ -1448,11 +1424,10 @@ async def assign_new_task_tool(
         if not matches:
             return f"Error: User '{name}' not found in the authorized directory."
 
-        # ---------------- AMBIGUOUS NAME ----------------
         if len(matches) > 1:
             final_options = []
-
             log_reasoning("ASSIGNEE_AMBIGUOUS", {
+                "reason": "Multiple users matched same name",
                 "candidates": matches
             })
 
@@ -1473,11 +1448,10 @@ async def assign_new_task_tool(
                     )
                 )
 
-                res_list = (
-                    details_res.get("data", {}).get("Result", [])
-                    if isinstance(details_res, dict)
-                    else details_res or []
-                )
+                if isinstance(details_res, dict):
+                    res_list = details_res.get("data", {}).get("Result", [])
+                else:
+                    res_list = details_res or []
 
                 if res_list:
                     d = res_list[0]
@@ -1492,19 +1466,25 @@ async def assign_new_task_tool(
 
                 final_options.append(candidate)
 
-            # ✅ MINIMAL FIX: use global disambiguation format
-            return format_user_disambiguation(name, final_options)
+            options_text = "\n".join(
+                f"- {u['name']} ({u.get('office', 'Office N/A')}): {u['phone']}"
+                for u in final_options
+            )
 
-        # ---------------- SINGLE USER RESOLVED ----------------
+            return (
+                f"I found multiple users named '{name}'. Who should I assign this to?\n\n"
+                f"{options_text}\n\n"
+                "Please reply with the correct 10-digit phone number."
+            )
+
         user = matches[0]
         login_code = user["login_code"]
-
         log_reasoning("ASSIGNEE_RESOLVED", {
             "login_code": login_code,
             "user": user
         })
 
-        # ---------------- DOCUMENT HANDLING ----------------
+        # ---- Attach document if present ----
         documents_child = []
         document_data = getattr(ctx.deps, "document_data", None)
 
@@ -1515,128 +1495,54 @@ async def assign_new_task_tool(
                 base64_data = download_and_encode_document(media_info)
                 if base64_data:
                     fname = media_info.get("filename") or "attachment"
-                    documents_child.append({
-                        "filename": fname,
-                        "base64": base64_data
-                    })
+                    documents_child.append(
+                        DocumentItem(
+                            DOCUMENT=DocumentInfo(VALUE=fname, BASE64=base64_data),
+                            DOCUMENT_NAME=fname
+                        )
+                    )
 
-        # ---------------- STORE PENDING TASK (REDIS) ----------------
-        session_key = f"{ctx.deps.requester_login_code}:{ctx.deps.sender_phone}"
-        session_id = get_or_create_session(session_key)
-
-        pending_task = {
-            "login_code": login_code,
-            "assignee_name": user["name"],
-            "task_name": task_name,
-            "deadline": deadline,
-            "documents": documents_child,
-            "requested_by": ctx.deps.sender_phone
-        }
-
-        set_pending_task(session_id, pending_task)
-
-        # ---------------- ASK FOR CONFIRMATION ----------------
-        try:
-            deadline_str = datetime.datetime.fromisoformat(deadline).strftime(
-                "%d-%b-%Y %I:%M %p"
-            )
-        except Exception:
-            deadline_str = deadline
-
-        return (
-            "Please confirm the task details:\n\n"
-            f"Task Description: {task_name}\n"
-            f"Assigned To: {user['name']}\n"
-            f"Deadline: {deadline_str}\n\n"
-            "Is this the task you want to allocate? (Yes / No)"
+        req = CreateTaskRequest(
+            ASSIGNEE=login_code,
+            DESCRIPTION=task_name,
+            TASK_NAME=task_name,
+            EXPECTED_END_DATE=to_appsavy_datetime(deadline),
+            MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
+            DETAILS=Details(CHILD=[]),
+            DOCUMENTS=Documents(CHILD=documents_child)
         )
+
+        api_response = await call_appsavy_api("CREATE_TASK", req)
+
+        if not api_response:
+            return "Failure: No response from server."
+
+        if str(api_response.get("result")) == "1":
+            msg = api_response.get("resultmessage", "")
+            match = re.search(r"task\s*id[:\s]*([0-9]+)", msg, re.I)
+            task_id = match.group(1) if match else "N/A"
+
+            try:
+                deadline_str = datetime.datetime.fromisoformat(deadline).strftime(
+                    "%d-%b-%Y %I:%M %p"
+                )
+            except Exception:
+                deadline_str = deadline
+
+            return (
+                "[FINAL]\n"
+                f"Task created successfully.\n"
+                f"Task Description: {task_name}\n"
+                f"Assigned To: {user['name']}\n"
+                f"Deadline: {deadline_str}"
+            )
+
+        return f"API Error: {api_response.get('resultmessage')}"
 
     except Exception as e:
         logger.error("assign_new_task_tool failed", exc_info=True)
-        return f"System Error: Unable to prepare task ({str(e)})"
+        return f"System Error: Unable to assign task ({str(e)})"
 
-
-async def classify_confirmation_intent(
-    agent: Agent,
-    user_message: str,
-    pending_task: dict
-) -> str:
-    """
-    Uses Gemini to decide whether the user CONFIRMED, CANCELLED,
-    or said something unrelated to the pending task.
-    """
-
-    prompt = f"""
-You previously showed the user these task details:
-
-Task Description: {pending_task['task_name']}
-Assigned To: {pending_task['assignee_name']}
-Deadline: {pending_task['deadline']}
-
-Now the user replied with:
-"{user_message}"
-
-Classify the user's intent into ONE of the following values:
-
-- CONFIRM  → user agrees / approves / confirms task creation
-- CANCEL   → user rejects / cancels / does not want to proceed
-- OTHER    → anything else (questions, changes, unrelated)
-
-Respond with ONLY ONE WORD:
-CONFIRM, CANCEL, or OTHER.
-"""
-
-    result = await agent.run(prompt)
-    return (result.output or "").strip().upper()
-
-
-async def create_task_from_pending(ctx: RunContext[ManagerContext], pending_task: dict) -> str:
-
-    documents_child = []
-
-    for d in pending_task.get("documents", []):
-        documents_child.append(
-            DocumentItem(
-                DOCUMENT=DocumentInfo(
-                    VALUE=d["filename"],
-                    BASE64=d["base64"]
-                ),
-                DOCUMENT_NAME=d["filename"]
-            )
-        )
-
-    req = CreateTaskRequest(
-        ASSIGNEE=pending_task["login_code"],
-        DESCRIPTION=pending_task["task_name"],
-        TASK_NAME=pending_task["task_name"],
-        EXPECTED_END_DATE=to_appsavy_datetime(pending_task["deadline"]),
-        MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
-        DOCUMENTS=Documents(CHILD=documents_child)
-    )
-
-    api_response = await call_appsavy_api("CREATE_TASK", req)
-
-    if not api_response:
-        return "Failure: No response from server."
-
-    if str(api_response.get("result")) == "1":
-        msg = api_response.get("resultmessage", "")
-        match = re.search(r"task\s*id[:\s]*([0-9]+)", msg, re.I)
-        task_id = match.group(1) if match else "N/A"
-
-        deadline_str = datetime.datetime.fromisoformat(
-            pending_task["deadline"]
-        ).strftime("%d-%b-%Y %I:%M %p")
-
-        return (
-            "[FINAL]\n"
-            f"Task created successfully.\n"
-            f"Task Description: {pending_task['task_name']}\n"
-            f"Assigned To: {pending_task['assignee_name']}\n"
-            f"Deadline: {deadline_str}"
-        )
-
-    return f"API Error: {api_response.get('resultmessage')}"
 
 async def assign_task_by_phone_tool(
     ctx: RunContext[ManagerContext],
@@ -1694,51 +1600,6 @@ APPSAVY_STATUS_MAP = {
     "Closed": "Closed",
     "Reopened": "Reopen"
 }
-
-async def extract_task_mutations(
-    agent: Agent,
-    user_message: str,
-    pending_task: dict
-) -> dict:
-    """
-    Extracts changes to an existing pending task.
-    Returns ONLY changed fields.
-    """
-
-    prompt = f"""
-You have an existing pending task:
-
-Task Description: {pending_task['task_name']}
-Assigned To: {pending_task['assignee_name']}
-Deadline: {pending_task['deadline']}
-
-User message:
-"{user_message}"
-
-If the user wants to CHANGE any of these:
-- task description
-- assignee
-- deadline
-
-Return ONLY the changed fields in valid JSON.
-
-Examples:
-{{ "deadline": "2026-02-07T11:00:00" }}
-{{ "task_name": "Send revised report" }}
-{{ "assignee_name": "Rahul" }}
-
-If the user is NOT changing task details, return:
-{{}}
-Do NOT explain anything.
-"""
-
-    result = await agent.run(prompt)
-
-    try:
-        return json.loads(result.output or "{}")
-    except Exception:
-        return {}
-
 
 async def get_users_created_by_me_tool(
     ctx: RunContext[ManagerContext]
@@ -1889,6 +1750,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         # ---------- Authorization ----------
         manager_phone = normalize_phone(os.getenv("MANAGER_PHONE", ""))
+
         team = load_team()
 
         if sender == manager_phone:
@@ -1903,13 +1765,16 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
             return
 
-        # ---------- Resolve user ----------
+        # ---------- Resolve user from MongoDB (SINGLE SOURCE OF TRUTH) ----------
         if sender == manager_phone:
-            user = resolve_user_by_phone(users_collection, sender) or {
-                "login_code": "MANAGER",
-                "phone": sender,
-                "name": "Manager"
-            }
+           # Manager fallback user
+            user = resolve_user_by_phone(users_collection, sender)
+            if not user:
+                user = {
+                    "login_code": "MANAGER",
+                    "phone": sender,
+                    "name": "Manager"
+                }
         else:
             user = resolve_user_by_phone(users_collection, sender)
             if not user:
@@ -1922,164 +1787,25 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         login_code = user["login_code"]
 
+
         # ---------- Redis session ----------
-        session_key = f"{login_code}:{sender}"
-        session_id = get_or_create_session(session_key)
-        current_time = datetime.datetime.now(IST)
-
-
+        session_id = get_or_create_session(login_code)
         log_reasoning("SESSION_ACTIVE", {
-            "session_key": session_key,
+            "login_code": login_code,
             "session_id": session_id
         })
 
         if not command:
             return
 
-        # ---------- Pending task ----------
-        pending_task = get_pending_task(session_id)
+        # ---------- Agent setup ----------
+        current_time = datetime.datetime.now(IST)
+        dynamic_prompt = get_system_prompt(current_time)
 
-        # ---------- GLOBAL NAME DISAMBIGUATION (ONLY IF NO PENDING TASK) ----------
-        if not pending_task:
-            mentioned_names = extract_multiple_assignees(command, team)
-
-            if mentioned_names:
-                name = mentioned_names[0]
-                resolved = resolve_unique_user_by_name(name, team)
-
-                if isinstance(resolved, list):
-                    send_whatsapp_message(
-                        sender,
-                        format_user_disambiguation(name, resolved),
-                        pid
-                    )
-                    return
-
-        # ---------- Build LLM input ----------
-        history = get_session_history(session_id)
-        llm_input = "\n".join(
-            f"{m['role'].upper()}: {m['content']}"
-            for m in history
-        )
-
-        # ---------- Pending task confirmation ----------
-        if pending_task:
-            confirmation_agent = Agent(
-                ai_model,
-                system_prompt=(
-                    "You are an intent classifier.\n"
-                    "Reply with EXACTLY one word:\n"
-                    "CONFIRM, CANCEL, or OTHER.\n"
-                    "No punctuation. No explanation."
-                ),
-                model_settings={"temperature": 0}
-            )
-
-            intent = await classify_confirmation_intent(
-                confirmation_agent,
-                command,
-                pending_task
-            ).strip().split()[0]
-
-            log_reasoning("CONFIRMATION_INTENT", {
-                "intent": intent,
-                "message": command
-            })
-
-            if intent == "CONFIRM":
-                result = await create_task_from_pending(
-                    RunContext(
-                        deps=ManagerContext(
-                            sender_phone=sender,
-                            role=role,
-                            requester_login_code=login_code,
-                            current_time=current_time,
-                            document_data=message
-                        )
-                    ),
-                    pending_task
-                )
-
-                clear_pending_task(session_id)
-                end_session(session_key, session_id)
-
-                send_whatsapp_message(
-                    sender,
-                    result.replace("[FINAL]\n", ""),
-                    pid
-                )
-                return
-
-            if intent == "CANCEL":
-                clear_pending_task(session_id)
-                end_session(session_key, session_id)
-
-                send_whatsapp_message(
-                    sender,
-                    "Task creation cancelled. Please provide updated task details.",
-                    pid
-                )
-                return
-
-            if intent == "OTHER":
-                mutation_agent = Agent(
-                    ai_model,
-                    system_prompt="You extract task updates only. Return valid JSON."
-                )
-
-                changes = await extract_task_mutations(
-                    mutation_agent,
-                    command,
-                    pending_task
-                )
-
-                if changes:
-                    if "assignee_name" in changes:
-                        clear_pending_task(session_id)
-                        return await assign_new_task_tool(
-                            RunContext(
-                                deps=ManagerContext(
-                                    sender_phone=sender,
-                                    role=role,
-                                    requester_login_code=login_code,
-                                    current_time=current_time,
-                                    document_data=message
-                                )
-                            ),
-                            changes["assignee_name"],
-                            pending_task["task_name"],
-                            pending_task["deadline"]
-                        )
-
-                    pending_task.update(changes)
-                    set_pending_task(session_id, pending_task)
-
-                    try:
-                        deadline_str = datetime.datetime.fromisoformat(
-                            pending_task["deadline"]
-                        ).strftime("%d-%b-%Y %I:%M %p")
-                    except Exception:
-                        deadline_str = pending_task["deadline"]
-
-                    send_whatsapp_message(
-                        sender,
-                        "Updated task details:\n\n"
-                        f"Task Description: {pending_task['task_name']}\n"
-                        f"Assigned To: {pending_task['assignee_name']}\n"
-                        f"Deadline: {deadline_str}\n\n"
-                        "Please confirm the updated task.",
-                        pid
-                    )
-                    return
-
-        # ---------- Store user message ----------
-        append_message(session_id, "user", command)
-
-        # ---------- Agent setup ------
         agent = Agent(
             ai_model,
             deps_type=ManagerContext,
-            system_prompt=get_system_prompt(current_time)
+            system_prompt=dynamic_prompt
         )
 
         agent.tool(get_performance_report_tool)
@@ -2094,12 +1820,28 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         agent.tool(add_user_tool)
         agent.tool(delete_user_tool)
 
+        log_reasoning("INPUT_RECEIVED", {
+            "sender": sender,
+            "role": role,
+            "command": command
+        })
+
+        # ---------- Store user message ----------
+        append_message(session_id, "user", command)
+
+        # ---------- Build LLM input from Redis ----------
+        history = get_session_history(session_id)
+        llm_input = "\n".join(
+            f"{m['role'].upper()}: {m['content']}"
+            for m in history
+        )
+
+        # ---------- Run Gemini ----------
         result = await agent.run(
             llm_input,
             deps=ManagerContext(
                 sender_phone=sender,
                 role=role,
-                requester_login_code=login_code,
                 current_time=current_time,
                 document_data=message
             )
@@ -2108,16 +1850,93 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         if result.output:
             append_message(session_id, "assistant", result.output)
 
+        messages = result.all_messages()
+
+        # ---------- Debug logging ----------
+        for i, msg in enumerate(messages):
+            if isinstance(msg, ModelRequest):
+                log_reasoning("MODEL_REQUEST", {
+                    "index": i,
+                    "content": [p.content for p in msg.parts if hasattr(p, "content")]
+                })
+            elif isinstance(msg, ModelResponse):
+                log_reasoning("MODEL_RESPONSE", {
+                    "index": i,
+                    "content": [p.content for p in msg.parts if hasattr(p, "content")]
+                })
+            elif hasattr(msg, "tool_name"):
+                log_reasoning("TOOL_SELECTED", {
+                    "tool": msg.tool_name,
+                    "arguments": getattr(msg, "tool_args", {})
+                })
+
         output_text = result.output or ""
 
+        # ---------- Intent detection ----------
+        TASK_MUTATION_TOOLS = {
+            "assign_new_task_tool",
+            "assign_task_by_phone_tool",
+            "update_task_status_tool",
+            "add_user_tool",
+            "delete_user_tool",
+            "get_users_created_by_me_tool"
+        }
+
+        PERFORMANCE_TOOLS = {
+            "send_whatsapp_report_tool"
+        }
+
+        is_task_action = did_call_tool(messages, TASK_MUTATION_TOOLS)
+        is_performance_query = did_call_tool(messages, PERFORMANCE_TOOLS)
+
+        log_reasoning("INTENT_CLASSIFIED", {
+            "is_task_action": is_task_action,
+            "is_performance_query": is_performance_query,
+            "tools_called": [
+                m.tool_name for m in messages if hasattr(m, "tool_name")
+            ]
+        })
+
+        if "__SILENT_REPORT_TRIGGERED__" in output_text:
+            log_reasoning("SILENT_EXIT", "SID 627 report triggered")
+            end_session(login_code, session_id)
+            return
+
+        if is_task_action or is_performance_query:
+            log_reasoning("SESSION_END", {
+                "login_code": login_code,
+                "session_id": session_id,
+                "reason": "Appsavy API invoked"
+            })
+            end_session(login_code, session_id)
+
         if output_text.startswith("[FINAL]"):
-            end_session(session_key, session_id)
             send_whatsapp_message(
                 sender,
                 output_text.replace("[FINAL]\n", "", 1),
                 pid
             )
             return
+        
+        if output_text.strip().startswith("{"):
+            try:
+                data = json.loads(output_text)
+                if "task_id" in data and "status" in data:
+                    task_id = data["task_id"]
+                    status = data["status"]
+                    if status in ("Closed", "Close"):
+                        output_text = f"Task {task_id} has been closed successfully."
+                    elif status == "Reopened":
+                        output_text = f"Task {task_id} has been reopened."
+                    else:
+                        output_text = f"Task {task_id} updated to {status}."
+            except Exception:
+                pass
+
+        log_reasoning("WHATSAPP_SEND_DECISION", {
+            "will_send": should_send_whatsapp(output_text),
+            "message_preview": output_text[:150]
+        })
 
         if should_send_whatsapp(output_text):
             send_whatsapp_message(sender, output_text, pid)
