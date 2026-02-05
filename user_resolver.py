@@ -17,3 +17,14 @@ def resolve_user_by_phone(
 
     normalized = normalize_phone(phone)
     return users_collection.find_one({"phone": normalized})
+
+def resolve_user_by_phone_or_email(users_collection, value: str):
+    value = value.strip().lower()
+
+    query = {
+        "$or": [
+            {"phone": normalize_phone(value)},
+            {"email": value}
+        ]
+    }
+    return users_collection.find_one(query, {"_id": 0})

@@ -390,7 +390,7 @@ or any other statement with same semantic meaning
 You MUST follow these rules:
 
 1. Tool Usage (MANDATORY)
-Always use get_assignee_list_tool
+Always use get_users_created_by_me_tool
 Do NOT infer or guess assignees from memory or conversation history
 Do NOT use MongoDB directly for listing assignees
 The tool is the single source of truth for assignable users
@@ -401,7 +401,6 @@ Include:
 Individual employees
 System users
 Group users (if returned by the API)
-Do NOT filter results unless the user explicitly asks (e.g., “show only engineers”)
 
 3. Output Formatting Rules
 Display each assignee in a clear, readable list
@@ -892,55 +891,6 @@ async def send_whatsapp_report_tool(
     except Exception as e:
         logger.error("send_whatsapp_report_tool error", exc_info=True)
         return f"Error sending WhatsApp report: {str(e)}"
-
-
-async def get_assignee_list_tool(ctx: RunContext[ManagerContext]) -> str:
-    """
-    Use this tool when the user asks for:
-    - employee list
-    - assignee list
-    - team list
-    - list of users
-    - show employees
-    - available members
-    - who can tasks be assigned to
-
-    Retrieves the complete list of assignees/users using Appsavy SID 606.
-    """
-    try:
-        req = GetAssigneeRequest(
-            Event="0",
-            Child=[{
-                "Control_Id": "106771",
-                "AC_ID": "111057"
-            }]
-        )
-        
-        api_response = await call_appsavy_api("GET_ASSIGNEE", req)
-        
-        if not api_response:
-            return "Error: Unable to fetch assignee list from API."
-        
-        if isinstance(api_response, dict) and "error" in api_response:
-            return f"API Error: {api_response['error']}"
-        
-        assignees = []
-        if isinstance(api_response, list):
-            for item in api_response:
-                if isinstance(item, dict):
-                    login_id = item.get("LOGIN_ID") or item.get("ID")
-                    name = item.get("name") or item.get("PARTICIPANT_NAME")
-                    if login_id and name:
-                        assignees.append(f"{name} (ID: {login_id})")
-        
-        if not assignees:
-            return "No assignees found in the system."
-        
-        return "Available Assignees:\n" + "\n".join(assignees)
-        
-    except Exception as e:
-        logger.error(f"get_assignee_list_tool error: {str(e)}", exc_info=True)
-        return f"Error fetching assignee list: {str(e)}"
 
 async def get_users_by_id_tool(ctx: RunContext[ManagerContext], id_value: str) -> str:
     try:
@@ -1813,7 +1763,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         agent.tool(assign_new_task_tool)
         agent.tool(assign_task_by_phone_tool)
         agent.tool(update_task_status_tool)
-        agent.tool(get_assignee_list_tool)
         agent.tool(get_users_created_by_me_tool)
         agent.tool(get_users_by_id_tool)
         agent.tool(send_whatsapp_report_tool)
