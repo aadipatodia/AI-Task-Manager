@@ -43,3 +43,17 @@ def append_message(session_id: str, role: str, content: str):
 def get_session_history(session_id: str) -> List[Dict]:
     raw = redis_client.lrange(f"session:{session_id}", 0, -1)
     return [json.loads(x) for x in raw]
+
+def end_session(login_code: str, session_id: str):
+    """
+    End the active Redis session for a user
+    """
+    try:
+        # delete session messages
+        redis_client.delete(f"session:{session_id}")
+
+        # delete active session pointer
+        redis_client.delete(f"user_active_session:{login_code}")
+
+    except Exception as e:
+        print(f"[REDIS] Failed to end session {session_id}: {e}")
