@@ -1845,9 +1845,23 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             ]
         })
         
-        if re.search(r"\b(performance report|pending task count|task count|pending tasks)\b", command.lower()):
-            log_reasoning("PERFORMANCE_INTENT_LOCKED", command)
+        # ---------- HARD PERFORMANCE LOCK (GEMINI-DRIVEN) ----------
+        performance_attempted = any(
+            hasattr(m, "tool_name") and m.tool_name in PERFORMANCE_TOOLS
+            for m in messages
+        )
+
+        if performance_attempted:
+            log_reasoning("PERFORMANCE_INTENT_LOCKED", {
+                "reason": "Gemini selected performance tool",
+                "tools": [m.tool_name for m in messages if hasattr(m, "tool_name")]
+            })
             is_performance_query = True
+        
+        if is_performance_query:
+            log_reasoning("WHATSAPP_BLOCKED", "Performance flow – backend enforced silence")
+            end_session(login_code, session_id)
+            return
 
         if "__SILENT_REPORT_TRIGGERED__" in output_text:
             log_reasoning("SILENT_EXIT", "SID 627 report triggered")
