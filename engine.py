@@ -1636,6 +1636,10 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         )
         return
 
+    # Initialize variables for the finally block
+    login_code = None
+    session_id = None
+
     try:
         # ---------- Normalize sender ----------
         sender = normalize_phone(sender)
@@ -1747,16 +1751,15 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         if result.output:
             append_message(session_id, "assistant", result.output)
 
-        # ---------- Silent performance exit ----------
-        if result.output and "__SILENT_REPORT_TRIGGERED__" in result.output:
-            log_reasoning("SILENT_EXIT", "Gemini requested silent exit")
-            end_session(login_code, session_id)
-            return
-
         # ---------- FINAL & ONLY WHATSAPP RULE ----------
-        # Gemini decides. Backend only forwards.
-        if result.output:
+        if result.output and "__SILENT_REPORT_TRIGGERED__" not in result.output:
             send_whatsapp_message(sender, result.output, pid)
 
     except Exception:
         logger.error("handle_message failed", exc_info=True)
+    
+    finally:
+        # ---------- CLEAR REDIS CACHE AFTER EVERY CALL ----------
+        if login_code and session_id:
+            log_reasoning("SESSION_CLEANUP", f"Clearing cache for {login_code}")
+            end_session(login_code, session_id)
