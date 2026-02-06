@@ -1074,10 +1074,6 @@ async def get_task_summary_from_tasks(login_code: str) -> Dict[str, int]:
     return summary
 
 async def get_pending_tasks(login_code: str) -> List[str]:
-    """
-    Returns titles of pending tasks (Open / Work In Progress)
-    using GET_TASKS (SID 610).
-    """
 
     res = await call_appsavy_api(
         "GET_TASKS",
@@ -1592,6 +1588,14 @@ async def get_users_created_by_me_tool(
 
     return output.strip()
 
+def extract_final_from_messages(messages) -> str | None:
+    for m in messages:
+        if isinstance(m, ModelResponse):
+            for p in m.parts:
+                if hasattr(p, "content") and isinstance(p.content, str):
+                    if p.content.startswith("[FINAL]"):
+                        return p.content
+    return None
 
 async def update_task_status_tool(
     ctx: RunContext[ManagerContext],
@@ -1801,6 +1805,16 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             append_message(session_id, "assistant", result.output)
 
         messages = result.all_messages()
+        final_text = extract_final_from_messages(messages)
+
+        if final_text:
+            send_whatsapp_message(
+                sender,
+                final_text.replace("[FINAL]\n", "", 1),
+                pid
+            )
+            end_session(login_code, session_id)
+            return  
 
         for i, msg in enumerate(messages):
             if isinstance(msg, ModelRequest):
@@ -1870,22 +1884,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             })
             end_session(login_code, session_id)
             return
-
-        if (is_task_action or is_performance_query) and not (is_task_action and output_text.startswith("[FINAL]")):
-            log_reasoning("SESSION_END", {
-                "login_code": login_code,
-                "session_id": session_id,
-                "reason": "Appsavy API invoked"
-            })
-            end_session(login_code, session_id)
-
-        if output_text.startswith("[FINAL]"):
-            send_whatsapp_message(
-                sender,
-                output_text.replace("[FINAL]\n", "", 1),
-                pid
-            )
-            return
         
         if output_text.strip().startswith("{"):
             try:
@@ -1910,6 +1908,10 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         if is_performance_query and not is_task_action:
             log_reasoning("WHATSAPP_BLOCKED", "Performance flow – message suppressed")
             end_session(login_code, session_id)
+            return
+        
+        if is_task_action:
+            log_reasoning("WHATSAPP_BLOCKED", "Mutation handled via FINAL only")
             return
         
         if should_send_whatsapp(output_text):
