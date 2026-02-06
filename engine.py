@@ -1740,8 +1740,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             "assign_task_by_phone_tool",
             "update_task_status_tool",
             "add_user_tool",
-            "delete_user_tool",
-            "get_users_created_by_me_tool"
+            "delete_user_tool"
         }
 
         PERFORMANCE_TOOLS = {
@@ -1762,13 +1761,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         if "__SILENT_REPORT_TRIGGERED__" in output_text:
             log_reasoning("SILENT_EXIT", "SID 627 report triggered")
-            end_session(login_code, session_id)
-            return
-
-        if is_performance_query and not is_task_action:
-            log_reasoning("OUTPUT_SUPPRESSED", {
-                "reason": "Performance handled by backend only"
-            })
             end_session(login_code, session_id)
             return
 
