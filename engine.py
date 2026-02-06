@@ -1893,11 +1893,16 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             return
 
         if output_text.startswith("[FINAL]"):
-            send_whatsapp_message(
-                sender,
-                output_text.replace("[FINAL]\n", "", 1),
-                pid
-            )
+            if role != "manager":
+                send_whatsapp_message(
+                    sender,
+                    output_text.replace("[FINAL]\n", "", 1),
+                    pid
+                )
+            log_reasoning("FINAL_MESSAGE_SUPPRESSED_FOR_MANAGER", {
+                "role": role,
+                "message": output_text[:100]
+            })
             return
         
         if output_text.strip().startswith("{"):
