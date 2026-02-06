@@ -1871,7 +1871,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             end_session(login_code, session_id)
             return
 
-        if is_task_action or is_performance_query:
+        if (is_task_action or is_performance_query) and not (is_task_action and output_text.startswith("[FINAL]")):
             log_reasoning("SESSION_END", {
                 "login_code": login_code,
                 "session_id": session_id,
