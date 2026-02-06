@@ -1768,8 +1768,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             if isinstance(msg, ModelResponse)
         )
 
-        # ---------- FINAL OUTPUT GATE ----------
-        # Gemini may speak ONLY when blocked (no tool call + output exists)
         if result.output and not api_called:
             send_whatsapp_message(sender, result.output, pid)
             append_message(session_id, "assistant", result.output)
