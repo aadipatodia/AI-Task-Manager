@@ -390,7 +390,7 @@ or any other statement with same semantic meaning
 You MUST follow these rules:
 
 1. Tool Usage (MANDATORY)
-Always use get_users_created_by_me_tool
+Always use get_assignee_list_tool
 Do NOT infer or guess assignees from memory or conversation history
 Do NOT use MongoDB directly for listing assignees
 The tool is the single source of truth for assignable users
@@ -837,6 +837,110 @@ def download_and_encode_document(document_data: Dict):
         logger.error(f"Document download failed: {str(e)}")
         return None
 
+# --- NEW TOOLS ---
+
+async def send_whatsapp_report_tool(
+    ctx: RunContext[ManagerContext],
+    report_type: str,
+    status: str,
+    assigned_to: Optional[str] = None
+) -> str:
+    """
+    Sends WhatsApp PDF report using SID 627.
+    """
+    try:
+        team = load_team()
+
+        # Resolve user
+        if assigned_to:
+            user = next(
+                (u for u in team if assigned_to == u["login_code"]),
+                None
+            )
+
+            if not user:
+                return f"User '{assigned_to}' not found."
+        else:
+            user = next((u for u in team if u["phone"] == normalize_phone(ctx.deps.sender_phone)), None)
+
+        if not user:
+            return "Unable to resolve user for report."
+
+        req = WhatsAppPdfReportRequest(
+            ASSIGNED_TO=user["login_code"],
+            REPORT_TYPE=report_type,
+            STATUS=normalize_status_for_report(status),
+            MOBILE_NUMBER=user["phone"][-10:],
+            ASSIGNED_BY="",
+            REFERENCE="WHATSAPP"
+        )
+
+        api_response = await call_appsavy_api("WHATSAPP_PDF_REPORT", req)
+
+        if not api_response:
+            return "Failed to generate WhatsApp report."
+
+        if isinstance(api_response, dict) and api_response.get("error"):
+            return f"API Error: {api_response['error']}"
+
+        return (
+            f"WhatsApp PDF report sent successfully.\n"
+            f"Report Type: {report_type}\n"
+            f"Status: {status}"
+        )
+
+    except Exception as e:
+        logger.error("send_whatsapp_report_tool error", exc_info=True)
+        return f"Error sending WhatsApp report: {str(e)}"
+
+
+async def get_assignee_list_tool(ctx: RunContext[ManagerContext]) -> str:
+    """
+    Use this tool when the user asks for:
+    - employee list
+    - assignee list
+    - team list
+    - list of users
+    - show employees
+    - available members
+    - who can tasks be assigned to
+
+    Retrieves the complete list of assignees/users using Appsavy SID 606.
+    """
+    try:
+        req = GetAssigneeRequest(
+            Event="0",
+            Child=[{
+                "Control_Id": "106771",
+                "AC_ID": "111057"
+            }]
+        )
+        
+        api_response = await call_appsavy_api("GET_ASSIGNEE", req)
+        
+        if not api_response:
+            return "Error: Unable to fetch assignee list from API."
+        
+        if isinstance(api_response, dict) and "error" in api_response:
+            return f"API Error: {api_response['error']}"
+        
+        assignees = []
+        if isinstance(api_response, list):
+            for item in api_response:
+                if isinstance(item, dict):
+                    login_id = item.get("LOGIN_ID") or item.get("ID")
+                    name = item.get("name") or item.get("PARTICIPANT_NAME")
+                    if login_id and name:
+                        assignees.append(f"{name} (ID: {login_id})")
+        
+        if not assignees:
+            return "No assignees found in the system."
+        
+        return "Available Assignees:\n" + "\n".join(assignees)
+        
+    except Exception as e:
+        logger.error(f"get_assignee_list_tool error: {str(e)}", exc_info=True)
+        return f"Error fetching assignee list: {str(e)}"
 
 async def get_users_by_id_tool(ctx: RunContext[ManagerContext], id_value: str) -> str:
     try:
@@ -1479,14 +1583,11 @@ async def get_users_created_by_me_tool(
         return "You have not added any users."
 
     output = "Users added by you:\n\n"
+
     for u in users:
-        name = u.get("NAME", "N/A")
-        mobile = (
-            u.get("MOBILE")
-            or u.get("MOBILE_NUMBER")
-            or "N/A"
+        output += (
+            f"{u}. Name: {u.get('NAME')}\n"
         )
-        output += f"{name} – {mobile}\n\n"
 
     return output.strip()
 
@@ -1662,9 +1763,10 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         agent.tool(assign_new_task_tool)
         agent.tool(assign_task_by_phone_tool)
         agent.tool(update_task_status_tool)
+        agent.tool(get_assignee_list_tool)
         agent.tool(get_users_created_by_me_tool)
         agent.tool(get_users_by_id_tool)
-       
+        agent.tool(send_whatsapp_report_tool)
         agent.tool(add_user_tool)
         agent.tool(delete_user_tool)
 
@@ -1695,6 +1797,9 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
         )
 
+        if result.output:
+            append_message(session_id, "assistant", result.output)
+
         messages = result.all_messages()
 
         # ---------- Debug logging ----------
@@ -1715,21 +1820,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                     "arguments": getattr(msg, "tool_args", {})
                 })
 
-        # ---------- Final output extraction ----------
         output_text = result.output or ""
-        if output_text.strip() == "__SILENT_REPORT_TRIGGERED__":
-            output_text = ""
-
-# ---------- DUPLICATE MESSAGE BLOCK ----------
-        history = get_session_history(session_id)
-        last = history[-1]["content"] if history else ""
-
-        if output_text.strip() and output_text.strip() == last.strip():
-            log_reasoning(
-                "DUPLICATE_BLOCKED",
-                {"message": output_text[:100]}
-            )
-            return
 
         # ---------- Intent detection ----------
         TASK_MUTATION_TOOLS = {
@@ -1742,8 +1833,8 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         }
 
         PERFORMANCE_TOOLS = {
-            "get_performance_report_tool"
-            
+            "get_performance_report_tool",
+            "send_whatsapp_report_tool"
         }
 
         is_task_action = did_call_tool(messages, TASK_MUTATION_TOOLS)
@@ -1756,12 +1847,16 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 m.tool_name for m in messages if hasattr(m, "tool_name")
             ]
         })
-        
-        if is_performance_query:
-            log_reasoning(
-                "PERFORMANCE_SILENCED",
-                "Performance request detected — blocking all Gemini output"
-            )
+
+        if "__SILENT_REPORT_TRIGGERED__" in output_text:
+            log_reasoning("SILENT_EXIT", "SID 627 report triggered")
+            end_session(login_code, session_id)
+            return
+
+        if is_performance_query and not is_task_action:
+            log_reasoning("OUTPUT_SUPPRESSED", {
+                "reason": "Performance handled by backend only"
+            })
             end_session(login_code, session_id)
             return
 
@@ -1803,7 +1898,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         if should_send_whatsapp(output_text):
             send_whatsapp_message(sender, output_text, pid)
-            append_message(session_id, "assistant", output_text)
 
     except Exception:
         logger.error("handle_message failed", exc_info=True)
