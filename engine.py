@@ -24,7 +24,9 @@ from redis_session import (
     get_or_create_session,
     append_message,
     get_session_history,
-    end_session
+    end_session,
+    is_performance_locked,
+    lock_performance
 )
 from user_resolver import resolve_user_by_phone
 import asyncio 
@@ -1107,26 +1109,79 @@ async def get_pending_tasks(login_code: str) -> List[str]:
 
     return pending
 
+def performance_lock_key(login_code: str, command: str) -> str:
+    normalized = re.sub(r"\s+", " ", command.lower().strip())
+    return f"perf:{login_code}:{hash(normalized)}"
+
+
+def resolve_user_by_name_or_ask(name: str) -> tuple[str | None, str | None]:
+
+    if users_collection is None:
+        return None, "User database is unavailable."
+
+    name_l = name.strip().lower()
+
+    matches = list(
+        users_collection.find(
+            {"name": {"$regex": rf"\b{name_l}\b", "$options": "i"}},
+            {"_id": 0}
+        )
+    )
+
+    if not matches:
+        return None, f"No user found with the name '{name}'."
+
+    if len(matches) == 1:
+        return matches[0]["login_code"], None
+
+    lines = []
+    for idx, u in enumerate(matches, start=1):
+        phone = u.get("phone", "N/A")
+        email = u.get("email") or "N/A"
+        lines.append(
+            f"{idx}. Name: {u.get('name','N/A')}\n"
+            f"   Phone: {phone}\n"
+            f"   Email: {email}"
+        )
+
+    message = (
+        f"I found multiple users with the name '{name}'.\n\n"
+        + "\n\n".join(lines)
+        + "\n\nPlease reply with the **phone number** of the correct user."
+    )
+    return None, message
+
 async def get_performance_report_tool(
     ctx: RunContext[ManagerContext],
     name: Optional[str] = None
 ) -> str:
     team = load_team()
 
-    # ---------- NO NAME → PDF ----------
+    lock_key = performance_lock_key(
+        ctx.deps.sender_phone,
+        ctx.run_input  # exact user message text
+    )
+
+    if is_performance_locked(lock_key):
+        log_reasoning(
+            "PERFORMANCE_DUPLICATE_BLOCKED",
+            {"lock_key": lock_key}
+        )
+        return "__SILENT_REPORT_TRIGGERED__"
+
+    lock_performance(lock_key)
+
     if not name:
         if ctx.deps.role != "manager":
             return "Permission Denied: Only managers can view full performance reports."
 
-        # Trigger SID 627 (Report is sent by Appsavy's backend)
-        await get_performance_count_via_627(ctx, "") 
+        await get_performance_count_via_627(ctx, "")
         return "__SILENT_REPORT_TRIGGERED__"
 
-    # ---------- NAME PRESENT → TEXT ----------
     user = next(
-        (u for u in team 
-         if name.lower() in u["name"].lower() 
-         or name.lower() == u["login_code"].lower()), 
+        (u for u in team
+         if name.lower() in u["name"].lower()
+         or name.lower() == u["login_code"].lower()),
         None
     )
 
@@ -1135,6 +1190,7 @@ async def get_performance_report_tool(
 
     await get_performance_count_via_627(ctx, user["login_code"])
     return "__SILENT_REPORT_TRIGGERED__"
+
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
 
@@ -1425,7 +1481,11 @@ async def assign_new_task_tool(
             )
 
         user = matches[0]
-        login_code = user["login_code"]
+        login_code, clarification = resolve_user_by_name_or_ask(name)
+
+        if clarification:
+            return clarification 
+
         log_reasoning("ASSIGNEE_RESOLVED", {
             "login_code": login_code,
             "user": user
@@ -1580,12 +1640,20 @@ async def get_users_created_by_me_tool(
         return "You have not added any users."
 
     output = "Users added by you:\n\n"
-
-    for u in users:
-        output += (
-            f"{u}. Name: {u.get('NAME')}\n"
+    for idx, u in enumerate(users, start=1):
+        name = u.get("NAME", "N/A")
+        mobile = (
+            u.get("MOBILE_NUMBER")
+            or u.get("MOBILE")
+            or u.get("PHONE")
+            or "N/A"
         )
 
+        output += (
+            f"{idx}. Name: {name}\n"
+            f"   Mobile: {mobile}\n\n"
+        )
+    log_reasoning("USERS_CREATED_BY_ME_OUTPUT", output)
     return output.strip()
 
 def extract_final_from_messages(messages) -> str | None:

@@ -47,6 +47,12 @@ def set_pending_task(session_id: str, data: dict, ttl: int = 300):
         ttl,
         json.dumps(data)
     )
+    
+def is_performance_locked(key: str) -> bool:
+    return redis_client.exists(key)
+
+def lock_performance(key: str, ttl: int = 120):
+    redis_client.setex(key, ttl, "1")
 
 def get_pending_task(session_id: str) -> dict | None:
     raw = redis_client.get(f"pending_task:{session_id}")
