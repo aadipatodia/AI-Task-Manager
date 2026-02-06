@@ -20,12 +20,6 @@ PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 # This prevents duplicates even if Meta retries a webhook after a server restart.
 DEDUPLICATION_TTL = 86400 
 
-@app.post("/webhook")
-async def handle_webhook(request: Request):
-    try:
-        data = await request.json()
-    except Exception:
-        return {"status": "EVENT_RECEIVED"}  # Always ACK Meta
 
 @app.get("/")
 async def home():

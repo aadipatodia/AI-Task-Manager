@@ -625,8 +625,6 @@ async def add_user_tool(
     
     msg = res.get("resultmessage", "")
     login_code = None
-    status_note = ""
-
     # Check for Success (1) or Already Exists
     is_success = str(res.get("result")) == "1" or str(res.get("RESULT")) == "1"
     is_existing = "already exists" in msg.lower()
@@ -636,8 +634,6 @@ async def add_user_tool(
         match = re.search(r"login Code:\s*([A-Z0-9-]+)", msg, re.IGNORECASE)
         login_code = match.group(1) if match else None
         
-        if login_code:
-            status_note = "ID extracted from API message"
         
         # STEP 2: BACKUP - If ID is missing from the message, ALWAYS check the list
         if not login_code:
@@ -656,7 +652,6 @@ async def add_user_tool(
                     item_name = str(item.get("NAME", "")).lower().strip()
                     if re.fullmatch(rf"{re.escape(target_name)}", item_name):
                         login_code = item.get("ID") or item.get("LOGIN_ID")
-                        status_note = "ID fetched from system list"
                         break
 
         # STEP 3: If we have an ID, save to MongoDB
@@ -696,12 +691,11 @@ async def delete_user_tool(
     res = await call_appsavy_api("ADD_DELETE_USER", req)
 
     if not isinstance(res, dict):
-        return f"Failed to delete user: {res}"
-
+        return None
     msg = res.get("resultmessage", "").lower()
 
     if "permission denied" in msg:
-        return " Permission denied. You did not add this user."
+        return None
 
     if str(res.get("result")) == "1" or str(res.get("RESULT")) == "1":
         
@@ -712,30 +706,12 @@ async def delete_user_tool(
         return None    
     return None
 
-
-def get_gmail_service():
-    try:
-        token_json_str = os.getenv("TOKEN_JSON")
-        if not token_json_str: return None
-        
-        cleaned_token = "".join(c for c in token_json_str if ord(c) >= 32)
-        token_data = json.loads(cleaned_token)
-        
-        creds = Credentials.from_authorized_user_info(token_data, SCOPES)
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        return build('gmail', 'v1', credentials=creds)
-    except Exception as e:
-        logger.error(f"Gmail Error: {e}")
-        return None
-
 def log_reasoning(step: str, details: dict | str):
     logger.info(
         "[GEMINI_REASONING] %s | %s",
         step,
         json.dumps(details, ensure_ascii=False) if isinstance(details, dict) else details
     )
-
 
 def normalize_status_for_report(status: str) -> str:
     report_status_map = {
@@ -754,31 +730,6 @@ def normalize_status_for_report(status: str) -> str:
 def to_appsavy_datetime(iso_dt: str) -> str:
     dt = datetime.datetime.fromisoformat(iso_dt)
     return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-
-def send_email(to_email: str, subject: str, body: str) -> bool:
-    """Send email via Gmail API."""
-    try:
-        service = get_gmail_service()
-        if not service:
-            logger.warning("Gmail service unavailable, skipping email")
-            return False
-        
-        message = MIMEMultipart()
-        message['to'] = to_email
-        message['subject'] = subject
-        message.attach(MIMEText(body, 'plain'))
-        
-        raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
-        send_message = service.users().messages().send(
-            userId='me',
-            body={'raw': raw_message}
-        ).execute()
-        
-        logger.info(f"Email sent successfully to {to_email}")
-        return True
-    except Exception as e:
-        logger.error(f"Email sending failed: {str(e)}")
-        return False
 
 def normalize_tasks_response(tasks_data):
     """Normalize Appsavy GET_TASKS response to always return a list"""
@@ -804,10 +755,8 @@ def normalize_task(task: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 def is_authorized(task_owner) -> bool:
-
     if task_owner is None:
         return False
-
     return str(task_owner).strip() != "0"
 
 
@@ -871,8 +820,6 @@ def download_and_encode_document(document_data: Dict):
         logger.error(f"Document download failed: {str(e)}")
         return None
 
-# --- NEW TOOLS ---
-
 async def send_whatsapp_report_tool(
     ctx: RunContext[ManagerContext],
     report_type: str,
@@ -908,21 +855,15 @@ async def send_whatsapp_report_tool(
             ASSIGNED_BY="",
             REFERENCE="WHATSAPP"
         )
-
         api_response = await call_appsavy_api("WHATSAPP_PDF_REPORT", req)
-
         if not api_response:
             return "Failed to generate WhatsApp report."
-
         if isinstance(api_response, dict) and api_response.get("error"):
             return f"API Error: {api_response['error']}"
-
         return None
-
     except Exception as e:
         logger.error("send_whatsapp_report_tool error", exc_info=True)
         return f"Error sending WhatsApp report: {str(e)}"
-
 
 async def get_users_by_id_tool(ctx: RunContext[ManagerContext], id_value: str) -> str:
     try:
@@ -995,6 +936,7 @@ async def get_users_by_id_tool(ctx: RunContext[ManagerContext], id_value: str) -
         logger.error(f"get_users_by_id_tool error: {str(e)}", exc_info=True)
         return f"Error fetching user information: {str(e)}"
 
+
 async def get_performance_count_via_627(
     ctx: RunContext[ManagerContext],
     login_code: str
@@ -1012,7 +954,8 @@ async def get_performance_count_via_627(
     # Trigger Appsavy internal report
     await call_appsavy_api("WHATSAPP_PDF_REPORT", req)
 
-    return 
+    # IMPORTANT: Do NOT return fake zeros
+    return {}
 
 async def get_task_summary_from_tasks(login_code: str) -> Dict[str, int]:
     res = await call_appsavy_api(
@@ -1029,9 +972,7 @@ async def get_task_summary_from_tasks(login_code: str) -> Dict[str, int]:
             }]
         )
     )
-
     tasks = normalize_tasks_response(res)
-
     summary = {
         "ASSIGNED_TASK": len(tasks),
         "OPEN_TASK": 0,
@@ -1141,7 +1082,7 @@ async def get_performance_report_tool(
             "PERFORMANCE_DUPLICATE_BLOCKED",
             {"lock_key": lock_key}
         )
-        return None
+        return "__SILENT_REPORT_TRIGGERED__"
 
     lock_performance(lock_key)
 
@@ -1150,7 +1091,8 @@ async def get_performance_report_tool(
             return "Permission Denied: Only managers can view full performance reports."
 
         await get_performance_count_via_627(ctx, "")
-        return None
+        return "__SILENT_REPORT_TRIGGERED__"
+
     user = next(
         (u for u in team
          if name.lower() in u["name"].lower()
@@ -1162,7 +1104,7 @@ async def get_performance_report_tool(
         return f"User '{name}' not found."
 
     await get_performance_count_via_627(ctx, user["login_code"])
-    return None
+    return "__SILENT_REPORT_TRIGGERED__"
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
 
@@ -1221,7 +1163,7 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
                 f"Deadline: {deadline}\n\n"
             )
 
-        return None
+        return output.strip()
     except Exception as e:
         logger.error(f"get_task_list_tool error: {str(e)}", exc_info=True)
         return "Error fetching your tasks."
@@ -1239,10 +1181,7 @@ def extract_multiple_assignees(text: str, team: list) -> list[str]:
     return list(set(found))
 
 async def get_task_description(task_id: str) -> str:
-    """
-    Fetch task description using GET_TASKS.
-    Returns description or 'N/A' if not found.
-    """
+
     try:
         res = await call_appsavy_api(
             "GET_TASKS",
@@ -1291,7 +1230,6 @@ def resolve_status(text: str, role: str):
     ]):
         return "Work In Progress"
 
-    # Done / completed → Close or Closed
     if any(x in t for x in [
         "done",
         "completed",
@@ -1488,7 +1426,6 @@ async def assign_new_task_tool(
         logger.error("assign_new_task_tool failed", exc_info=True)
         return f"System Error: Unable to assign task ({str(e)})"
 
-
 async def assign_task_by_phone_tool(
     ctx: RunContext[ManagerContext],
     phone: str,
@@ -1577,7 +1514,22 @@ async def get_users_created_by_me_tool(
     if not users:
         return "You have not added any users."
 
-    return None
+    output = "Users added by you:\n\n"
+    for idx, u in enumerate(users, start=1):
+        name = u.get("NAME", "N/A")
+        mobile = (
+            u.get("MOBILE_NUMBER")
+            or u.get("MOBILE")
+            or u.get("PHONE")
+            or "N/A"
+        )
+
+        output += (
+            f"{idx}. Name: {name}\n"
+            f"   Mobile: {mobile}\n\n"
+        )
+    log_reasoning("USERS_CREATED_BY_ME_OUTPUT", output)
+    return output.strip()
 
 def extract_final_from_messages(messages) -> str | None:
     for m in messages:
@@ -1631,6 +1583,7 @@ async def update_task_status_tool(
 
     return ""
 
+
 def normalize_phone(phone: str) -> str:
     digits = re.sub(r"\D", "", phone)
     if len(digits) == 10:
@@ -1650,9 +1603,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             pid
         )
         return
-
-    login_code = None
-    session_id = None
 
     try:
         # ---------- Normalize sender ----------
@@ -1761,28 +1711,20 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
         )
 
-        # ---------- Detect tool usage (ONCE) ----------
-        api_called = any(
-            any(hasattr(part, "tool_call") for part in msg.parts)
-            for msg in result.new_messages()
-            if isinstance(msg, ModelResponse)
-        )
-
-        if result.output and not api_called:
-            send_whatsapp_message(sender, result.output, pid)
+        # ---------- Store assistant output ----------
+        if result.output:
             append_message(session_id, "assistant", result.output)
 
-        if api_called or not result.output:
-            log_reasoning("SESSION_CLEANUP", {
-                "login_code": login_code,
-                "api_called": api_called
-            })
+        # ---------- Silent performance exit ----------
+        if result.output and "__SILENT_REPORT_TRIGGERED__" in result.output:
+            log_reasoning("SILENT_EXIT", "Gemini requested silent exit")
             end_session(login_code, session_id)
-            session_id = None
+            return
+
+        # ---------- FINAL & ONLY WHATSAPP RULE ----------
+        # Gemini decides. Backend only forwards.
+        if result.output:
+            send_whatsapp_message(sender, result.output, pid)
 
     except Exception:
         logger.error("handle_message failed", exc_info=True)
-
-    finally:
-        if login_code and session_id:
-            end_session(login_code, session_id)
