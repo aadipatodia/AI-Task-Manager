@@ -1604,9 +1604,7 @@ async def get_users_created_by_me_tool(
         )
 
     output += f"{name} – {mobile}\n"
-    
     return output.strip()
-
 
 async def update_task_status_tool(
     ctx: RunContext[ManagerContext],
@@ -1876,13 +1874,23 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             end_session(login_code, session_id)
             return
 
-        if is_task_action or is_performance_query:
-            log_reasoning("SESSION_END", {
+        # --- SESSION END RULE ---
+        if is_task_action:
+            if role == "manager":
+                log_reasoning("MANAGER_TASK_ACTION_SUPPRESSED", {
+                    "login_code": login_code,
+                    "session_id": session_id
+                })
+                end_session(login_code, session_id)
+                return
+        
+        if is_performance_query:
+            log_reasoning("PERFORMANCE_QUERY_SUPPRESSED", {
                 "login_code": login_code,
-                "session_id": session_id,
-                "reason": "Appsavy API invoked"
+                "session_id": session_id
             })
             end_session(login_code, session_id)
+            return
 
         if output_text.startswith("[FINAL]"):
             send_whatsapp_message(
