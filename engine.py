@@ -839,59 +839,7 @@ def download_and_encode_document(document_data: Dict):
 
 # --- NEW TOOLS ---
 
-async def send_whatsapp_report_tool(
-    ctx: RunContext[ManagerContext],
-    report_type: str,
-    status: str,
-    assigned_to: Optional[str] = None
-) -> str:
-    """
-    Sends WhatsApp PDF report using SID 627.
-    """
-    try:
-        team = load_team()
 
-        # Resolve user
-        if assigned_to:
-            user = next(
-                (u for u in team if assigned_to == u["login_code"]),
-                None
-            )
-
-            if not user:
-                return f"User '{assigned_to}' not found."
-        else:
-            user = next((u for u in team if u["phone"] == normalize_phone(ctx.deps.sender_phone)), None)
-
-        if not user:
-            return "Unable to resolve user for report."
-
-        req = WhatsAppPdfReportRequest(
-            ASSIGNED_TO=user["login_code"],
-            REPORT_TYPE=report_type,
-            STATUS=normalize_status_for_report(status),
-            MOBILE_NUMBER=user["phone"][-10:],
-            ASSIGNED_BY="",
-            REFERENCE="WHATSAPP"
-        )
-
-        api_response = await call_appsavy_api("WHATSAPP_PDF_REPORT", req)
-
-        if not api_response:
-            return "Failed to generate WhatsApp report."
-
-        if isinstance(api_response, dict) and api_response.get("error"):
-            return f"API Error: {api_response['error']}"
-
-        return (
-            f"WhatsApp PDF report sent successfully.\n"
-            f"Report Type: {report_type}\n"
-            f"Status: {status}"
-        )
-
-    except Exception as e:
-        logger.error("send_whatsapp_report_tool error", exc_info=True)
-        return f"Error sending WhatsApp report: {str(e)}"
 
 async def get_users_by_id_tool(ctx: RunContext[ManagerContext], id_value: str) -> str:
     try:
@@ -1713,7 +1661,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         agent.tool(update_task_status_tool)
         agent.tool(get_users_created_by_me_tool)
         agent.tool(get_users_by_id_tool)
-        agent.tool(send_whatsapp_report_tool)
+       
         agent.tool(add_user_tool)
         agent.tool(delete_user_tool)
 
@@ -1780,8 +1728,8 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         }
 
         PERFORMANCE_TOOLS = {
-            "get_performance_report_tool",
-            "send_whatsapp_report_tool"
+            "get_performance_report_tool"
+            
         }
 
         is_task_action = did_call_tool(messages, TASK_MUTATION_TOOLS)
