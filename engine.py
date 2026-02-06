@@ -405,7 +405,7 @@ or any other statement with same semantic meaning
 You MUST follow these rules:
 
 1. Tool Usage (MANDATORY)
-Always use get_assignee_list_tool
+Always use get_users_created_by_me_tool
 Do NOT infer or guess assignees from memory or conversation history
 Do NOT use MongoDB directly for listing assignees
 The tool is the single source of truth for assignable users
@@ -1594,16 +1594,17 @@ async def get_users_created_by_me_tool(
 
     users = res["data"].get("Result", [])
 
-    if not users:
-        return "You have not added any users."
-
     output = "Users added by you:\n\n"
-
     for u in users:
-        output += (
-            f"{u}. Name: {u.get('NAME')}\n"
+        name = u.get("NAME", "N/A")
+        mobile = (
+            u.get("MOBILE")
+            or u.get("MOBILE_NUMBER")
+            or "N/A"
         )
 
+    output += f"{name} – {mobile}\n"
+    
     return output.strip()
 
 
