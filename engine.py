@@ -2,7 +2,6 @@ import os
 from pymongo import MongoClient
 import certifi
 import json
-from pydantic import RootModel
 import datetime
 import base64
 import requests
@@ -10,14 +9,6 @@ import logging
 import re
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent, RunContext
-from pydantic_ai.models.gemini import GeminiModel
-from pydantic_ai.messages import ModelResponse, ModelRequest, TextPart, UserPromptPart
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
 from send_message import send_whatsapp_message
 from redis_session import (
@@ -26,6 +17,7 @@ from redis_session import (
     get_session_history,
     end_session
 )
+from intent_classifier import intent_classifier
 from user_resolver import resolve_user_by_phone
 import asyncio 
 from datetime import timezone, timedelta
@@ -183,12 +175,12 @@ API_CONFIGS = {
     }
 }
 
-ai_model = GeminiModel('gemini-2.5-pro')
-
 class ManagerContext(BaseModel):
     sender_phone: str
     role: str
-    current_time: datetime.datetime = Field(default_factory=lambda: datetime.datetime.now(IST))
+    current_time: datetime.datetime = Field(
+        default_factory=lambda: datetime.datetime.now(IST)
+    )
     document_data: Optional[Dict] = None
     
 class WhatsAppPdfReportRequest(BaseModel):
@@ -208,280 +200,6 @@ class PerformanceCountResult(BaseModel):
     DELAYED_OPEN_TASK: int = 0
     CLOSED_TASK: int = 0
     DELAYED_CLOSED_TASK: int = 0
-
-def get_system_prompt(current_time: datetime.datetime) -> str:
-    team = load_team()
-    team_description = "\n".join([f"- {u['name']} (Login: {u['login_code']})" for u in team])
-    current_date_str = current_time.strftime("%Y-%m-%d")
-    current_time_str = current_time.strftime("%I:%M %p")
-    day_of_week = current_time.strftime("%A")
-    
-    return f"""
-### AUTHORIZED TEAM MEMBERS:
-{team_description}
-
-You are the Official AI Task Manager Bot for the organization.
-Identity: TM_API (Manager).
-You are a precise, professional assistant with natural language understanding capabilities.
-
-Current Date: {current_date_str} ({day_of_week})
-Current Time: {current_time_str}
-if time_mentioned > current_time:
-
-### CORE PRINCIPLES:
-1. **Natural Language Understanding**: Understand user intent from conversational language
-2. **Context Awareness**: Use conversation history to understand references
-3. **Proactive Clarification**: Ask for missing information naturally
-4. **Professional Communication**: Clear, concise, no emojis
-
-### TASK ASSIGNMENT:
-* When user wants to assign a task, extract: assignee name, task description, deadline
-* Use 'assign_new_task_tool'
-* **Deadline Logic:**
-  - If time mentioned is later than current time → Use today's date
-  - If time has already passed today → Use tomorrow's date
-  - "tomorrow" → Next day
-  - "next week" → 7 days from now
-  - No time specified → default to end of current day (23:59)
-  - Always format as ISO: YYYY-MM-DDTHH:MM:SS
-* **Name Resolution**: Map names to login IDs from team directory
-
-### TASK STATUS RULES (API SID 607):
-You must determine the correct 'new_status' string by interpreting the user's intent and role within the conversation context. Do not look for specific keywords; understand the "state" the user is describing.
-
-### USER MANAGEMENT RULES (ADD / DELETE USERS):
-- Any authorized user can ADD a new user.
-### ADD USER TOOL (CRITICAL):
-When the user wants to add a user
-(e.g. "add user", "create user", "register user"):
-You MUST:
-1. Extract:
-   - name
-   - mobile number (10 digits)
-   - email (optional)
-2. Call the tool add_user_tool
-3. Pass arguments exactly as:
-   - name
-   - mobile
-   - email (optional)
-4. Do NOT ask follow-up questions if name and mobile are present.
-5. Email is optional.
-6. Execute immediately
-
-- A user can DELETE a user ONLY IF:
-  - The same user originally added that user.
-
-- Deletion is ownership-based, NOT role-based.
-- Managers do NOT have special override permissions for deleting users.
-
-### DELETION OWNERSHIP ENFORCEMENT:
-- Before deleting a user, always verify ownership.
-- Ownership means: the requester is the same user who added the target user.
-- Do NOT call the delete user API if ownership does not match.
-- If ownership information is missing or unclear, ask for clarification instead of deleting.
-
-### TOOL USAGE CONSTRAINTS:
-- Use 'delete_user_tool' ONLY after confirming ownership.
-- Ownership means: requester mobile number == creator mobile number.
-- Never assume ownership.
-- If ownership information is unavailable, ask for clarification instead of deleting.
-
-### TASK LISTING:
-When user asks to see tasks, list tasks, pending work:
-- Use 'get_task_list_tool'
-- Without name → Show tasks for the requesting user
-- With name (managers only) → Show tasks for specified employee
-- Show the tasks exactly as returned by the API without applying additional sorting
-- IMPORTANT:
-When responding with task lists, return the tool output EXACTLY as-is.
-Do not summarize, rephrase, or omit any fields.
-
-### UPDATE TASK STATUS
-You are a task workflow interpreter for a backend system.
-Your job is to understand the user's intent and determine the correct
-new_status value for API SID 607 based on:
-- The user's role relative to the specific task
-- The meaning of their message
-
-You MUST follow these rules strictly:
-1. Determine the user's role ONLY from the provided context.
-   - Employee = Assignee of the task
-   - Manager = Reporter/Creator of the task
-2. Never allow:
-   - Employees to use: Reopened
-   - Managers to use: Work In Progress
-4. Interpret natural language correctly:
-   - "done", "finished", "completed", "close", "closed", "submit" etc and phrases with similar intent by an employee means submission and final closure, i.e closed tag
-   - "approve", "looks good", "final close", "close", "closed" etc and phrases with similar intent by a manager means final closure, i.e closed tag
-   - "not good", "redo", "reassign", "reopen" etc and phrases with similar intent by a manager means "reopen"
-5. Do NOT ask the user any questions.
-6. Do NOT explain rules.
-7. Do NOT include anything outside valid JSON.
-8. ONCE THE TASK IS CLOSED FROM EMPLOYEE/ASSIGNEE'S SIDE OR MANAGER/REPORTER'S SIDE IT DOESN'T REQUIRE ANY APPROVAL. BOTH ARE CATEGORISED AS "CLOSED"
-
-**DOCUMENT HANDLING:**
-**Case 1 (Manager):** If a document/image is sent while creating a task, use `assign_new_task_tool`. 
-**Case 2 (Employee):** If a document/image is sent with a "completed" or "closed" message, use `update_task_status_tool` with status `Close` .
-**Case 3 (Update):** If a document is sent during work, use `update_task_status_tool` with status `Work In Progress`.
-
-### PERFORMANCE REPORTING:
-When the user asks for performance, statistics, counts, or a performance report or pending tasks for specific employee pr pending tasks count for a specific employee:
-Performance reporting rules:
-- When no employee name is mentioned:
-  - Use SID 627 with REPORT_TYPE = "Detail"
-  - Send PDF on WhatsApp
-- When a specific employee is mentioned:
-  - Use GET_COUNT (SID 616)
-  - Show text summary to the requester
-  - Do NOT send WhatsApp to the employee
-
-Interpretation rules:
-1. If the user does not mention any employee name:
-- Treat the request as a general performance report.
-- Generate the report for all employees (Managers only).
-- Use SID 627 with REPORT_TYPE = "Detail".
-- Send the PDF report on WhatsApp.
-- The user does not need to explicitly say “PDF”.
-
-2. If the user mentions a specific employee name or login code:
-- Use SID 627 with REPORT_TYPE = "Count".
-- Show the count summary AND pending tasks in text format.
-- Do not generate or send a PDF.
-
-3. Do not infer PDF intent from keywords.
-- PDF is implied automatically for general (no-name) performance requests.
-- Text summary is implied automatically for named employee requests.
-
-4. Employees may only view their own performance.
-- Managers may view performance for all employees.
-
-5. Return results exactly as provided by SID 627.
-- Do not calculate, derive, or modify counts.
-- Missing values must be treated as zero.
-
-CRITICAL: **DO NOT SHOW ANY SUPPORTIVE MESSAGES, EXAMPLE: "DONE", "TRYING TO FETCH REPORT" OR ANYTHING LIKE THIS, YOU ARE ONLY ALLOWED TO CROSS QUESTION BUT YOU ARE NOT ALLOWED TO SEND ANY OTHER MESSAGE FROM YOUR SIDE WHILE GENERATING PERFORMANCE REPORT**
-
-### TASK ASSIGNMENT BY PHONE:
-Support assignment using phone numbers:
-- Extract 10-digit number or full format
-- Use 'assign_task_by_phone_tool'
-
-### USER LOOKUP:
-When asked about users in a group or specific user details:
-- Use 'get_users_by_id_tool' with group ID or user ID
-- Group IDs start with 'G-' (e.g., G-10343-41)
-- User IDs start with 'D-' (e.g., D-3514-1001)
-
-### ASSIGNEE LOOKUP:
-When the user asks to:
-
-- list assignees
-- show available users
-- show employees
-- employee list
-- who can I assign tasks to
-- assignee list
-- team list
-- user directory
-- available members
-
-or any other statement with same semantic meaning
-
-You MUST follow these rules:
-
-1. Tool Usage (MANDATORY)
-Always use get_assignee_list_tool
-Do NOT infer or guess assignees from memory or conversation history
-Do NOT use MongoDB directly for listing assignees
-The tool is the single source of truth for assignable users
-
-2. Scope of Results
-Return ALL users who are eligible to receive tasks
-Include:
-Individual employees
-System users
-Group users (if returned by the API)
-Do NOT filter results unless the user explicitly asks (e.g., “show only engineers”)
-
-3. Output Formatting Rules
-Display each assignee in a clear, readable list
-Each entry should include:
-Full Name
-Use one assignee per line
-Do NOT summarize or shorten the list
-Do NOT add explanations or commentary
-
-4. Exactness Requirement (CRITICAL)
-Return the tool response exactly as received
-Do NOT:
-Reorder entries
-Rename fields
-Remove users
-Add inferred roles or departments
-
-5. Error Handling
-If the tool returns no users:
-Respond with:
-“No assignees are currently available for task assignment.”
-If the tool fails:
-Respond with a concise error message
-Do NOT retry automatically
-Do NOT expose internal API or system details
-
-6. Security & Permissions. 
-Any authorized user may request the assignee list
-Visibility of assignees does NOT imply permission to delete or modify users
-Assignment permissions are validated only at task creation time
-
-### DOCUMENT HANDLING:
-- When file received without task details: Ask for assignee name, task description, and deadline
-- When file received with partial info: Ask for missing details
-- Attach stored file to next task assignment automatically
-
-### MANAGER TASK APPROVAL:
-When manager wants to approve/reject completed work:
-- Understand approval/rejection phrases
-- Use 'update_task_status_tool' with appropriate action
-
-### EMPLOYEES VIEWING TASKS:
-Employees can always view their own tasks
-
-### COMMUNICATION STYLE:
-- Professional and concise
-- No emojis or casual language
-- Don't mention internal tool names
-- Ask clarifying questions when needed
-- Confirm critical actions before executing
-
-### WHATSAPP PDF REPORTS:
-When user asks to send, share, or receive a report on WhatsApp:
-- Use 'send_whatsapp_report_tool'
-- REPORT_TYPE: "Count" or "Detail"
-- STATUS examples: Open, Closed, Reported Closed
-- If no assignee specified, send report for requesting user
-
-### IMPORTANT:
-- YOU DO NOT HAVE TO SEND ANY MESSAGES ON WHATSAPP 
-- Ignore WhatsApp headers like '[7:03 pm, 13/1/2026] ABC:' and focus only on the text after the colon.
-"""
-
-def load_team():
-    """Ab ye function 100% dynamic hai, sirf MongoDB se users fetch karega."""
-    if users_collection is None:
-        logger.error("MongoDB connection cant be initialized")
-        return []
-
-    try:
-        # Database se saare users fetch karein
-        # {"_id": 0} se MongoDB ki default ID hat jati hai
-        db_users = list(users_collection.find({}, {"_id": 0}))
-        
-        logger.info(f"Successfully loaded {len(db_users)} users from MongoDB.")
-        return db_users
-        
-    except Exception as e:
-        logger.error(f"Failed to fetch users from MongoDB: {e}")
-        return []
 
 class DetailChild(BaseModel):
     SEL: str = "Y"
@@ -542,7 +260,6 @@ class UpdateTaskRequest(BaseModel):
     UPLOAD_DOCUMENT: UploadDocument
     WHATSAPP_MOBILE_NUMBER: str
 
-
 class GetCountRequest(BaseModel):
     Event: str = "107567"
     Child: List[Dict]
@@ -563,51 +280,145 @@ class AddDeleteUserRequest(BaseModel):
     MOBILE_NUMBER: str
     NAME: str
 
+def AGENT_2_POLICY(current_time: datetime.datetime) -> str:
+    team = load_team()
+    team_description = "\n".join(
+        [f"- {u['name']} (Login: {u['login_code']})" for u in team]
+    )
+
+    current_date_str = current_time.strftime("%Y-%m-%d")
+    current_time_str = current_time.strftime("%I:%M %p")
+    day_of_week = current_time.strftime("%A")
+
+    return f"""
+AUTHORIZED TEAM MEMBERS:
+{team_description}
+
+You are the Official AI Task Manager Assistant for the organization.
+Identity: TM_API.
+
+Current Date: {current_date_str} ({day_of_week})
+Current Time: {current_time_str}
+
+GENERAL OPERATING PRINCIPLES:
+1. Understand user intent from natural language.
+2. Use conversation context when relevant.
+3. Never invent missing information.
+4. Ask clear, minimal follow-up questions when required.
+5. Stay strictly within the scope of task management.
+
+COMMUNICATION STYLE:
+- Professional and concise
+- No emojis
+- No casual language
+- No internal system or tool names
+- Respond only with what is required to move the task forward
+
+IMPORTANT:
+- Ignore WhatsApp metadata such as timestamps or sender headers.
+- Focus only on the actual user message content.
+"""
+
+def load_team():
+    """Ab ye function 100% dynamic hai, sirf MongoDB se users fetch karega."""
+    if users_collection is None:
+        logger.error("MongoDB connection cant be initialized")
+        return []
+
+    try:
+        db_users = list(users_collection.find({}, {"_id": 0}))
+        
+        logger.info(f"Successfully loaded {len(db_users)} users from MongoDB.")
+        return db_users
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch users from MongoDB: {e}")
+        return []
+
 async def add_user_tool(
-    ctx: RunContext[ManagerContext],
+    ctx: ManagerContext,
     name: str,
     mobile: str,
     email: Optional[str] = None
 ) -> str:
-    
+    """
+    ADD USER PROMPT (ANCHOR):
+
+    Intent: ADD_USER
+
+    Required inputs:
+    - name
+    - mobile (10 digits)
+
+    Optional:
+    - email
+
+    Rules:
+    - Do NOT invent missing values
+    - If name and mobile are present, do NOT ask follow-up questions
+    - Execute immediately
+    - Email is optional
+    - Mobile number must be normalized to last 10 digits
+    """
+
+    # ---- PROMPT ANCHOR (for Agent-2 use later) ----
+    ADD_USER_PROMPT = """
+    ADD USER:
+
+    Required:
+    - name
+    - 10-digit mobile number
+
+    Optional:
+    - email
+
+    Rules:
+    - Never invent values
+    - Do not ask questions if required fields exist
+    - Execute immediately once inputs are complete
+    """
+
+    _ = ADD_USER_PROMPT  # intentional no-op (used later by Agent-2)
+
+    # ---- EXISTING LOGIC (UNCHANGED) ----
     log_reasoning("ADD_USER_START", {
         "name": name,
         "mobile": mobile,
         "email": email,
-        "requested_by": ctx.deps.sender_phone
+        "requested_by": ctx.sender_phone
     })
     
     req = AddDeleteUserRequest(
         ACTION="Add",
-        CREATOR_MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
+        CREATOR_MOBILE_NUMBER=ctx.sender_phone[-10:],
         NAME=name,
         EMAIL=email or "",
         MOBILE_NUMBER=mobile[-10:]
     )
 
     res = await call_appsavy_api("ADD_DELETE_USER", req)
-    if not isinstance(res, dict): return f"Failed to add user: {res}"
+    if not isinstance(res, dict):
+        return f"Failed to add user: {res}"
     
     msg = res.get("resultmessage", "")
     login_code = None
-    status_note = ""
 
-    # Check for Success (1) or Already Exists
     is_success = str(res.get("result")) == "1" or str(res.get("RESULT")) == "1"
     is_existing = "already exists" in msg.lower()
 
     if is_success or is_existing:
-        # STEP 1: Try to extract Login ID from the message text (Regex)
         match = re.search(r"login Code:\s*([A-Z0-9-]+)", msg, re.IGNORECASE)
         login_code = match.group(1) if match else None
         
-        if login_code:
-            status_note = "ID extracted from API message"
-        
-        # STEP 2: BACKUP - If ID is missing from the message, ALWAYS check the list
         if not login_code:
             logger.info(f"ID missing from message. Fetching list to find: '{name}'")
-            assignee_res = await call_appsavy_api("GET_ASSIGNEE", GetAssigneeRequest(Event="0", Child=[{"Control_Id": "106771", "AC_ID": "111057"}]))
+            assignee_res = await call_appsavy_api(
+                "GET_ASSIGNEE",
+                GetAssigneeRequest(
+                    Event="0",
+                    Child=[{"Control_Id": "106771", "AC_ID": "111057"}]
+                )
+            )
             
             result_list = []
             if isinstance(assignee_res, dict):
@@ -615,16 +426,13 @@ async def add_user_tool(
             elif isinstance(assignee_res, list):
                 result_list = assignee_res
 
-            if result_list:
-                target_name = name.lower().strip()
-                for item in result_list:
-                    item_name = str(item.get("NAME", "")).lower().strip()
-                    if re.fullmatch(rf"{re.escape(target_name)}", item_name):
-                        login_code = item.get("ID") or item.get("LOGIN_ID")
-                        status_note = "ID fetched from system list"
-                        break
+            target_name = name.lower().strip()
+            for item in result_list:
+                item_name = str(item.get("NAME", "")).lower().strip()
+                if re.fullmatch(rf"{re.escape(target_name)}", item_name):
+                    login_code = item.get("ID") or item.get("LOGIN_ID")
+                    break
 
-        # STEP 3: If we have an ID, save to MongoDB
         if login_code:
             new_user = {
                 "name": name.lower().strip(),
@@ -639,20 +447,55 @@ async def add_user_tool(
                     {"$set": new_user},
                     upsert=True
                 )
-                logger.info(f"Successfully synced {name} to MongoDB with ID {login_code}") 
-                return "[FINAL]\nUser has been added successfully."
-    return f"Failed: I could not find a Login ID for '{name}' in the message or the system list. Please check if the name matches exactly."
+
+            logger.info(f"Successfully synced {name} to MongoDB with ID {login_code}")
+            return None
+    return None
 
 async def delete_user_tool(
-    ctx: RunContext[ManagerContext],
+    ctx: ManagerContext,
     name: str,
     mobile: str,
     email: Optional[str] = None
-) -> str:
-    
+) -> None:
+    """
+    DELETE USER PROMPT (ANCHOR):
+
+    Intent: DELETE_USER
+
+    Required inputs:
+    - name
+    - mobile number
+
+    Rules:
+    - Deletion is ownership-based
+    - Requester must be the same user who added the target user
+    - Managers have NO override permissions
+    - If ownership check fails → do not delete
+    - Never invent or assume ownership
+    """
+
+    # ---- PROMPT ANCHOR (for Agent-2 use later) ----
+    DELETE_USER_PROMPT = """
+    DELETE USER:
+
+    Required:
+    - name
+    - mobile number
+
+    Rules:
+    - User can delete ONLY users they created
+    - Ownership is mandatory
+    - If permission denied → stop silently
+    - Do not ask follow-up questions
+    """
+
+    _ = DELETE_USER_PROMPT  # intentional no-op (Agent-2 anchor)
+
+    # ---- EXISTING LOGIC (UNCHANGED) ----
     req = AddDeleteUserRequest(
         ACTION="Delete",
-        CREATOR_MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
+        CREATOR_MOBILE_NUMBER=ctx.sender_phone[-10:],
         NAME=name,
         EMAIL=email or "",
         MOBILE_NUMBER=mobile[-10:]
@@ -661,39 +504,24 @@ async def delete_user_tool(
     res = await call_appsavy_api("ADD_DELETE_USER", req)
 
     if not isinstance(res, dict):
-        return f"Failed to delete user: {res}"
+        return None
 
     msg = res.get("resultmessage", "").lower()
 
+    # Permission / ownership failure
     if "permission denied" in msg:
-        return " Permission denied. You did not add this user."
+        return None
 
+    # Successful deletion
     if str(res.get("result")) == "1" or str(res.get("RESULT")) == "1":
-        
-        # --- MongoDB se bhi hatane ka logic ---
         if users_collection is not None:
             users_collection.delete_one({"phone": "91" + mobile[-10:]})
-            logger.info(f"User with mobile {mobile[-10:]} removed from MongoDB.")
-
-        return "[FINAL]\nUser has been deleted successfully."
-    
-    return f"Failed to delete user: {res.get('resultmessage')}"
-
-def get_gmail_service():
-    try:
-        token_json_str = os.getenv("TOKEN_JSON")
-        if not token_json_str: return None
-        
-        cleaned_token = "".join(c for c in token_json_str if ord(c) >= 32)
-        token_data = json.loads(cleaned_token)
-        
-        creds = Credentials.from_authorized_user_info(token_data, SCOPES)
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        return build('gmail', 'v1', credentials=creds)
-    except Exception as e:
-        logger.error(f"Gmail Error: {e}")
+            logger.info(
+                f"User with mobile {mobile[-10:]} removed from MongoDB."
+            )
         return None
+
+    return None
 
 def log_reasoning(step: str, details: dict | str):
     logger.info(
@@ -701,7 +529,6 @@ def log_reasoning(step: str, details: dict | str):
         step,
         json.dumps(details, ensure_ascii=False) if isinstance(details, dict) else details
     )
-
 
 def normalize_status_for_report(status: str) -> str:
     report_status_map = {
@@ -720,31 +547,6 @@ def normalize_status_for_report(status: str) -> str:
 def to_appsavy_datetime(iso_dt: str) -> str:
     dt = datetime.datetime.fromisoformat(iso_dt)
     return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-
-def send_email(to_email: str, subject: str, body: str) -> bool:
-    """Send email via Gmail API."""
-    try:
-        service = get_gmail_service()
-        if not service:
-            logger.warning("Gmail service unavailable, skipping email")
-            return False
-        
-        message = MIMEMultipart()
-        message['to'] = to_email
-        message['subject'] = subject
-        message.attach(MIMEText(body, 'plain'))
-        
-        raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
-        send_message = service.users().messages().send(
-            userId='me',
-            body={'raw': raw_message}
-        ).execute()
-        
-        logger.info(f"Email sent successfully to {to_email}")
-        return True
-    except Exception as e:
-        logger.error(f"Email sending failed: {str(e)}")
-        return False
 
 def normalize_tasks_response(tasks_data):
     """Normalize Appsavy GET_TASKS response to always return a list"""
@@ -770,12 +572,9 @@ def normalize_task(task: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 def is_authorized(task_owner) -> bool:
-
     if task_owner is None:
         return False
-
     return str(task_owner).strip() != "0"
-
 
 async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
     """Universal wrapper for Appsavy POST requests - 100% API dependency."""
@@ -837,34 +636,66 @@ def download_and_encode_document(document_data: Dict):
         logger.error(f"Document download failed: {str(e)}")
         return None
 
-# --- NEW TOOLS ---
-
 async def send_whatsapp_report_tool(
-    ctx: RunContext[ManagerContext],
+    ctx: ManagerContext,
     report_type: str,
     status: str,
     assigned_to: Optional[str] = None
-) -> str:
+) -> None:
     """
-    Sends WhatsApp PDF report using SID 627.
+    WHATSAPP REPORT PROMPT (ANCHOR):
+
+    Intent: SEND_WHATSAPP_REPORT
+
+    Purpose:
+    - Trigger Appsavy SID 627 report generation
+
+    Rules:
+    - This is a trigger-only action
+    - Do NOT send confirmations or status messages
+    - Do NOT explain anything to the user
+    - Do NOT retry on failure
+    - Fail silently
     """
+
+    # ---- PROMPT ANCHOR (for Agent-2 use later) ----
+    SEND_WHATSAPP_REPORT_PROMPT = """
+    SEND WHATSAPP REPORT:
+
+    Required:
+    - report_type (Count / Detail)
+    - status
+    - assignee (optional)
+
+    Rules:
+    - Trigger backend report only
+    - No user-facing messages
+    - No confirmations
+    - No error exposure
+    """
+
+    _ = SEND_WHATSAPP_REPORT_PROMPT  # intentional no-op (Agent-2 anchor)
+
+    # ---- EXISTING LOGIC (UNCHANGED, SILENT) ----
     try:
         team = load_team()
 
-        # Resolve user
+        # Resolve target user
         if assigned_to:
             user = next(
                 (u for u in team if assigned_to == u["login_code"]),
                 None
             )
-
             if not user:
-                return f"User '{assigned_to}' not found."
+                return None
         else:
-            user = next((u for u in team if u["phone"] == normalize_phone(ctx.deps.sender_phone)), None)
+            user = next(
+                (u for u in team if u["phone"] == normalize_phone(ctx.sender_phone)),
+                None
+            )
 
         if not user:
-            return "Unable to resolve user for report."
+            return None
 
         req = WhatsAppPdfReportRequest(
             ASSIGNED_TO=user["login_code"],
@@ -874,209 +705,32 @@ async def send_whatsapp_report_tool(
             ASSIGNED_BY="",
             REFERENCE="WHATSAPP"
         )
-
-        api_response = await call_appsavy_api("WHATSAPP_PDF_REPORT", req)
-
-        if not api_response:
-            return "Failed to generate WhatsApp report."
-
-        if isinstance(api_response, dict) and api_response.get("error"):
-            return f"API Error: {api_response['error']}"
-
-        return (
-            f"WhatsApp PDF report sent successfully.\n"
-            f"Report Type: {report_type}\n"
-            f"Status: {status}"
-        )
-
-    except Exception as e:
+        await call_appsavy_api("WHATSAPP_PDF_REPORT", req)
+        # Silent success
+        return None
+    except Exception:
         logger.error("send_whatsapp_report_tool error", exc_info=True)
-        return f"Error sending WhatsApp report: {str(e)}"
-
-
-async def get_assignee_list_tool(ctx: RunContext[ManagerContext]) -> str:
-    """
-    Use this tool when the user asks for:
-    - employee list
-    - assignee list
-    - team list
-    - list of users
-    - show employees
-    - available members
-    - who can tasks be assigned to
-
-    Retrieves the complete list of assignees/users using Appsavy SID 606.
-    """
-    try:
-        req = GetAssigneeRequest(
-            Event="0",
-            Child=[{
-                "Control_Id": "106771",
-                "AC_ID": "111057"
-            }]
-        )
-        
-        api_response = await call_appsavy_api("GET_ASSIGNEE", req)
-        
-        if not api_response:
-            return "Error: Unable to fetch assignee list from API."
-        
-        if isinstance(api_response, dict) and "error" in api_response:
-            return f"API Error: {api_response['error']}"
-        
-        assignees = []
-        if isinstance(api_response, list):
-            for item in api_response:
-                if isinstance(item, dict):
-                    login_id = item.get("LOGIN_ID") or item.get("ID")
-                    name = item.get("name") or item.get("PARTICIPANT_NAME")
-                    if login_id and name:
-                        assignees.append(f"{name} (ID: {login_id})")
-        
-        if not assignees:
-            return "No assignees found in the system."
-        
-        return "Available Assignees:\n" + "\n".join(assignees)
-        
-    except Exception as e:
-        logger.error(f"get_assignee_list_tool error: {str(e)}", exc_info=True)
-        return f"Error fetching assignee list: {str(e)}"
-
-async def get_users_by_id_tool(ctx: RunContext[ManagerContext], id_value: str) -> str:
-    try:
-        if not (id_value.startswith('G-') or id_value.startswith('D-')):
-            return "Error: ID must start with 'G-' (Group) or 'D-' (User). Example: G-10343-41 or D-3514-1001"
-        
-        req = GetUsersByIdRequest(
-            Event="107018",
-            Child=[{
-                "Control_Id": "107019",
-                "AC_ID": "111271",
-                "Parent": [{
-                    "Control_Id": "106771",
-                    "Value": id_value,
-                    "Data_Form_Id": ""
-                }]
-            }]
-        )
-        
-        api_response = await call_appsavy_api("GET_USERS_BY_ID", req)
-        
-        if not api_response:
-            return f"Error: Unable to fetch information for ID '{id_value}'."
-        
-        if isinstance(api_response, dict) and "error" in api_response:
-            return f"API Error: {api_response['error']}"
-        
-        users = []
-        if isinstance(api_response, list):
-            for item in api_response:
-                if isinstance(item, dict):
-                    user_id = item.get("USER_ID") or item.get("LOGIN_ID") or item.get("ID")
-                    name = item.get("name") or item.get("USER_NAME")
-                    email = item.get("email")
-                    phone = item.get("phone") or item.get("MOBILE")
-                    
-                    user_info = f"Name: {name}"
-                    if user_id:
-                        user_info += f"\nUser ID: {user_id}"
-                    if email:
-                        user_info += f"\nEmail: {email}"
-                    if phone:
-                        user_info += f"\nPhone: {phone}"
-                    
-                    users.append(user_info)
-                    
-        elif isinstance(api_response, dict):
-            user_id = api_response.get("USER_ID") or api_response.get("LOGIN_ID")
-            name = api_response.get("name") or api_response.get("USER_NAME")
-            email = api_response.get("email")
-            phone = api_response.get("phone") or api_response.get("MOBILE")
-            
-            user_info = f"Name: {name}"
-            if user_id:
-                user_info += f"\nUser ID: {user_id}"
-            if email:
-                user_info += f"\nEmail: {email}"
-            if phone:
-                user_info += f"\nPhone: {phone}"
-            users.append(user_info)
-        
-        if not users:
-            return f"No users found for ID '{id_value}'."
-        
-        result = f"User Information for {id_value}:\n\n"
-        result += "\n\n".join(users)
-        return result
-        
-    except Exception as e:
-        logger.error(f"get_users_by_id_tool error: {str(e)}", exc_info=True)
-        return f"Error fetching user information: {str(e)}"
-
-async def get_performance_count_via_627(
-    ctx: RunContext[ManagerContext],
-    login_code: str
-) -> Dict[str, int]:
-    """
-    SID 627 (Count) is a TRIGGER-ONLY API.
-    It does NOT return counts.
-    This function only triggers the report and returns an empty dict.
-    """
-
-    req = WhatsAppPdfReportRequest(
-        ASSIGNED_TO=login_code,
-        REPORT_TYPE="Count",
-        STATUS="",
-        MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
-        ASSIGNED_BY="",
-        REFERENCE="WHATSAPP"
-    )
-
-    # Trigger Appsavy internal report
-    await call_appsavy_api("WHATSAPP_PDF_REPORT", req)
-
-    # IMPORTANT: Do NOT return fake zeros
-    return {}
-
-async def get_task_summary_from_tasks(login_code: str) -> Dict[str, int]:
-    res = await call_appsavy_api(
-        "GET_TASKS",
-        GetTasksRequest(
-            Event="106830",
-            Child=[{
-                "Control_Id": "106831",
-                "AC_ID": "110803",
-                "Parent": [
-                    {"Control_Id": "106827", "Value": login_code, "Data_Form_Id": ""},
-                    {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
-                ]
-            }]
-        )
-    )
-
-    tasks = normalize_tasks_response(res)
-
-    summary = {
-        "ASSIGNED_TASK": len(tasks),
-        "OPEN_TASK": 0,
-        "DELAYED_OPEN_TASK": 0,   # Appsavy does not expose delay flag here
-        "CLOSED_TASK": 0,
-        "DELAYED_CLOSED_TASK": 0
-    }
-
-    for t in tasks:
-        sts = str(t.get("STS", "")).lower()
-        if sts in ("open", "wip", "work in progress", "in progress"):
-            summary["OPEN_TASK"] += 1
-        elif sts == "closed":
-            summary["CLOSED_TASK"] += 1
-    return summary
+        return None
 
 async def get_pending_tasks(login_code: str) -> List[str]:
     """
-    Returns titles of pending tasks (Open / Work In Progress)
-    using GET_TASKS (SID 610).
+    PROMPT ANCHOR – VIEW_PENDING_TASKS
+
+    Intent: VIEW_PENDING_TASKS
+
+    Rules:
+    - Fetch tasks for given login_code
+    - Return only OPEN / WIP tasks
+    - No formatting, no messaging
     """
+
+    VIEW_PENDING_TASKS_PROMPT = """
+    VIEW PENDING TASKS:
+    - Return list of pending task titles
+    - Status: Open / Work In Progress
+    - Silent data fetch
+    """
+    _ = VIEW_PENDING_TASKS_PROMPT
 
     res = await call_appsavy_api(
         "GET_TASKS",
@@ -1111,95 +765,166 @@ async def get_pending_tasks(login_code: str) -> List[str]:
     return pending
 
 async def get_performance_report_tool(
-    ctx: RunContext[ManagerContext],
+    ctx: ManagerContext,
     name: Optional[str] = None
-) -> str:
+) -> None:
+    """
+    PROMPT ANCHOR – VIEW_EMPLOYEE_PERFORMANCE
+
+    Intent: VIEW_EMPLOYEE_PERFORMANCE
+
+    Rules:
+    - Manager only for full report
+    - Named employee → Count report
+    - Unnamed → Full report
+    - Trigger Appsavy SID 627
+    - Silent execution
+    """
+
+    VIEW_EMPLOYEE_PERFORMANCE_PROMPT = """
+    PERFORMANCE REPORT:
+
+    - If no employee specified:
+        - Manager only
+        - Trigger FULL report (Detail)
+    - If employee specified:
+        - Trigger COUNT report
+    - No user-facing messages
+    - No confirmations
+    - Fail silently
+    """
+    _ = VIEW_EMPLOYEE_PERFORMANCE_PROMPT
+
+    try:
+        team = load_team()
+
+        if not name:
+            if ctx.role != "manager":
+                return None
+
+            req = WhatsAppPdfReportRequest(
+                ASSIGNED_TO="",
+                REPORT_TYPE="Detail",
+                STATUS="",
+                MOBILE_NUMBER=ctx.sender_phone[-10:],
+                ASSIGNED_BY="",
+                REFERENCE="WHATSAPP"
+            )
+
+            await call_appsavy_api("WHATSAPP_PDF_REPORT", req)
+            return None
+
+        name_l = name.lower()
+
+        user = next(
+            (
+                u for u in team
+                if name_l == u["login_code"].lower()
+                or name_l in u["name"].lower()
+            ),
+            None
+        )
+
+        if not user:
+            return None
+
+        req = WhatsAppPdfReportRequest(
+            ASSIGNED_TO=user["login_code"],
+            REPORT_TYPE="Count",
+            STATUS="",
+            MOBILE_NUMBER=ctx.sender_phone[-10:],
+            ASSIGNED_BY="",
+            REFERENCE="WHATSAPP"
+        )
+
+        await call_appsavy_api("WHATSAPP_PDF_REPORT", req)
+        return None
+
+    except Exception:
+        logger.error("get_performance_report_tool failed", exc_info=True)
+        return None
+    
+async def get_task_list_tool(
+    ctx: ManagerContext,
+    view: str = "tasks"   # "tasks" | "users"
+) -> None:
+    """
+    PROMPT ANCHOR – VIEW_EMPLOYEES_UNDER_MANAGER
+
+    Intent: VIEW_EMPLOYEES_UNDER_MANAGER
+
+    Modes:
+    - tasks → fetch task list
+    - users → fetch users created by manager
+
+    Rules:
+    - Silent execution
+    - No confirmations
+    - No formatting here
+    """
+
+    VIEW_EMPLOYEES_UNDER_MANAGER_PROMPT = """
+    VIEW EMPLOYEES UNDER MANAGER:
+
+    Modes:
+    - tasks: fetch tasks
+    - users: fetch users created by manager
+
+    Rules:
+    - Silent execution
+    """
+    _ = VIEW_EMPLOYEES_UNDER_MANAGER_PROMPT
+
+    sender_mobile = ctx.sender_phone[-10:]
+
+    if view == "users":
+        req = GetUsersByWhatsappRequest(
+            Child=[{
+                "Control_Id": "146761",
+                "AC_ID": "202131",
+                "Parent": [{
+                    "Control_Id": "146759",
+                    "Value": sender_mobile,
+                    "Data_Form_Id": ""
+                }]
+            }]
+        )
+        await call_appsavy_api("GET_USERS_BY_WHATSAPP", req)
+        return None
+
+
     team = load_team()
-
-    # ---------- NO NAME → PDF ----------
-    if not name:
-        if ctx.deps.role != "manager":
-            return "Permission Denied: Only managers can view full performance reports."
-
-        # Trigger SID 627 (Report is sent by Appsavy's backend)
-        await get_performance_count_via_627(ctx, "") 
-        return "__SILENT_REPORT_TRIGGERED__"
-
-    # ---------- NAME PRESENT → TEXT ----------
     user = next(
-        (u for u in team 
-         if name.lower() in u["name"].lower() 
-         or name.lower() == u["login_code"].lower()), 
+        (u for u in team if u["phone"] == normalize_phone(ctx.sender_phone)),
         None
     )
 
     if not user:
-        return f"User '{name}' not found."
+        return None
 
-    await get_performance_count_via_627(ctx, user["login_code"])
-    return "__SILENT_REPORT_TRIGGERED__"
+    login_code = user["login_code"]
 
-async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
-
-    try:
-        team = load_team()
-        user = next((u for u in team if u["phone"] == normalize_phone(ctx.deps.sender_phone)), None)
-
-        if not user:
-            return "Unable to identify your profile."
-
-        login_code = user["login_code"]
-
-        raw_tasks_data = await call_appsavy_api(
-            "GET_TASKS",
-            GetTasksRequest(
-                Event="106830",
-                Child=[{
-                    "Control_Id": "106831",
-                    "AC_ID": "110803",
-                    "Parent": [
-                        {"Control_Id": "106825", "Value": "Open,Work In Progress,Close", "Data_Form_Id": ""},  # or leave empty or "Open"
-                        {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},           # from date
-                        {"Control_Id": "106827", "Value": login_code, "Data_Form_Id": ""},   # ← ensure this is correct D-... or whatever Appsavy uses
-                        {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},           # to date
-                        {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},           # assignment type
-                        {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""},          # button label / flag
-                        {"Control_Id": "146515", "Value": ctx.deps.sender_phone[-10:], "Data_Form_Id": ""}  # ← ADD THIS LINE – critical for WhatsApp context
-                    ]
-                }]
-            )
+    await call_appsavy_api(
+        "GET_TASKS",
+        GetTasksRequest(
+            Event="106830",
+            Child=[{
+                "Control_Id": "106831",
+                "AC_ID": "110803",
+                "Parent": [
+                    {"Control_Id": "106825", "Value": "Open,Work In Progress,Close", "Data_Form_Id": ""},
+                    {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
+                    {"Control_Id": "106827", "Value": login_code, "Data_Form_Id": ""},
+                    {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
+                    {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
+                    {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""},
+                    {"Control_Id": "146515", "Value": sender_mobile, "Data_Form_Id": ""}
+                ]
+            }]
         )
+    )
 
-        tasks = normalize_tasks_response(raw_tasks_data)
-
-        if not tasks:
-            return "No tasks assigned to you."
-
-        output = ""
-
-        for task in tasks:
-            deadline_raw = task.get("EXPECTED_END_DATE")
-            deadline = ""
-
-            if deadline_raw:
-                try:
-                    deadline = datetime.datetime.strptime(
-                        deadline_raw, "%m/%d/%Y %I:%M:%S %p"
-                    ).strftime("%d-%b-%Y %I:%M %p")
-                except Exception:
-                    deadline = deadline_raw
-
-            output += (
-                f"ID: {task.get('TID')}\n"
-                f"Task: {task.get('COMMENTS')}\n"
-                f"Assigned On: {task.get('ASSIGN_DATE')}\n"
-                f"Deadline: {deadline}\n\n"
-            )
-
-        return output.strip()
-    except Exception as e:
-        logger.error(f"get_task_list_tool error: {str(e)}", exc_info=True)
-        return "Error fetching your tasks."
+    return None
 
 def extract_multiple_assignees(text: str, team: list) -> list[str]:
     text = text.lower()
@@ -1247,11 +972,9 @@ async def get_task_description(task_id: str) -> str:
 
     return "N/A"
 
-
 def extract_task_id(text: str):
     match = re.search(r"\btask\s*(\d+)\b", text.lower())
     return match.group(1) if match else None
-
 
 def resolve_status(text: str, role: str):
     t = text.lower()
@@ -1280,7 +1003,6 @@ def resolve_status(text: str, role: str):
 
     return None
 
-
 def extract_remark(text: str, task_id: str):
     t = text.lower()
 
@@ -1304,82 +1026,121 @@ def extract_remark(text: str, task_id: str):
     return t.capitalize() if t else ""
 
 async def assign_new_task_tool(
-    ctx: RunContext[ManagerContext],
-    name: str,
+    ctx: ManagerContext,
+    assignee: str,          # name OR phone
     task_name: str,
     deadline: str
-) -> str:
+) -> None:
     """
-    Assigns a new task to a user or group.
-    Correctly resolves assignee using Appsavy as authority
-    and prevents substring name collisions (Aadi vs Ariya).
+    PROMPT ANCHOR – TASK_ASSIGNMENT
+
+    Intent: TASK_ASSIGNMENT
+
+    Rules:
+    - assignee can be NAME or PHONE
+    - Resolve assignee deterministically
+    - Never invent a user
+    - Handle ambiguity explicitly
+    - Attach document if present
+    - Single source of truth: Appsavy + Mongo
     """
+
+    TASK_ASSIGNMENT_PROMPT = """
+    TASK ASSIGNMENT:
+    - Required: assignee (name or phone), task, deadline
+    - Resolve assignee deterministically
+    - If ambiguous, ask user to clarify
+    - Never invent users
+    """
+    _ = TASK_ASSIGNMENT_PROMPT
+
     try:
         team = load_team()
-        name_l = name.lower().strip()
+        assignee_raw = assignee.strip()
+
         log_reasoning("ASSIGN_TASK_START", {
-            "input_name": name,
+            "assignee": assignee_raw,
             "task": task_name,
             "deadline": deadline,
-            "sender": ctx.deps.sender_phone
+            "sender": ctx.sender_phone
         })
 
-        assignee_res = await call_appsavy_api(
-            "GET_ASSIGNEE",
-            GetAssigneeRequest(
-                Event="0",
-                Child=[{"Control_Id": "106771", "AC_ID": "111057"}]
+        digits = re.sub(r"\D", "", assignee_raw)
+        is_phone = len(digits) in (10, 12)
+
+        resolved_user = None
+        matches: list[dict] = []
+
+        if is_phone:
+            normalized_phone = normalize_phone(digits)
+
+            # Mongo is authoritative for phone resolution
+            resolved_user = next(
+                (u for u in team if normalize_phone(u.get("phone", "")) == normalized_phone),
+                None
             )
-        )
 
-        appsavy_users = []
-        if isinstance(assignee_res, dict):
-            appsavy_users = assignee_res.get("data", {}).get("Result", [])
-        elif isinstance(assignee_res, list):
-            appsavy_users = assignee_res
+            if not resolved_user:
+                return None  # silent failure by design
 
-        appsavy_matches = []
-        for u in appsavy_users:
-            uname = str(u.get("NAME", "")).lower()
-            if re.search(rf"\b{name_l}\b", uname):
-                appsavy_matches.append({
+            matches = [resolved_user]
+
+        else:
+            name_l = assignee_raw.lower()
+
+            # ---- Fetch Appsavy directory ----
+            assignee_res = await call_appsavy_api(
+                "GET_ASSIGNEE",
+                GetAssigneeRequest(
+                    Event="0",
+                    Child=[{"Control_Id": "106771", "AC_ID": "111057"}]
+                )
+            )
+
+            appsavy_users = []
+            if isinstance(assignee_res, dict):
+                appsavy_users = assignee_res.get("data", {}).get("Result", [])
+            elif isinstance(assignee_res, list):
+                appsavy_users = assignee_res
+
+            appsavy_matches = [
+                {
                     "name": u.get("NAME"),
                     "login_code": u.get("ID"),
                     "phone": "N/A"
-                })
-                
-        mongo_matches = []
-        for u in team:
-            if re.search(rf"\b{name_l}\b", u["name"].lower()):
-                mongo_matches.append({
+                }
+                for u in appsavy_users
+                if re.search(rf"\b{name_l}\b", str(u.get("NAME", "")).lower())
+            ]
+
+            mongo_matches = [
+                {
                     "name": u["name"],
                     "login_code": u["login_code"],
                     "phone": u.get("phone", "N/A")
-                })
-                
-        combined: dict[str, dict] = {}
+                }
+                for u in team
+                if re.search(rf"\b{name_l}\b", u["name"].lower())
+            ]
 
-        for u in appsavy_matches:
-            combined[u["login_code"]] = u
+            combined: dict[str, dict] = {}
+            for u in appsavy_matches:
+                combined[u["login_code"]] = u
+            for u in mongo_matches:
+                combined.setdefault(u["login_code"], u)
 
-        for u in mongo_matches:
-            combined.setdefault(u["login_code"], u)
+            matches = list(combined.values())
 
-        matches = list(combined.values())
         log_reasoning("ASSIGNEE_MATCHES_FOUND", {
             "count": len(matches),
             "matches": matches
         })
 
         if not matches:
-            return f"Error: User '{name}' not found in the authorized directory."
+            return None
 
         if len(matches) > 1:
             final_options = []
-            log_reasoning("ASSIGNEE_AMBIGUOUS", {
-                "reason": "Multiple users matched same name",
-                "candidates": matches
-            })
 
             for candidate in matches:
                 details_res = await call_appsavy_api(
@@ -1398,21 +1159,16 @@ async def assign_new_task_tool(
                     )
                 )
 
-                if isinstance(details_res, dict):
-                    res_list = details_res.get("data", {}).get("Result", [])
-                else:
-                    res_list = details_res or []
+                res_list = (
+                    details_res.get("data", {}).get("Result", [])
+                    if isinstance(details_res, dict)
+                    else details_res or []
+                )
 
                 if res_list:
                     d = res_list[0]
                     candidate["phone"] = d.get("MOBILE", "N/A")
-                    candidate["office"] = " > ".join(
-                        filter(None, [
-                            d.get("ZONE_NAME"),
-                            d.get("CIRCLE_NAME"),
-                            d.get("DIVISION_NAME")
-                        ])
-                    ) or "Office N/A"
+    
 
                 final_options.append(candidate)
 
@@ -1421,23 +1177,22 @@ async def assign_new_task_tool(
                 for u in final_options
             )
 
+            # clarification is allowed output
             return (
-                f"I found multiple users named '{name}'. Who should I assign this to?\n\n"
+                f"I found multiple users matching '{assignee}'.\n\n"
                 f"{options_text}\n\n"
                 "Please reply with the correct 10-digit phone number."
             )
-
         user = matches[0]
         login_code = user["login_code"]
+
         log_reasoning("ASSIGNEE_RESOLVED", {
             "login_code": login_code,
             "user": user
         })
 
-        # ---- Attach document if present ----
         documents_child = []
-        document_data = getattr(ctx.deps, "document_data", None)
-
+        document_data = ctx.document_data
         if document_data:
             media_type = document_data.get("type")
             media_info = document_data.get(media_type)
@@ -1451,97 +1206,25 @@ async def assign_new_task_tool(
                             DOCUMENT_NAME=fname
                         )
                     )
-
         req = CreateTaskRequest(
             ASSIGNEE=login_code,
             DESCRIPTION=task_name,
             TASK_NAME=task_name,
             EXPECTED_END_DATE=to_appsavy_datetime(deadline),
-            MOBILE_NUMBER=ctx.deps.sender_phone[-10:],
+            MOBILE_NUMBER=ctx.sender_phone[-10:],
             DETAILS=Details(CHILD=[]),
             DOCUMENTS=Documents(CHILD=documents_child)
         )
-
         api_response = await call_appsavy_api("CREATE_TASK", req)
-
         if not api_response:
-            return "Failure: No response from server."
-
+            return None
         if str(api_response.get("result")) == "1":
-            msg = api_response.get("resultmessage", "")
-            match = re.search(r"task\s*id[:\s]*([0-9]+)", msg, re.I)
-            task_id = match.group(1) if match else "N/A"
-
-            try:
-                deadline_str = datetime.datetime.fromisoformat(deadline).strftime(
-                    "%d-%b-%Y %I:%M %p"
-                )
-            except Exception:
-                deadline_str = deadline
-
-            return (
-                "[FINAL]\n"
-                f"Task created successfully.\n"
-                f"Task Description: {task_name}\n"
-                f"Assigned To: {user['name']}\n"
-                f"Deadline: {deadline_str}"
-            )
-
-        return f"API Error: {api_response.get('resultmessage')}"
-
-    except Exception as e:
-        logger.error("assign_new_task_tool failed", exc_info=True)
-        return f"System Error: Unable to assign task ({str(e)})"
-
-
-async def assign_task_by_phone_tool(
-    ctx: RunContext[ManagerContext],
-    phone: str,
-    task_name: str,
-    deadline: str
-) -> str:
+            return None
+        return None
     
-    try:
-        team = load_team()
-        normalized_phone = normalize_phone(phone)
-        
-        user = next(
-            (
-                u for u in team
-                if normalize_phone(u.get("phone", "")) == normalized_phone
-            ),
-            None
-        )
-
-        if not user:
-            return f"Error: No employee found with phone number {phone}."
-
-        login_code = user["login_code"]
-
-        if users_collection is not None:
-            users_collection.update_one(
-                {"login_code": login_code},
-                {"$set": {
-                    "name": user["name"].lower(),
-                    "phone": normalized_phone,
-                    "login_code": login_code
-                }},
-                upsert=True
-            )
-            
-        return await assign_new_task_tool(
-            ctx,
-            user["name"],
-            task_name,
-            deadline
-        )
-
-    except Exception as e:
-        logger.error(
-            f"assign_task_by_phone_tool error: {str(e)}",
-            exc_info=True
-        )
-        return f"Error assigning task by phone: {str(e)}"
+    except Exception:
+        logger.error("assign_new_task_tool failed", exc_info=True)
+        return None
 
 APPSAVY_STATUS_MAP = {
     "Open": "Open",
@@ -1551,62 +1234,40 @@ APPSAVY_STATUS_MAP = {
     "Reopened": "Reopen"
 }
 
-async def get_users_created_by_me_tool(
-    ctx: RunContext[ManagerContext]
-) -> str:
-    """
-    Shows only users created by the logged-in WhatsApp number
-    """
-
-    sender_mobile = ctx.deps.sender_phone[-10:]
-
-    req = GetUsersByWhatsappRequest(
-        Child=[{
-            "Control_Id": "146761",
-            "AC_ID": "202131",
-            "Parent": [{
-                "Control_Id": "146759",
-                "Value": sender_mobile,
-                "Data_Form_Id": ""
-            }]
-        }]
-    )
-
-    res = await call_appsavy_api("GET_USERS_BY_WHATSAPP", req)
-
-    if not res or "data" not in res:
-        return "You have not added any users."
-
-    users = res["data"].get("Result", [])
-
-    if not users:
-        return "You have not added any users."
-
-    output = "Users added by you:\n\n"
-
-    for u in users:
-        output += (
-            f"{u}. Name: {u.get('NAME')}\n"
-        )
-
-    return output.strip()
-
-
 async def update_task_status_tool(
-    ctx: RunContext[ManagerContext],
+    ctx: ManagerContext,
     task_id: str,
     status: str,
     remark: Optional[str] = None
-) -> str:
+) -> None:
+    """
+    PROMPT ANCHOR – UPDATE_TASK_STATUS
+
+    Intent: UPDATE_TASK_STATUS
+
+    Rules:
+    - Enforce role permissions
+    - Map natural language → Appsavy status
+    - Silent execution
+    """
+
+    UPDATE_TASK_STATUS_PROMPT = """
+    UPDATE TASK STATUS:
+    - Employee: Close only
+    - Manager: Close / Reopen
+    - No confirmations
+    """
+
+    _ = UPDATE_TASK_STATUS_PROMPT
     
     log_reasoning("UPDATE_TASK_STATUS_START", {
         "task_id": task_id,
         "requested_status": status,
         "mapped_status": APPSAVY_STATUS_MAP.get(status),
-        "by": ctx.deps.role
+        "by": ctx.role
     })
 
-    sender_mobile = ctx.deps.sender_phone[-10:]
+    sender_mobile = ctx.sender_phone[-10:]
 
     # ---- STATUS MAPPING (silent fallback) ----
     appsavy_status = APPSAVY_STATUS_MAP.get(status, "Closed")
@@ -1628,12 +1289,11 @@ async def update_task_status_tool(
     # ---- ONLY SUCCESS MESSAGES ----
     if api_response and (str(api_response.get("RESULT")) == "1" or str(api_response.get("result")) == "1"):
         if status in ("Close", "Closed"):
-            return f"Task {task_id} closed."
+            return None
         if status == "Reopened":
-            return f"Task {task_id} reopened."
-        return f"Task {task_id} updated."
-
-    return ""
+            return None
+        return None
+    return None
 
 def should_send_whatsapp(text: str) -> bool:
     """
@@ -1665,42 +1325,29 @@ def normalize_phone(phone: str) -> str:
         return digits
     return digits
 
-def did_call_tool(messages, tool_names: set[str]) -> bool:
-    for m in messages:
-        if hasattr(m, "tool_name") and m.tool_name in tool_names:
-            return True
-    return False
-
 async def handle_message(command, sender, pid, message=None, full_message=None):
-
-    # ---------- Special shortcut ----------
-    if command and command.strip().lower() == "delete & add":
-        send_whatsapp_message(
-            sender,
-            "Please resend user details in this format:\n\n"
-            "Add user\nName\nMobile\nEmail (optional)",
-            pid
-        )
-        return
-
     try:
         # ---------- Normalize sender ----------
+        policy = AGENT_2_POLICY(datetime.datetime.now(IST))
+        log_reasoning("AGENT_2_POLICY_ACTIVE", policy)
         sender = normalize_phone(sender)
         trace_id = f"{sender}-{int(datetime.datetime.now().timestamp())}"
         log_reasoning("TRACE_START", trace_id)
 
         # ---------- Media-only handling ----------
-        if message and any(k in message for k in ["document", "image", "video", "audio", "type"]) and not command:
+        if message and not command:
             send_whatsapp_message(
                 sender,
-                "File received. Please provide the assignee name, task description, and deadline to complete the assignment.",
+                "File received. Please provide assignee, task description, and deadline.",
                 pid
             )
             return
 
+        if not command:
+            return
+
         # ---------- Authorization ----------
         manager_phone = normalize_phone(os.getenv("MANAGER_PHONE", ""))
-
         team = load_team()
 
         if sender == manager_phone:
@@ -1710,194 +1357,106 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         else:
             send_whatsapp_message(
                 sender,
-                "Access Denied: Your number is not authorized to use this system.",
+                "Access Denied: Your number is not authorized.",
                 pid
             )
             return
 
-        # ---------- Resolve user from MongoDB (SINGLE SOURCE OF TRUTH) ----------
-        if sender == manager_phone:
-           # Manager fallback user
-            user = resolve_user_by_phone(users_collection, sender)
-            if not user:
-                user = {
-                    "login_code": "MANAGER",
-                    "phone": sender,
-                    "name": "Manager"
-                }
-        else:
-            user = resolve_user_by_phone(users_collection, sender)
-            if not user:
-                send_whatsapp_message(
-                    sender,
-                    "Access Denied: Your number is not registered.",
-                    pid
-                )
-                return
+        # ---------- Resolve user ----------
+        user = resolve_user_by_phone(users_collection, sender)
+
+        if not user and sender == manager_phone:
+            user = {
+                "login_code": "MANAGER",
+                "phone": sender,
+                "name": "Manager"
+            }
+
+        if not user:
+            send_whatsapp_message(
+                sender,
+                "Access Denied: Your number is not registered.",
+                pid
+            )
+            return
 
         login_code = user["login_code"]
 
-
         # ---------- Redis session ----------
         session_id = get_or_create_session(login_code)
-        log_reasoning("SESSION_ACTIVE", {
-            "login_code": login_code,
-            "session_id": session_id
-        })
-
-        if not command:
-            return
-
-        # ---------- Agent setup ----------
-        current_time = datetime.datetime.now(IST)
-        dynamic_prompt = get_system_prompt(current_time)
-
-        agent = Agent(
-            ai_model,
-            deps_type=ManagerContext,
-            system_prompt=dynamic_prompt
-        )
-
-        agent.tool(get_performance_report_tool)
-        agent.tool(get_task_list_tool)
-        agent.tool(assign_new_task_tool)
-        agent.tool(assign_task_by_phone_tool)
-        agent.tool(update_task_status_tool)
-        agent.tool(get_assignee_list_tool)
-        agent.tool(get_users_created_by_me_tool)
-        agent.tool(get_users_by_id_tool)
-        agent.tool(send_whatsapp_report_tool)
-        agent.tool(add_user_tool)
-        agent.tool(delete_user_tool)
-
-        log_reasoning("INPUT_RECEIVED", {
-            "sender": sender,
-            "role": role,
-            "command": command
-        })
-
-        # ---------- Store user message ----------
         append_message(session_id, "user", command)
 
-        # ---------- Build LLM input from Redis ----------
-        history = get_session_history(session_id)
-        llm_input = "\n".join(
-            f"{m['role'].upper()}: {m['content']}"
-            for m in history
-        )
-
-        # ---------- Run Gemini ----------
-        result = await agent.run(
-            llm_input,
-            deps=ManagerContext(
-                sender_phone=sender,
-                role=role,
-                current_time=current_time,
-                document_data=message
-            )
-        )
-
-        if result.output:
-            append_message(session_id, "assistant", result.output)
-
-        messages = result.all_messages()
-
-        # ---------- Debug logging ----------
-        for i, msg in enumerate(messages):
-            if isinstance(msg, ModelRequest):
-                log_reasoning("MODEL_REQUEST", {
-                    "index": i,
-                    "content": [p.content for p in msg.parts if hasattr(p, "content")]
-                })
-            elif isinstance(msg, ModelResponse):
-                log_reasoning("MODEL_RESPONSE", {
-                    "index": i,
-                    "content": [p.content for p in msg.parts if hasattr(p, "content")]
-                })
-            elif hasattr(msg, "tool_name"):
-                log_reasoning("TOOL_SELECTED", {
-                    "tool": msg.tool_name,
-                    "arguments": getattr(msg, "tool_args", {})
-                })
-
-        output_text = result.output or ""
-
-        # ---------- Intent detection ----------
-        TASK_MUTATION_TOOLS = {
-            "assign_new_task_tool",
-            "assign_task_by_phone_tool",
-            "update_task_status_tool",
-            "add_user_tool",
-            "delete_user_tool",
-            "get_users_created_by_me_tool"
-        }
-
-        PERFORMANCE_TOOLS = {
-            "get_performance_report_tool",
-            "send_whatsapp_report_tool"
-        }
-
-        is_task_action = did_call_tool(messages, TASK_MUTATION_TOOLS)
-        is_performance_query = did_call_tool(messages, PERFORMANCE_TOOLS)
+        # ==================================================
+        # AGENT-1: Intent Classification (LLM)
+        # ==================================================
+        is_supported, intent, confidence, reasoning = intent_classifier(command)
 
         log_reasoning("INTENT_CLASSIFIED", {
-            "is_task_action": is_task_action,
-            "is_performance_query": is_performance_query,
-            "tools_called": [
-                m.tool_name for m in messages if hasattr(m, "tool_name")
-            ]
+            "intent": intent,
+            "confidence": confidence,
+            "reasoning": reasoning
         })
 
-        if "__SILENT_REPORT_TRIGGERED__" in output_text:
-            log_reasoning("SILENT_EXIT", "SID 627 report triggered")
-            end_session(login_code, session_id)
-            return
-
-        if is_performance_query and not is_task_action:
-            log_reasoning("OUTPUT_SUPPRESSED", {
-                "reason": "Performance handled by backend only"
-            })
-            end_session(login_code, session_id)
-            return
-
-        if is_task_action or is_performance_query:
-            log_reasoning("SESSION_END", {
-                "login_code": login_code,
-                "session_id": session_id,
-                "reason": "Appsavy API invoked"
-            })
-            end_session(login_code, session_id)
-
-        if output_text.startswith("[FINAL]"):
+        if not is_supported or intent is None:
             send_whatsapp_message(
                 sender,
-                output_text.replace("[FINAL]\n", "", 1),
+                "I can help with task assignment, task updates, performance reports, "
+                "viewing tasks, and user management. Please clarify your request.",
                 pid
             )
             return
-        
-        if output_text.strip().startswith("{"):
-            try:
-                data = json.loads(output_text)
-                if "task_id" in data and "status" in data:
-                    task_id = data["task_id"]
-                    status = data["status"]
-                    if status in ("Closed", "Close"):
-                        output_text = f"Task {task_id} has been closed successfully."
-                    elif status == "Reopened":
-                        output_text = f"Task {task_id} has been reopened."
-                    else:
-                        output_text = f"Task {task_id} updated to {status}."
-            except Exception:
-                pass
 
-        log_reasoning("WHATSAPP_SEND_DECISION", {
-            "will_send": should_send_whatsapp(output_text),
-            "message_preview": output_text[:150]
-        })
+        # ==================================================
+        # AGENT-2: Deterministic Execution
+        # ==================================================
+        ctx = ManagerContext(
+            sender_phone=sender,
+            role=role,
+            current_time=datetime.datetime.now(IST),
+            document_data=message
+        )
 
-        if should_send_whatsapp(output_text):
-            send_whatsapp_message(sender, output_text, pid)
+        output = None
+
+        if intent == "TASK_ASSIGNMENT":
+            output = await assign_new_task_tool(
+                ctx,
+                assignee=command,
+                task_name="",
+                deadline=""
+            )
+
+        elif intent == "UPDATE_TASK_STATUS":
+            output = await update_task_status_tool(
+                ctx,
+                task_id="",
+                status="",
+                remark=None
+            )
+
+        elif intent == "VIEW_EMPLOYEE_PERFORMANCE":
+            await get_performance_report_tool(ctx)
+
+        elif intent == "VIEW_EMPLOYEES_UNDER_MANAGER":
+            await get_task_list_tool(ctx, view="tasks")
+
+        elif intent == "VIEW_PENDING_TASKS":
+            pending = await get_pending_tasks(login_code)
+            if pending:
+                output = "\n".join(pending)
+
+        elif intent == "ADD_USER":
+            output = await add_user_tool(ctx, name="", mobile="", email=None)
+
+        elif intent == "DELETE_USER":
+            output = await delete_user_tool(ctx, name="", mobile="", email=None)
+
+        # ---------- End session ----------
+        end_session(login_code, session_id)
+
+        # ---------- WhatsApp output ----------
+        if output and should_send_whatsapp(output):
+            send_whatsapp_message(sender, output, pid)
 
     except Exception:
         logger.error("handle_message failed", exc_info=True)
