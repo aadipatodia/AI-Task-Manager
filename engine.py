@@ -979,8 +979,7 @@ async def get_performance_count_via_627(
     # Trigger Appsavy internal report
     await call_appsavy_api("WHATSAPP_PDF_REPORT", req)
 
-    # IMPORTANT: Do NOT return fake zeros
-    return {}
+    return 
 
 async def get_task_summary_from_tasks(login_code: str) -> Dict[str, int]:
     res = await call_appsavy_api(
@@ -1109,7 +1108,7 @@ async def get_performance_report_tool(
             "PERFORMANCE_DUPLICATE_BLOCKED",
             {"lock_key": lock_key}
         )
-        return "__SILENT_REPORT_TRIGGERED__"
+        return None
 
     lock_performance(lock_key)
 
@@ -1118,8 +1117,7 @@ async def get_performance_report_tool(
             return "Permission Denied: Only managers can view full performance reports."
 
         await get_performance_count_via_627(ctx, "")
-        return "__SILENT_REPORT_TRIGGERED__"
-
+        return None
     user = next(
         (u for u in team
          if name.lower() in u["name"].lower()
@@ -1131,7 +1129,7 @@ async def get_performance_report_tool(
         return f"User '{name}' not found."
 
     await get_performance_count_via_627(ctx, user["login_code"])
-    return "__SILENT_REPORT_TRIGGERED__"
+    return None
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
 
@@ -1600,7 +1598,6 @@ async def update_task_status_tool(
 
     return ""
 
-
 def normalize_phone(phone: str) -> str:
     digits = re.sub(r"\D", "", phone)
     if len(digits) == 10:
@@ -1740,11 +1737,23 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         if result.output and "__SILENT_REPORT_TRIGGERED__" not in result.output:
             send_whatsapp_message(sender, result.output, pid)
 
+        # Check if an API tool was actually called
+        api_called = any(
+            any(hasattr(part, 'tool_call') for part in msg.parts) 
+            for msg in result.new_messages() 
+            if isinstance(msg, ModelResponse)
+        )
+
+        # Clear cache ONLY if API was called (completed action) or if Gemini finished without tools
+        if api_called or not result.output:
+            log_reasoning("SESSION_CLEANUP", f"API Call detected for {login_code}")
+            end_session(login_code, session_id)
+            session_id = None # Prevent double-clear in finally
+
     except Exception:
         logger.error("handle_message failed", exc_info=True)
     
     finally:
-        # ---------- CLEAR REDIS CACHE AFTER EVERY CALL ----------
+        # Emergency cleanup if still active
         if login_code and session_id:
-            log_reasoning("SESSION_CLEANUP", f"Clearing cache for {login_code}")
             end_session(login_code, session_id)
