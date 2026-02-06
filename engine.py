@@ -837,9 +837,6 @@ def download_and_encode_document(document_data: Dict):
         logger.error(f"Document download failed: {str(e)}")
         return None
 
-# --- NEW TOOLS ---
-
-
 
 async def get_users_by_id_tool(ctx: RunContext[ManagerContext], id_value: str) -> str:
     try:
@@ -1483,7 +1480,13 @@ async def get_users_created_by_me_tool(
 
     output = "Users added by you:\n\n"
     for u in users:
-        output += f"{u.get('NAME')}\n"
+        name = u.get("NAME", "N/A")
+        mobile = (
+            u.get("MOBILE")
+            or u.get("MOBILE_NUMBER")
+            or "N/A"
+        )
+        output += f"{name} – {mobile}\n\n"
 
     return output.strip()
 
@@ -1692,9 +1695,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
         )
 
-        if result.output:
-            append_message(session_id, "assistant", result.output)
-
         messages = result.all_messages()
 
         # ---------- Debug logging ----------
@@ -1715,7 +1715,21 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                     "arguments": getattr(msg, "tool_args", {})
                 })
 
+        # ---------- Final output extraction ----------
         output_text = result.output or ""
+        if output_text.strip() == "__SILENT_REPORT_TRIGGERED__":
+            output_text = ""
+
+# ---------- DUPLICATE MESSAGE BLOCK ----------
+        history = get_session_history(session_id)
+        last = history[-1]["content"] if history else ""
+
+        if output_text.strip() and output_text.strip() == last.strip():
+            log_reasoning(
+                "DUPLICATE_BLOCKED",
+                {"message": output_text[:100]}
+            )
+            return
 
         # ---------- Intent detection ----------
         TASK_MUTATION_TOOLS = {
@@ -1750,9 +1764,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
             end_session(login_code, session_id)
             return
-        
-        if not messages or not any(hasattr(m, "tool_name") for m in messages):
-            send_whatsapp_message(sender, output_text, pid)
 
         if is_task_action or is_performance_query:
             log_reasoning("SESSION_END", {
@@ -1792,6 +1803,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         if should_send_whatsapp(output_text):
             send_whatsapp_message(sender, output_text, pid)
+            append_message(session_id, "assistant", output_text)
 
     except Exception:
         logger.error("handle_message failed", exc_info=True)
