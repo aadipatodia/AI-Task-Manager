@@ -344,9 +344,9 @@ Interpretation rules:
 - The user does not need to explicitly say “PDF”.
 
 2. If the user mentions a specific employee name or login code:
-- Use GET_COUNT (SID 616).
-- Show the count summary and pending tasks in text format.
-- Do NOT generate or send a PDF.
+- Use SID 627 with REPORT_TYPE = "Count".
+- Show the count summary AND pending tasks in text format.
+- Do not generate or send a PDF.
 
 3. Do not infer PDF intent from keywords.
 - PDF is implied automatically for general (no-name) performance requests.
@@ -401,6 +401,7 @@ Include:
 Individual employees
 System users
 Group users (if returned by the API)
+Do NOT filter results unless the user explicitly asks (e.g., “show only engineers”)
 
 3. Output Formatting Rules
 Display each assignee in a clear, readable list
@@ -561,21 +562,6 @@ class AddDeleteUserRequest(BaseModel):
     EMAIL: Optional[str] = ""
     MOBILE_NUMBER: str
     NAME: str
-    
-from pydantic_ai.messages import TextPart
-
-def extract_final_from_messages(messages):
-    for msg in messages:
-        # Covers ModelRequest, ModelResponse, ToolReturn
-        if hasattr(msg, "parts"):
-            for p in msg.parts:
-                if isinstance(p, TextPart):
-                    text = p.content.strip()
-                    if text.startswith("[FINAL]"):
-                        return text
-    return None
-
-
 
 async def add_user_tool(
     ctx: RunContext[ManagerContext],
@@ -1075,84 +1061,34 @@ async def get_pending_tasks(login_code: str) -> List[str]:
 
     return pending
 
-def format_performance_text(
-    user_name: str,
-    counts: dict,
-    pending_tasks: list[str]
-) -> str:
-    text = (
-        f"Tasks Report for User: {user_name}\n\n"
-        f"Assign Task: {counts.get('ASSIGNED_TASK', 0)}\n"
-        f"Open Task: {counts.get('OPEN_TASK', 0)}\n"
-        f"Delayed Open Tasks: {counts.get('DELAYED_OPEN_TASK', 0)}\n"
-        f"Closed Tasks: {counts.get('CLOSED_TASK', 0)}\n"
-        f"Delayed Closed Tasks: {counts.get('DELAYED_CLOSED_TASK', 0)}\n\n"
-        f"Pending Tasks:\n"
-    )
-
-    if pending_tasks:
-        for i, task in enumerate(pending_tasks, 1):
-            text += f"{i}. {task}\n"
-    else:
-        text += "No pending tasks.\n"
-    return text.strip()
-
-async def get_performance_count_via_616(login_code: str) -> dict:
-    res = await call_appsavy_api(
-        "GET_COUNT",
-        GetCountRequest(
-            Event="107567",
-            Child=[{
-                "Control_Id": "107568",
-                "AC_ID": "111157",
-                "Parent": [
-                    {"Control_Id": "106771", "Value": login_code, "Data_Form_Id": ""}
-                ]
-            }]
-        )
-    )
-
-    if not res or "data" not in res:
-        return PerformanceCountResult().model_dump()
-
-    result = res["data"].get("Result", [])
-    if not result:
-        return PerformanceCountResult().model_dump()
-    
-    return PerformanceCountResult(**result[0]).model_dump()
-
-
 async def get_performance_report_tool(
     ctx: RunContext[ManagerContext],
     name: Optional[str] = None
 ) -> str:
-
     team = load_team()
 
-    # ----- NAME REQUIRED FOR TEXT REPORT -----
+    # ---------- NO NAME → PDF ----------
     if not name:
-        return "Please specify an employee name for the performance report."
+        if ctx.deps.role != "manager":
+            return "Permission Denied: Only managers can view full performance reports."
 
+        # Trigger SID 627 (Report is sent by Appsavy's backend)
+        await get_performance_count_via_627(ctx, "") 
+        return "__SILENT_REPORT_TRIGGERED__"
+
+    # ---------- NAME PRESENT → TEXT ----------
     user = next(
-        (u for u in team
-         if name.lower() in u["name"].lower()
-         or name.lower() == u["login_code"].lower()),
+        (u for u in team 
+         if name.lower() in u["name"].lower() 
+         or name.lower() == u["login_code"].lower()), 
         None
     )
 
     if not user:
         return f"User '{name}' not found."
 
-    counts = await get_performance_count_via_616(user["login_code"])
-    pending_tasks = await get_pending_tasks(user["login_code"])
-
-    message = format_performance_text(
-        user_name=user["name"].title(),
-        counts=counts,
-        pending_tasks=pending_tasks
-    )
-    return "[FINAL]\n" + message
-
+    await get_performance_count_via_627(ctx, user["login_code"])
+    return "__SILENT_REPORT_TRIGGERED__"
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
 
@@ -1598,11 +1534,8 @@ async def get_users_created_by_me_tool(
         return "You have not added any users."
 
     output = "Users added by you:\n\n"
-
     for u in users:
-        output += (
-            f"{u}. Name: {u.get('NAME')}\n"
-        )
+        output += f"{u.get('NAME')}\n"
 
     return output.strip()
 
@@ -1810,15 +1743,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 document_data=message
             )
         )
-        
-        messages = result.all_messages()
-        final_text = extract_final_from_messages(messages)
-        if final_text:
-            clean = final_text.replace("[FINAL]\n", "", 1)
-            send_whatsapp_message(sender, clean, pid)
-            end_session(login_code, session_id)
-            return
-        
 
         if result.output:
             append_message(session_id, "assistant", result.output)
@@ -1856,6 +1780,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         }
 
         PERFORMANCE_TOOLS = {
+            "get_performance_report_tool",
             "send_whatsapp_report_tool"
         }
 
@@ -1872,6 +1797,13 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         if "__SILENT_REPORT_TRIGGERED__" in output_text:
             log_reasoning("SILENT_EXIT", "SID 627 report triggered")
+            end_session(login_code, session_id)
+            return
+
+        if is_performance_query and not is_task_action:
+            log_reasoning("OUTPUT_SUPPRESSED", {
+                "reason": "Performance handled by backend only"
+            })
             end_session(login_code, session_id)
             return
 
