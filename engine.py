@@ -334,6 +334,7 @@ Performance reporting rules:
   - Use GET_COUNT (SID 616)
   - Show text summary to the requester
   - Do NOT send WhatsApp to the employee
+  - "Please find the attached report for user" DO NOT GENERATE ANY SUCH MESSAGE BEFORE CALLING API
 
 Interpretation rules:
 1. If the user does not mention any employee name:
@@ -1858,11 +1859,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             })
             is_performance_query = True
         
-        if is_performance_query:
-            log_reasoning("WHATSAPP_BLOCKED", "Performance flow – backend enforced silence")
-            end_session(login_code, session_id)
-            return
-
         if "__SILENT_REPORT_TRIGGERED__" in output_text:
             log_reasoning("SILENT_EXIT", "SID 627 report triggered")
             end_session(login_code, session_id)
@@ -1911,7 +1907,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             "message_preview": output_text[:150]
         })
         
-        if is_performance_query:
+        if is_performance_query and not is_task_action:
             log_reasoning("WHATSAPP_BLOCKED", "Performance flow – message suppressed")
             end_session(login_code, session_id)
             return
