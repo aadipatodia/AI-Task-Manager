@@ -1786,7 +1786,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             for m in history
         )
 
-        # ---------- Run Gemini ----------
         result = await agent.run(
             llm_input,
             deps=ManagerContext(
@@ -1802,7 +1801,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         messages = result.all_messages()
 
-        # ---------- Debug logging ----------
         for i, msg in enumerate(messages):
             if isinstance(msg, ModelRequest):
                 log_reasoning("MODEL_REQUEST", {
@@ -1822,7 +1820,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         output_text = result.output or ""
 
-        # ---------- Intent detection ----------
         TASK_MUTATION_TOOLS = {
             "assign_new_task_tool",
             "assign_task_by_phone_tool",
@@ -1847,6 +1844,10 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 m.tool_name for m in messages if hasattr(m, "tool_name")
             ]
         })
+        
+        if re.search(r"\b(performance report|pending task count|task count|pending tasks)\b", command.lower()):
+            log_reasoning("PERFORMANCE_INTENT_LOCKED", command)
+            is_performance_query = True
 
         if "__SILENT_REPORT_TRIGGERED__" in output_text:
             log_reasoning("SILENT_EXIT", "SID 627 report triggered")
@@ -1895,7 +1896,12 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             "will_send": should_send_whatsapp(output_text),
             "message_preview": output_text[:150]
         })
-
+        
+        if is_performance_query:
+            log_reasoning("WHATSAPP_BLOCKED", "Performance flow – message suppressed")
+            end_session(login_code, session_id)
+            return
+        
         if should_send_whatsapp(output_text):
             send_whatsapp_message(sender, output_text, pid)
 
