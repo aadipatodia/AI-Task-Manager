@@ -1742,18 +1742,17 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 m.tool_name for m in messages if hasattr(m, "tool_name")
             ]
         })
-
-        if "__SILENT_REPORT_TRIGGERED__" in output_text:
-            log_reasoning("SILENT_EXIT", "SID 627 report triggered")
+        
+        if is_performance_query:
+            log_reasoning(
+                "PERFORMANCE_SILENCED",
+                "Performance request detected — blocking all Gemini output"
+            )
             end_session(login_code, session_id)
             return
-
-        if is_performance_query and not is_task_action:
-            log_reasoning("OUTPUT_SUPPRESSED", {
-                "reason": "Performance handled by backend only"
-            })
-            end_session(login_code, session_id)
-            return
+        
+        if not messages or not any(hasattr(m, "tool_name") for m in messages):
+            send_whatsapp_message(sender, output_text, pid)
 
         if is_task_action or is_performance_query:
             log_reasoning("SESSION_END", {
