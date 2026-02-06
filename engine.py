@@ -1153,13 +1153,14 @@ def resolve_user_by_name_or_ask(name: str) -> tuple[str | None, str | None]:
 
 async def get_performance_report_tool(
     ctx: RunContext[ManagerContext],
-    name: Optional[str] = None
+    name: Optional[str] = None,
+    command: Optional[str] = None
 ) -> str:
     team = load_team()
 
     lock_key = performance_lock_key(
         ctx.deps.sender_phone,
-        ctx.run_input  # exact user message text
+        command or ""
     )
 
     if is_performance_locked(lock_key):
@@ -1190,7 +1191,6 @@ async def get_performance_report_tool(
 
     await get_performance_count_via_627(ctx, user["login_code"])
     return "__SILENT_REPORT_TRIGGERED__"
-
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
 
