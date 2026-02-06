@@ -66,6 +66,19 @@ def get_session_history(session_id: str) -> List[Dict]:
     raw = redis_client.lrange(f"session:{session_id}", 0, -1)
     return [json.loads(x) for x in raw]
 
+def reset_session_after_api(session_key: str, session_id: str):
+
+    pipe = redis_client.pipeline()
+    # 1. Clear conversation history
+    pipe.delete(f"session:{session_id}")
+    # 2. Clear pending task (if any)
+    pipe.delete(f"pending_task:{session_id}")
+    # 3. Clear performance lock (if any)
+    pipe.delete(f"performance_lock:{session_id}")
+    # 4. Remove active session pointer
+    pipe.delete(f"user_active_session:{session_key}")
+    pipe.execute()
+
 def end_session(session_key: str, session_id: str):
     """
     End the active Redis session for a user
