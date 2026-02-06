@@ -236,7 +236,40 @@ if time_mentioned > current_time:
 3. **Proactive Clarification**: Ask for missing information naturally
 4. **Professional Communication**: Clear, concise, no emojis
 
-RITICAL: **DO NOT SHOW ANY SUPPORTIVE MESSAGES, EXAMPLE: "DONE", "TRYING TO FETCH REPORT" OR ANYTHING LIKE THIS, YOU ARE ONLY ALLOWED TO CROSS QUESTION BUT YOU ARE NOT ALLOWED TO SEND ANY OTHER MESSAGE FROM YOUR SIDE AFTER OR DURING API CALL OTHERWISE IT SHALL LEAD TO SYSTEM FAILURE**
+### OUTPUT RULE (ABSOLUTE – NO EXCEPTIONS)
+
+You are NOT a conversational assistant.
+
+You may generate a user-visible message ONLY IF:
+- Required information is missing to call an API
+- You must ask a clarification question
+
+In ALL other cases:
+- DO NOT generate any text
+- DO NOT confirm actions
+- DO NOT acknowledge completion
+- DO NOT summarize results
+- DO NOT explain anything
+
+If an API can be called with the available information:
+- Call the API silently
+- Return an empty response
+
+If an API was called:
+- Return an empty response
+
+Violating this rule causes system failure.
+
+You are NOT a conversational assistant.
+You may generate user-visible text ONLY when you cannot call any tool
+because required information is missing.
+If a tool can be called:
+- Call the tool
+- Return an empty response
+If a tool was called:
+- Return an empty response
+
+CRITICAL: **DO NOT SHOW ANY SUPPORTIVE MESSAGES, EXAMPLE: "DONE", "TRYING TO FETCH REPORT" OR ANYTHING LIKE THIS, YOU ARE ONLY ALLOWED TO CROSS QUESTION BUT YOU ARE NOT ALLOWED TO SEND ANY OTHER MESSAGE FROM YOUR SIDE AFTER OR DURING API CALL OTHERWISE IT SHALL LEAD TO SYSTEM FAILURE**
 
 ### TASK ASSIGNMENT:
 * When user wants to assign a task, extract: assignee name, task description, deadline
@@ -1618,7 +1651,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         )
         return
 
-    # Initialize variables for the finally block
     login_code = None
     session_id = None
 
@@ -1729,31 +1761,30 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
         )
 
-        # ---------- Store assistant output ----------
-        if result.output:
-            append_message(session_id, "assistant", result.output)
-
-        # ---------- FINAL & ONLY WHATSAPP RULE ----------
-        if result.output and "__SILENT_REPORT_TRIGGERED__" not in result.output:
-            send_whatsapp_message(sender, result.output, pid)
-
-        # Check if an API tool was actually called
+        # ---------- Detect tool usage (ONCE) ----------
         api_called = any(
-            any(hasattr(part, 'tool_call') for part in msg.parts) 
-            for msg in result.new_messages() 
+            any(hasattr(part, "tool_call") for part in msg.parts)
+            for msg in result.new_messages()
             if isinstance(msg, ModelResponse)
         )
 
-        # Clear cache ONLY if API was called (completed action) or if Gemini finished without tools
+        # ---------- FINAL OUTPUT GATE ----------
+        # Gemini may speak ONLY when blocked (no tool call + output exists)
+        if result.output and not api_called:
+            send_whatsapp_message(sender, result.output, pid)
+            append_message(session_id, "assistant", result.output)
+
         if api_called or not result.output:
-            log_reasoning("SESSION_CLEANUP", f"API Call detected for {login_code}")
+            log_reasoning("SESSION_CLEANUP", {
+                "login_code": login_code,
+                "api_called": api_called
+            })
             end_session(login_code, session_id)
-            session_id = None # Prevent double-clear in finally
+            session_id = None
 
     except Exception:
         logger.error("handle_message failed", exc_info=True)
-    
+
     finally:
-        # Emergency cleanup if still active
         if login_code and session_id:
             end_session(login_code, session_id)
