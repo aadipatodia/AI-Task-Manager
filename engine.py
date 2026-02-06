@@ -1781,8 +1781,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         }
 
         PERFORMANCE_TOOLS = {
-            "get_performance_report_tool",
-            "send_whatsapp_report_tool"
+            "get_performance_report_tool"
         }
 
         is_task_action = did_call_tool(messages, TASK_MUTATION_TOOLS)
