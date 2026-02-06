@@ -1,15 +1,24 @@
 from fastapi import FastAPI, Request, HTTPException, Query
 import os
+import logging
 from dotenv import load_dotenv
-from google_auth_oauthlib.flow import Flow # Added missing import 
+from google_auth_oauthlib.flow import Flow
 from engine import handle_message, SCOPES, REDIRECT_URI
+from redis_session import redis_client  # Leverage existing Redis connection
+
+# Initialize logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 app = FastAPI()
 
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
-PROCESSED_MESSAGE_IDS = set()
+
+# Time in seconds to keep message IDs in Redis (e.g., 24 hours)
+# This prevents duplicates even if Meta retries a webhook after a server restart.
+DEDUPLICATION_TTL = 86400 
 
 @app.get("/")
 async def home():
@@ -28,7 +37,6 @@ async def verify_webhook(
 @app.post("/webhook")
 async def handle_webhook(request: Request):
     data = await request.json()
-    print("Received webhook data:", data)
     
     if not data or "entry" not in data:
         return {"status": "EVENT_RECEIVED"}
@@ -37,6 +45,7 @@ async def handle_webhook(request: Request):
         for change in entry.get("changes", []):
             value = change.get("value", {})
             
+            # Skip status updates (delivered/read receipts)
             if "statuses" in value:
                 continue
             
@@ -53,18 +62,19 @@ async def handle_webhook(request: Request):
                 if not msg_id:
                     continue
                 
-                #deduplication guard
-                if msg_id in PROCESSED_MESSAGE_IDS:
-                    print(f"Duplicate message ignored: {msg_id}")
-                    continue
+                # --- ATOMIC DEDUPLICATION CHECK USING REDIS ---
+                # setnx (Set if Not Exists) returns 1 if key is new, 0 if it already exists
+                dedup_key = f"processed_msg:{msg_id}"
+                is_new = redis_client.set(dedup_key, "1", ex=DEDUPLICATION_TTL, nx=True)
                 
-                PROCESSED_MESSAGE_IDS.add(msg_id)
-                    
-                    
+                if not is_new:
+                    logger.info(f"Duplicate message ignored: {msg_id}")
+                    continue
+                # ----------------------------------------------
+                
                 sender_phone = message["from"]
                 user_command = ""
                 message_data = {}
-
                 msg_type = message.get("type")
 
                 if msg_type == "text":
@@ -78,14 +88,20 @@ async def handle_webhook(request: Request):
                         message_data = {"document": doc, "type": "document"}
                         
                 elif msg_type == "image":
-                    doc = message.get("image", {})
-                    if doc:
-                        user_command = doc.get("caption", "").strip()
-                        message_data = {"image": doc, "type": "image"}
+                    img = message.get("image", {})
+                    if img:
+                        user_command = img.get("caption", "").strip()
+                        message_data = {"image": img, "type": "image"}
 
                 if user_command.strip() or message_data:
-                    # Circular import risk check: Ensure engine.py does not import from webhook.py
-                    await handle_message(user_command, sender_phone, phone_number_id, message=message_data, full_message=message)
+                    # Pass the message to the engine for processing
+                    await handle_message(
+                        user_command, 
+                        sender_phone, 
+                        phone_number_id, 
+                        message=message_data, 
+                        full_message=message
+                    )
 
     return {"status": "EVENT_RECEIVED"}
 
@@ -93,8 +109,7 @@ async def handle_webhook(request: Request):
 async def oauth2callback(request: Request):
     state = request.query_params.get('state')
     
-    # FIXED: Changed 'flow.from_client_secrets_file' to 'Flow.from_client_secrets_file'
-    # The variable 'flow' was used before it was defined 
+    # Corrected usage of Flow class from google_auth_oauthlib
     flow = Flow.from_client_secrets_file(
         'client_secret.json',
         scopes=SCOPES,
@@ -107,7 +122,7 @@ async def oauth2callback(request: Request):
     flow.fetch_token(code=code)
     creds = flow.credentials
 
-    # File-based storage logic 
+    # Save credentials for future use
     with open('token.json', 'w') as token_file:
         token_file.write(creds.to_json())
 
