@@ -24,7 +24,9 @@ from redis_session import (
     get_or_create_session,
     append_message,
     get_session_history,
-    end_session
+    end_session,
+    is_performance_locked,
+    lock_performance
 )
 from user_resolver import resolve_user_by_phone
 import asyncio 
@@ -238,6 +240,8 @@ if time_mentioned > current_time:
 
 You operate strictly within the following predefined domains.
 You are NOT allowed to act outside these domains.
+
+No other domains are supported.
 
 ────────────────────────────────────────
 ### EXECUTION MODE (STRICT)
@@ -658,7 +662,6 @@ class UpdateTaskRequest(BaseModel):
     UPLOAD_DOCUMENT: UploadDocument
     WHATSAPP_MOBILE_NUMBER: str
 
-
 class GetCountRequest(BaseModel):
     Event: str = "107567"
     Child: List[Dict]
@@ -790,10 +793,25 @@ async def delete_user_tool(
         if users_collection is not None:
             users_collection.delete_one({"phone": "91" + mobile[-10:]})
             logger.info(f"User with mobile {mobile[-10:]} removed from MongoDB.")
-
-        return None
-    
+        return None    
     return None
+
+
+def get_gmail_service():
+    try:
+        token_json_str = os.getenv("TOKEN_JSON")
+        if not token_json_str: return None
+        
+        cleaned_token = "".join(c for c in token_json_str if ord(c) >= 32)
+        token_data = json.loads(cleaned_token)
+        
+        creds = Credentials.from_authorized_user_info(token_data, SCOPES)
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        return build('gmail', 'v1', credentials=creds)
+    except Exception as e:
+        logger.error(f"Gmail Error: {e}")
+        return None
 
 def log_reasoning(step: str, details: dict | str):
     logger.info(
@@ -820,6 +838,31 @@ def normalize_status_for_report(status: str) -> str:
 def to_appsavy_datetime(iso_dt: str) -> str:
     dt = datetime.datetime.fromisoformat(iso_dt)
     return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+def send_email(to_email: str, subject: str, body: str) -> bool:
+    """Send email via Gmail API."""
+    try:
+        service = get_gmail_service()
+        if not service:
+            logger.warning("Gmail service unavailable, skipping email")
+            return False
+        
+        message = MIMEMultipart()
+        message['to'] = to_email
+        message['subject'] = subject
+        message.attach(MIMEText(body, 'plain'))
+        
+        raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
+        send_message = service.users().messages().send(
+            userId='me',
+            body={'raw': raw_message}
+        ).execute()
+        
+        logger.info(f"Email sent successfully to {to_email}")
+        return True
+    except Exception as e:
+        logger.error(f"Email sending failed: {str(e)}")
+        return False
 
 def normalize_tasks_response(tasks_data):
     """Normalize Appsavy GET_TASKS response to always return a list"""
@@ -912,6 +955,58 @@ def download_and_encode_document(document_data: Dict):
         logger.error(f"Document download failed: {str(e)}")
         return None
 
+# --- NEW TOOLS ---
+
+async def send_whatsapp_report_tool(
+    ctx: RunContext[ManagerContext],
+    report_type: str,
+    status: str,
+    assigned_to: Optional[str] = None
+) -> str:
+    """
+    Sends WhatsApp PDF report using SID 627.
+    """
+    try:
+        team = load_team()
+
+        # Resolve user
+        if assigned_to:
+            user = next(
+                (u for u in team if assigned_to == u["login_code"]),
+                None
+            )
+
+            if not user:
+                return f"User '{assigned_to}' not found."
+        else:
+            user = next((u for u in team if u["phone"] == normalize_phone(ctx.deps.sender_phone)), None)
+
+        if not user:
+            return "Unable to resolve user for report."
+
+        req = WhatsAppPdfReportRequest(
+            ASSIGNED_TO=user["login_code"],
+            REPORT_TYPE=report_type,
+            STATUS=normalize_status_for_report(status),
+            MOBILE_NUMBER=user["phone"][-10:],
+            ASSIGNED_BY="",
+            REFERENCE="WHATSAPP"
+        )
+
+        api_response = await call_appsavy_api("WHATSAPP_PDF_REPORT", req)
+
+        if not api_response:
+            return "Failed to generate WhatsApp report."
+
+        if isinstance(api_response, dict) and api_response.get("error"):
+            return f"API Error: {api_response['error']}"
+
+        return None
+
+    except Exception as e:
+        logger.error("send_whatsapp_report_tool error", exc_info=True)
+        return f"Error sending WhatsApp report: {str(e)}"
+
 
 async def get_users_by_id_tool(ctx: RunContext[ManagerContext], id_value: str) -> str:
     try:
@@ -988,11 +1083,6 @@ async def get_performance_count_via_627(
     ctx: RunContext[ManagerContext],
     login_code: str
 ) -> Dict[str, int]:
-    """
-    SID 627 (Count) is a TRIGGER-ONLY API.
-    It does NOT return counts.
-    This function only triggers the report and returns an empty dict.
-    """
 
     req = WhatsAppPdfReportRequest(
         ASSIGNED_TO=login_code,
@@ -1044,10 +1134,6 @@ async def get_task_summary_from_tasks(login_code: str) -> Dict[str, int]:
     return summary
 
 async def get_pending_tasks(login_code: str) -> List[str]:
-    """
-    Returns titles of pending tasks (Open / Work In Progress)
-    using GET_TASKS (SID 610).
-    """
 
     res = await call_appsavy_api(
         "GET_TASKS",
@@ -1081,34 +1167,88 @@ async def get_pending_tasks(login_code: str) -> List[str]:
 
     return pending
 
+def performance_lock_key(login_code: str, command: str) -> str:
+    normalized = re.sub(r"\s+", " ", command.lower().strip())
+    return f"perf:{login_code}:{hash(normalized)}"
+
+
+def resolve_user_by_name_or_ask(name: str) -> tuple[str | None, str | None]:
+
+    if users_collection is None:
+        return None, "User database is unavailable."
+
+    name_l = name.strip().lower()
+
+    matches = list(
+        users_collection.find(
+            {"name": {"$regex": rf"\b{name_l}\b", "$options": "i"}},
+            {"_id": 0}
+        )
+    )
+
+    if not matches:
+        return None, f"No user found with the name '{name}'."
+
+    if len(matches) == 1:
+        return matches[0]["login_code"], None
+
+    lines = []
+    for idx, u in enumerate(matches, start=1):
+        phone = u.get("phone", "N/A")
+        email = u.get("email") or "N/A"
+        lines.append(
+            f"{idx}. Name: {u.get('name','N/A')}\n"
+            f"   Phone: {phone}\n"
+            f"   Email: {email}"
+        )
+
+    message = (
+        f"I found multiple users with the name '{name}'.\n\n"
+        + "\n\n".join(lines)
+        + "\n\nPlease reply with the **phone number** of the correct user."
+    )
+    return None, message
+
 async def get_performance_report_tool(
     ctx: RunContext[ManagerContext],
-    name: Optional[str] = None
+    name: Optional[str] = None,
+    command: Optional[str] = None
 ) -> str:
     team = load_team()
 
-    # ---------- NO NAME → PDF ----------
+    lock_key = performance_lock_key(
+        ctx.deps.sender_phone,
+        command or ""
+    )
+
+    if is_performance_locked(lock_key):
+        log_reasoning(
+            "PERFORMANCE_DUPLICATE_BLOCKED",
+            {"lock_key": lock_key}
+        )
+        return "__SILENT_REPORT_TRIGGERED__"
+
+    lock_performance(lock_key)
+
     if not name:
         if ctx.deps.role != "manager":
-            return None
+            return "Permission Denied: Only managers can view full performance reports."
 
-        # Trigger SID 627 (Report is sent by Appsavy's backend)
-        await get_performance_count_via_627(ctx, "") 
-        return None
+        await get_performance_count_via_627(ctx, "")
+        return "__SILENT_REPORT_TRIGGERED__"
 
-    # ---------- NAME PRESENT → TEXT ----------
     user = next(
-        (u for u in team 
-         if name.lower() in u["name"].lower() 
-         or name.lower() == u["login_code"].lower()), 
+        (u for u in team
+         if name.lower() in u["name"].lower()
+         or name.lower() == u["login_code"].lower()),
         None
     )
 
     if not user:
-        return None
+        return f"User '{name}' not found."
 
     await get_performance_count_via_627(ctx, user["login_code"])
-    return None
+    return "__SILENT_REPORT_TRIGGERED__"
 
 async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
 
@@ -1377,29 +1517,16 @@ async def assign_new_task_tool(
                 if res_list:
                     d = res_list[0]
                     candidate["phone"] = d.get("MOBILE", "N/A")
-                    candidate["office"] = " > ".join(
-                        filter(None, [
-                            d.get("ZONE_NAME"),
-                            d.get("CIRCLE_NAME"),
-                            d.get("DIVISION_NAME")
-                        ])
-                    ) or "Office N/A"
-
                 final_options.append(candidate)
 
-            options_text = "\n".join(
-                f"- {u['name']} ({u.get('office', 'Office N/A')}): {u['phone']}"
-                for u in final_options
-            )
-
-            return (
-                f"I found multiple users named '{name}'. Who should I assign this to?\n\n"
-                f"{options_text}\n\n"
-                "Please reply with the correct 10-digit phone number."
-            )
+            return None
 
         user = matches[0]
-        login_code = user["login_code"]
+        login_code, clarification = resolve_user_by_name_or_ask(name)
+
+        if clarification:
+            return clarification 
+
         log_reasoning("ASSIGNEE_RESOLVED", {
             "login_code": login_code,
             "user": user
@@ -1441,7 +1568,7 @@ async def assign_new_task_tool(
         if str(api_response.get("result")) == "1":
             return None
 
-        return None
+        return f"An error has occurred"
 
     except Exception as e:
         logger.error("assign_new_task_tool failed", exc_info=True)
@@ -1508,6 +1635,9 @@ APPSAVY_STATUS_MAP = {
 async def get_users_created_by_me_tool(
     ctx: RunContext[ManagerContext]
 ) -> str:
+    """
+    Shows only users created by the logged-in WhatsApp number
+    """
 
     sender_mobile = ctx.deps.sender_phone[-10:]
 
@@ -1534,10 +1664,30 @@ async def get_users_created_by_me_tool(
         return "You have not added any users."
 
     output = "Users added by you:\n\n"
-    for u in users:
-        output += f"{u.get('NAME')}\n"
+    for idx, u in enumerate(users, start=1):
+        name = u.get("NAME", "N/A")
+        mobile = (
+            u.get("MOBILE_NUMBER")
+            or u.get("MOBILE")
+            or u.get("PHONE")
+            or "N/A"
+        )
 
+        output += (
+            f"{idx}. Name: {name}\n"
+            f"   Mobile: {mobile}\n\n"
+        )
+    log_reasoning("USERS_CREATED_BY_ME_OUTPUT", output)
     return output.strip()
+
+def extract_final_from_messages(messages) -> str | None:
+    for m in messages:
+        if isinstance(m, ModelResponse):
+            for p in m.parts:
+                if hasattr(p, "content") and isinstance(p.content, str):
+                    if p.content.startswith("[FINAL]"):
+                        return p.content
+    return None
 
 async def update_task_status_tool(
     ctx: RunContext[ManagerContext],
@@ -1582,27 +1732,6 @@ async def update_task_status_tool(
 
     return ""
 
-def should_send_whatsapp(text: str) -> bool:
-    """
-    Allow only clean, user-facing informational responses.
-    Block errors, API failures, permission issues, system logs.
-    """
-    if not text:
-        return False
-
-    block_keywords = [
-        "api error",
-        "system error",
-        "failed",
-        "error",
-        "exception",
-        "invalid",
-        "update failed",
-        "unable to"
-    ]
-
-    t = text.lower()
-    return not any(k in t for k in block_keywords)
 
 def normalize_phone(phone: str) -> str:
     digits = re.sub(r"\D", "", phone)
@@ -1612,19 +1741,32 @@ def normalize_phone(phone: str) -> str:
         return digits
     return digits
 
-def did_call_tool(messages, tool_names: set[str]) -> bool:
-    for m in messages:
-        if hasattr(m, "tool_name") and m.tool_name in tool_names:
-            return True
-    return False
-
 async def handle_message(command, sender, pid, message=None, full_message=None):
+
+    # ---------- Special shortcut ----------
+    if command and command.strip().lower() == "delete & add":
+        send_whatsapp_message(
+            sender,
+            "Please resend user details in this format:\n\n"
+            "Add user\nName\nMobile\nEmail (optional)",
+            pid
+        )
+        return
 
     try:
         # ---------- Normalize sender ----------
         sender = normalize_phone(sender)
         trace_id = f"{sender}-{int(datetime.datetime.now().timestamp())}"
         log_reasoning("TRACE_START", trace_id)
+
+        # ---------- Media-only handling ----------
+        if message and any(k in message for k in ["document", "image", "video", "audio", "type"]) and not command:
+            send_whatsapp_message(
+                sender,
+                "File received. Please provide the assignee name, task description, and deadline to complete the assignment.",
+                pid
+            )
+            return
 
         # ---------- Authorization ----------
         manager_phone = normalize_phone(os.getenv("MANAGER_PHONE", ""))
@@ -1643,21 +1785,21 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             return
 
         # ---------- Resolve user ----------
-        user = resolve_user_by_phone(users_collection, sender)
-        if not user and sender == manager_phone:
-            user = {
+        if sender == manager_phone:
+            user = resolve_user_by_phone(users_collection, sender) or {
                 "login_code": "MANAGER",
                 "phone": sender,
                 "name": "Manager"
             }
-
-        if not user:
-            send_whatsapp_message(
-                sender,
-                "Access Denied: Your number is not registered.",
-                pid
-            )
-            return
+        else:
+            user = resolve_user_by_phone(users_collection, sender)
+            if not user:
+                send_whatsapp_message(
+                    sender,
+                    "Access Denied: Your number is not registered.",
+                    pid
+                )
+                return
 
         login_code = user["login_code"]
 
@@ -1671,6 +1813,32 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         if not command:
             return
 
+        # ---------- Agent setup ----------
+        current_time = datetime.datetime.now(IST)
+        agent = Agent(
+            ai_model,
+            deps_type=ManagerContext,
+            system_prompt=get_system_prompt(current_time)
+        )
+
+        # Register tools
+        agent.tool(get_performance_report_tool)
+        agent.tool(get_task_list_tool)
+        agent.tool(assign_new_task_tool)
+        agent.tool(assign_task_by_phone_tool)
+        agent.tool(update_task_status_tool)
+        agent.tool(get_users_created_by_me_tool)
+        agent.tool(get_users_by_id_tool)
+        agent.tool(send_whatsapp_report_tool)
+        agent.tool(add_user_tool)
+        agent.tool(delete_user_tool)
+
+        log_reasoning("INPUT_RECEIVED", {
+            "sender": sender,
+            "role": role,
+            "command": command
+        })
+
         # ---------- Store user message ----------
         append_message(session_id, "user", command)
 
@@ -1680,30 +1848,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             f"{m['role'].upper()}: {m['content']}"
             for m in history
         )
-
-        # ---------- Agent ----------
-        current_time = datetime.datetime.now(IST)
-        agent = Agent(
-            ai_model,
-            deps_type=ManagerContext,
-            system_prompt=get_system_prompt(current_time)
-        )
-
-        agent.tool(get_performance_report_tool)
-        agent.tool(get_task_list_tool)
-        agent.tool(assign_new_task_tool)
-        agent.tool(assign_task_by_phone_tool)
-        agent.tool(update_task_status_tool)
-        agent.tool(get_users_created_by_me_tool)
-        agent.tool(get_users_by_id_tool)
-        agent.tool(add_user_tool)
-        agent.tool(delete_user_tool)
-
-        log_reasoning("INPUT_RECEIVED", {
-            "sender": sender,
-            "role": role,
-            "command": command
-        })
 
         # ---------- Run Gemini ----------
         result = await agent.run(
@@ -1715,24 +1859,21 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 document_data=message
             )
         )
-        for msg in result.new_messages():
-            if isinstance(msg, ModelResponse):
-                for part in msg.parts:
-                    if hasattr(part, "tool_call"):
-                        log_reasoning("HARD_STOP", {
-                            "reason": "Tool executed",
-                            "login_code": login_code
-                        })
-                        end_session(login_code, session_id)
-                        return   
 
-        output_text = (result.output or "").strip()
+        # ---------- Store assistant output ----------
+        if result.output:
+            append_message(session_id, "assistant", result.output)
 
-        if output_text:
-            append_message(session_id, "assistant", output_text)
-            send_whatsapp_message(sender, output_text, pid)
+        # ---------- Silent performance exit ----------
+        if result.output and "__SILENT_REPORT_TRIGGERED__" in result.output:
+            log_reasoning("SILENT_EXIT", "Gemini requested silent exit")
+            end_session(login_code, session_id)
+            return
 
-        end_session(login_code, session_id)
+        # ---------- FINAL & ONLY WHATSAPP RULE ----------
+        # Gemini decides. Backend only forwards.
+        if result.output:
+            send_whatsapp_message(sender, result.output, pid)
 
     except Exception:
         logger.error("handle_message failed", exc_info=True)
