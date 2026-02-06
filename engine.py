@@ -1190,7 +1190,7 @@ async def get_task_list_tool(ctx: RunContext[ManagerContext]) -> str:
                 f"Deadline: {deadline}\n\n"
             )
 
-        return output.strip()
+        return None
     except Exception as e:
         logger.error(f"get_task_list_tool error: {str(e)}", exc_info=True)
         return "Error fetching your tasks."
@@ -1546,22 +1546,7 @@ async def get_users_created_by_me_tool(
     if not users:
         return "You have not added any users."
 
-    output = "Users added by you:\n\n"
-    for idx, u in enumerate(users, start=1):
-        name = u.get("NAME", "N/A")
-        mobile = (
-            u.get("MOBILE_NUMBER")
-            or u.get("MOBILE")
-            or u.get("PHONE")
-            or "N/A"
-        )
-
-        output += (
-            f"{idx}. Name: {name}\n"
-            f"   Mobile: {mobile}\n\n"
-        )
-    log_reasoning("USERS_CREATED_BY_ME_OUTPUT", output)
-    return output.strip()
+    return None
 
 def extract_final_from_messages(messages) -> str | None:
     for m in messages:
