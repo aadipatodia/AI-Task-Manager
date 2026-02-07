@@ -1166,21 +1166,35 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             return
 
         login_code = user["login_code"]
-
-        # ---------- Start Redis session immediately ----------
         session_id = get_or_create_session(login_code)
+        
+        # Save user input to history immediately
         append_message(session_id, "user", command)
-
         history = get_session_history(session_id)
-        slots = next((m["content"] for m in history if m["role"] == "slots"), {})
 
-        # ---------- Agent-1 : intent classification ----------
-        is_supported, intent, confidence, reasoning = intent_classifier(command)
-        log_reasoning("INTENT_CLASSIFIED", {
-            "intent": intent,
-            "confidence": confidence,
-            "reasoning": reasoning
-        })
+        # ---------- Intent Resolution (Agent 1) ----------
+        # Logic: Only skip Agent 1 if the last system message was a question from Agent 2
+        last_system_msg = next((m for m in reversed(history) if m["role"] == "assistant"), None)
+        is_cross_questioning = last_system_msg and not last_system_msg.get("is_final", False)
+        
+        existing_intent = next((m.get("intent") for m in reversed(history) if "intent" in m), None)
+
+        if is_cross_questioning and existing_intent:
+            intent = existing_intent
+            is_supported = True
+            log_reasoning("AGENT_2_CROSS_QUESTION_REPLY", intent)
+        else:
+            # Agent-1 : intent classification
+            is_supported, intent, confidence, reasoning = intent_classifier(command)
+            if is_supported and intent:
+                # Tag the session history with the identified intent for future cross-questions
+                append_message(session_id, "system", f"INTENT_IDENTIFIED: {intent}", intent=intent)
+            
+            log_reasoning("INTENT_CLASSIFIED", {
+                "intent": intent,
+                "confidence": confidence,
+                "reasoning": reasoning
+            })
 
         if not is_supported or not intent:
             send_whatsapp_message(
@@ -1192,7 +1206,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             end_session(login_code, session_id)
             return
 
-        # ---------- Decide if Agent-2 is required ----------
+        # ---------- Agent-2 Requirement Check ----------
         AGENT2_INTENTS = {
             "TASK_ASSIGNMENT",
             "UPDATE_TASK_STATUS",
@@ -1209,30 +1223,26 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             document_data=message
         )
 
-        # =========================================================
-        # =============== NON-AGENT-2 INTENTS =====================
-        # =========================================================
-
         if not agent2_required:
             if intent == "VIEW_EMPLOYEES_UNDER_MANAGER":
                 await get_task_list_tool(ctx, view="users")
-
             elif intent == "VIEW_PENDING_TASKS":
                 pending = await get_pending_tasks(login_code)
                 if pending:
                     send_whatsapp_message(sender, "\n".join(pending), pid)
-
             elif intent == "VIEW_EMPLOYEE_PERFORMANCE":
                 await get_performance_report_tool(ctx)
-
+            
+            # Non-Agent 2 flows are final
+            append_message(session_id, "assistant", "Task viewed.", is_final=True)
             end_session(login_code, session_id)
             return
 
-        # =========================================================
-        # ================= AGENT-2 FLOWS =========================
-        # =========================================================
+        # ---------- Agent-2 : Parameter Extraction ----------
+        slots = next((m["content"] for m in reversed(history) if m.get("role") == "slots"), {})
+        full_convo_str = "\n".join([f"{m['role']}: {m['content']}" for m in history])
 
-        task_completed = False
+        result = None
 
         if intent == "TASK_ASSIGNMENT":
             result = await run_gemini_extractor(
@@ -1270,24 +1280,8 @@ Rules:
 - Either return JSON OR a question
 - Do not explain anything else
 """,
-                message=command
+                message=full_convo_str
             )
-
-            if isinstance(result, str):
-                send_whatsapp_message(sender, result, pid)
-                return
-
-            result = merge_slots(session_id, result)
-            if not all(k in result for k in ("assignee", "task_name", "deadline")):
-                return
-
-            await assign_new_task_tool(
-                ctx,
-                assignee=result["assignee"],
-                task_name=result["task_name"],
-                deadline=result["deadline"]
-            )
-            task_completed = True
 
         elif intent == "UPDATE_TASK_STATUS":
             result = await run_gemini_extractor(
@@ -1324,24 +1318,8 @@ Rules:
 - Either return JSON OR a follow-up question
 - No explanations
 """,
-                message=command
+                message=full_convo_str
             )
-
-            if isinstance(result, str):
-                send_whatsapp_message(sender, result, pid)
-                return
-
-            result = merge_slots(session_id, result)
-            if not all(k in result for k in ("task_id", "status")):
-                return
-
-            await update_task_status_tool(
-                ctx,
-                task_id=result["task_id"],
-                status=result["status"],
-                remark=result.get("remark")
-            )
-            task_completed = True
 
         elif intent == "ADD_USER":
             result = await run_gemini_extractor(
@@ -1375,24 +1353,8 @@ Rules:
 - Either return JSON OR a follow-up question
 - No explanations
 """,
-                message=command
+                message=full_convo_str
             )
-
-            if isinstance(result, str):
-                send_whatsapp_message(sender, result, pid)
-                return
-
-            result = merge_slots(session_id, result)
-            if not all(k in result for k in ("name", "mobile")):
-                return
-
-            await add_user_tool(
-                ctx,
-                name=result["name"],
-                mobile=result["mobile"],
-                email=result.get("email")
-            )
-            task_completed = True
 
         elif intent == "DELETE_USER":
             result = await run_gemini_extractor(
@@ -1423,26 +1385,44 @@ Rules:
 - Either return JSON OR a follow-up question
 - No explanations
 """,
-                message=command
+                message=full_convo_str
             )
 
-            if isinstance(result, str):
-                send_whatsapp_message(sender, result, pid)
-                return
+        # ---------- Handle Agent 2 Output ----------
+        if isinstance(result, str):
+            # Agent 2 is cross-questioning
+            append_message(session_id, "assistant", result, is_final=False)
+            send_whatsapp_message(sender, result, pid)
+            return
 
-            result = merge_slots(session_id, result)
-            if not all(k in result for k in ("name", "mobile")):
-                return
+        # Agent 2 returned JSON
+        merged_data = merge_slots(session_id, result)
+        append_message(session_id, "slots", merged_data)
 
-            await delete_user_tool(
-                ctx,
-                name=result["name"],
-                mobile=result["mobile"]
-            )
-            task_completed = True
+        # Tool execution only if all required parameters are met
+        if intent == "TASK_ASSIGNMENT":
+            if all(k in merged_data for k in ("assignee", "task_name", "deadline")):
+                await assign_new_task_tool(ctx, **merged_data)
+                append_message(session_id, "assistant", "Task Assigned", is_final=True)
+                end_session(login_code, session_id)
 
-        if task_completed:
-            end_session(login_code, session_id)
+        elif intent == "UPDATE_TASK_STATUS":
+            if all(k in merged_data for k in ("task_id", "status")):
+                await update_task_status_tool(ctx, **merged_data)
+                append_message(session_id, "assistant", "Status Updated", is_final=True)
+                end_session(login_code, session_id)
+
+        elif intent == "ADD_USER":
+            if all(k in merged_data for k in ("name", "mobile")):
+                await add_user_tool(ctx, **merged_data)
+                append_message(session_id, "assistant", "User Added", is_final=True)
+                end_session(login_code, session_id)
+
+        elif intent == "DELETE_USER":
+            if all(k in merged_data for k in ("name", "mobile")):
+                await delete_user_tool(ctx, **merged_data)
+                append_message(session_id, "assistant", "User Deleted", is_final=True)
+                end_session(login_code, session_id)
 
     except Exception:
         logger.error("handle_message failed", exc_info=True)
