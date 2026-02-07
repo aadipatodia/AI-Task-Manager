@@ -1168,27 +1168,28 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         login_code = user["login_code"]
         session_id = get_or_create_session(login_code)
         
-        # Save user input to history immediately
+        # Save user input to history
         append_message(session_id, "user", command)
         history = get_session_history(session_id)
 
-        # ---------- Intent Resolution (Agent 1) ----------
-        # Logic: Only skip Agent 1 if the last system message was a question from Agent 2
-        last_system_msg = next((m for m in reversed(history) if m["role"] == "assistant"), None)
-        is_cross_questioning = last_system_msg and not last_system_msg.get("is_final", False)
+        # ---------- Agent-1 / Intent Logic ----------
+        # Logic: Only skip Agent 1 if we are awaiting a reply to a cross-question
+        last_assistant_msg = next((m for m in reversed(history) if m["role"] == "assistant"), None)
+        is_cross_questioning = last_assistant_msg and last_assistant_msg.get("is_clarification", False)
         
+        # Find existing intent from history tags
         existing_intent = next((m.get("intent") for m in reversed(history) if "intent" in m), None)
 
         if is_cross_questioning and existing_intent:
             intent = existing_intent
             is_supported = True
-            log_reasoning("AGENT_2_CROSS_QUESTION_REPLY", intent)
+            log_reasoning("AGENT_2_RESUME", {"intent": intent})
         else:
             # Agent-1 : intent classification
             is_supported, intent, confidence, reasoning = intent_classifier(command)
             if is_supported and intent:
-                # Tag the session history with the identified intent for future cross-questions
-                append_message(session_id, "system", f"INTENT_IDENTIFIED: {intent}", intent=intent)
+                # Store the intent in history so we can retrieve it during cross-questioning
+                append_message(session_id, "system", f"INTENT_SET: {intent}", intent=intent)
             
             log_reasoning("INTENT_CLASSIFIED", {
                 "intent": intent,
@@ -1206,14 +1207,8 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             end_session(login_code, session_id)
             return
 
-        # ---------- Agent-2 Requirement Check ----------
-        AGENT2_INTENTS = {
-            "TASK_ASSIGNMENT",
-            "UPDATE_TASK_STATUS",
-            "ADD_USER",
-            "DELETE_USER"
-        }
-
+        # ---------- Context Setup ----------
+        AGENT2_INTENTS = {"TASK_ASSIGNMENT", "UPDATE_TASK_STATUS", "ADD_USER", "DELETE_USER"}
         agent2_required = intent in AGENT2_INTENTS
 
         ctx = ManagerContext(
@@ -1223,6 +1218,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             document_data=message
         )
 
+        # ---------- Direct Tools (Agent 1 Only) ----------
         if not agent2_required:
             if intent == "VIEW_EMPLOYEES_UNDER_MANAGER":
                 await get_task_list_tool(ctx, view="users")
@@ -1233,14 +1229,13 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             elif intent == "VIEW_EMPLOYEE_PERFORMANCE":
                 await get_performance_report_tool(ctx)
             
-            # Non-Agent 2 flows are final
-            append_message(session_id, "assistant", "Task viewed.", is_final=True)
             end_session(login_code, session_id)
             return
 
         # ---------- Agent-2 : Parameter Extraction ----------
+        # Retrieve latest slots and format history for Agent 2
         slots = next((m["content"] for m in reversed(history) if m.get("role") == "slots"), {})
-        full_convo_str = "\n".join([f"{m['role']}: {m['content']}" for m in history])
+        full_convo_context = "\n".join([f"{m['role']}: {m['content']}" for m in history])
 
         result = None
 
@@ -1280,7 +1275,7 @@ Rules:
 - Either return JSON OR a question
 - Do not explain anything else
 """,
-                message=full_convo_str
+                message=full_convo_context
             )
 
         elif intent == "UPDATE_TASK_STATUS":
@@ -1318,7 +1313,7 @@ Rules:
 - Either return JSON OR a follow-up question
 - No explanations
 """,
-                message=full_convo_str
+                message=full_convo_context
             )
 
         elif intent == "ADD_USER":
@@ -1353,7 +1348,7 @@ Rules:
 - Either return JSON OR a follow-up question
 - No explanations
 """,
-                message=full_convo_str
+                message=full_convo_context
             )
 
         elif intent == "DELETE_USER":
@@ -1385,44 +1380,36 @@ Rules:
 - Either return JSON OR a follow-up question
 - No explanations
 """,
-                message=full_convo_str
+                message=full_convo_context
             )
 
-        # ---------- Handle Agent 2 Output ----------
+        # ---------- Handle Agent 2 Response ----------
         if isinstance(result, str):
-            # Agent 2 is cross-questioning
-            append_message(session_id, "assistant", result, is_final=False)
+            # Agent 2 produced a question. Mark as clarification for next message bypass.
+            append_message(session_id, "assistant", result, is_clarification=True)
             send_whatsapp_message(sender, result, pid)
             return
 
-        # Agent 2 returned JSON
+        # Agent 2 produced JSON (the "Flag" is now set to true)
         merged_data = merge_slots(session_id, result)
         append_message(session_id, "slots", merged_data)
 
-        # Tool execution only if all required parameters are met
-        if intent == "TASK_ASSIGNMENT":
-            if all(k in merged_data for k in ("assignee", "task_name", "deadline")):
-                await assign_new_task_tool(ctx, **merged_data)
-                append_message(session_id, "assistant", "Task Assigned", is_final=True)
-                end_session(login_code, session_id)
+        # Execute Tool Calls
+        if intent == "TASK_ASSIGNMENT" and all(k in merged_data for k in ("assignee", "task_name", "deadline")):
+            await assign_new_task_tool(ctx, **merged_data)
+            end_session(login_code, session_id)
 
-        elif intent == "UPDATE_TASK_STATUS":
-            if all(k in merged_data for k in ("task_id", "status")):
-                await update_task_status_tool(ctx, **merged_data)
-                append_message(session_id, "assistant", "Status Updated", is_final=True)
-                end_session(login_code, session_id)
+        elif intent == "UPDATE_TASK_STATUS" and all(k in merged_data for k in ("task_id", "status")):
+            await update_task_status_tool(ctx, **merged_data)
+            end_session(login_code, session_id)
 
-        elif intent == "ADD_USER":
-            if all(k in merged_data for k in ("name", "mobile")):
-                await add_user_tool(ctx, **merged_data)
-                append_message(session_id, "assistant", "User Added", is_final=True)
-                end_session(login_code, session_id)
+        elif intent == "ADD_USER" and all(k in merged_data for k in ("name", "mobile")):
+            await add_user_tool(ctx, **merged_data)
+            end_session(login_code, session_id)
 
-        elif intent == "DELETE_USER":
-            if all(k in merged_data for k in ("name", "mobile")):
-                await delete_user_tool(ctx, **merged_data)
-                append_message(session_id, "assistant", "User Deleted", is_final=True)
-                end_session(login_code, session_id)
+        elif intent == "DELETE_USER" and all(k in merged_data for k in ("name", "mobile")):
+            await delete_user_tool(ctx, **merged_data)
+            end_session(login_code, session_id)
 
     except Exception:
         logger.error("handle_message failed", exc_info=True)
