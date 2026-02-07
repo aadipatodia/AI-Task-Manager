@@ -136,18 +136,18 @@ API_CONFIGS = {
     },
 
     "GET_USERS_BY_WHATSAPP": {
-        "url": f"{APPSAVY_BASE_URL}/GetDataJSONClient",
+        "url": f"{APPSAVY_BASE_URL}/PushdataJSONClient",
         "headers": {
-            "sid": "635",
+            "sid": "669",
             "pid": "309",
             "fid": "13618",
             "cid": "64",
             "uid": "TM_API",
             "roleid": "1627",
-            "TokenKey": "f097a996-b7cd-42c8-ad02-2e7d77f20988"
+            "TokenKey": "28036aa2-722f-46a4-a157-3cda45b3461d",
+            "Content-Type": "application/json"
         }
     },
-
     
     "GET_USERS_BY_ID": {
         "url": f"{APPSAVY_BASE_URL}/GetDataJSONClient",
@@ -242,8 +242,8 @@ class CreateTaskRequest(BaseModel):
     DOCUMENTS: Documents = Documents(CHILD=[])
 
 class GetUsersByWhatsappRequest(BaseModel):
-    Event: str = "146760"
-    Child: List[Dict]
+    SID: str = "669"
+    WHATSAPP_MOBILE_NUMBER: str
 
 class GetTasksRequest(BaseModel):
     Event: str = "106830"
@@ -721,15 +721,7 @@ async def get_task_list_tool(
 
     if view == "users":
         req = GetUsersByWhatsappRequest(
-            Child=[{
-                "Control_Id": "146761",
-                "AC_ID": "202131",
-                "Parent": [{
-                    "Control_Id": "146759",
-                    "Value": sender_mobile,
-                    "Data_Form_Id": ""
-                }]
-            }]
+            WHATSAPP_MOBILE_NUMBER=sender_mobile
         )
         await call_appsavy_api("GET_USERS_BY_WHATSAPP", req)
         return None
