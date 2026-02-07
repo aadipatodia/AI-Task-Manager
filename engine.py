@@ -1189,6 +1189,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         )
 
         # Logging
+        
         log_reasoning("DEBUG_STATE", {"is_cross_questioning": is_cross_questioning, "existing_intent": existing_intent, "last_assistant_msg": last_assistant_msg})
 
         intent = None
