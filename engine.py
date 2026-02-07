@@ -1176,17 +1176,16 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         login_code = user["login_code"]
 
-        # ---------- Redis session ----------
         session_id = get_or_create_session(login_code)
         append_message(session_id, "user", command)
+
         history = get_session_history(session_id)
         locked_intent = next(
             (msg["content"] for msg in history if msg["role"] == "intent"),
-            None
+            None        
         )
 
         if locked_intent:
-            is_supported = True
             intent = locked_intent
             log_reasoning("INTENT_RESUMED", {
                 "intent": intent,
@@ -1204,19 +1203,14 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             if is_supported and intent:
                 append_message(session_id, "intent", intent)
 
-        log_reasoning("INTENT_CLASSIFIED", {
-            "intent": intent,
-            "confidence": confidence,
-            "reasoning": reasoning
-        })
-
+# 🔐 single gate
         if intent is None:
             send_whatsapp_message(
                 sender,
                 "I can help with task assignment, task updates, performance reports, "
                 "viewing tasks, and user management. Please clarify your request.",
                 pid
-                )
+            )
             return
 
         ctx = ManagerContext(
