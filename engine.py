@@ -1180,8 +1180,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         append_message(session_id, "user", command)
 
         history = get_session_history(session_id)
-
-        # ---------- Detect Agent-2 pending ----------
         agent2_pending = any(
             h.get("agent2_pending") is True
             for h in reversed(history)
@@ -1192,7 +1190,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             None
         )
 
-        # ---------- Intent resolution ----------
         if agent2_pending and stored_intent:
             intent = stored_intent
             is_supported = True
