@@ -1046,7 +1046,7 @@ async def update_task_status_tool(
     }
 
     # Normalize input and map to target status 
-    target_status = APPSAVY_VALUE_MAP.get(status.title(), "Closed")
+    target_status = APPSAVY_VALUE_MAP.get(status.title(), status)
 
     # Create FLAT request object as per source 38
     req = UpdateTaskRequest(
