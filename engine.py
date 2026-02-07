@@ -16,7 +16,7 @@ from redis_session import (
     get_or_create_session,
     append_message,
     get_session_history,
-    end_session
+    end_session_complete
 )
 from intent_classifier import intent_classifier
 from user_resolver import resolve_user_by_phone
@@ -1134,8 +1134,8 @@ def merge_slots(session_id: str, new_slots: dict):
     return merged
 
 async def handle_message(command, sender, pid, message=None, full_message=None):
+    
     try:
-        
         sender = normalize_phone(sender)
         trace_id = f"{sender}-{int(datetime.datetime.now().timestamp())}"
         log_reasoning("TRACE_START", trace_id)
@@ -1147,15 +1147,19 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         manager_phone = normalize_phone(os.getenv("MANAGER_PHONE", ""))
         team = load_team()
 
+        # Determine Role
         if sender == manager_phone:
             role = "manager"
         elif any(normalize_phone(u["phone"]) == sender for u in team):
             role = "employee"
         else:
+            user_temp = resolve_user_by_phone(users_collection, sender)
+            if user_temp:
+                end_session_complete(user_temp["login_code"], get_or_create_session(user_temp["login_code"]))
+            
             send_whatsapp_message(sender, "Access Denied: Your number is not authorized.", pid)
             return
 
-        # Resolve user
         user = resolve_user_by_phone(users_collection, sender)
         if not user and sender == manager_phone:
             user = {"login_code": "MANAGER", "phone": sender, "name": "Manager"}
@@ -1188,8 +1192,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             None
         )
 
-        # Logging
-        
+        # Logging        
         log_reasoning("DEBUG_STATE", {"is_cross_questioning": is_cross_questioning, "existing_intent": existing_intent, "last_assistant_msg": last_assistant_msg})
 
         intent = None
@@ -1205,7 +1208,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 # CONDITION : Cross question and intent is null -> Error
                 log_reasoning("ERROR", {"reason": "Cross-question state detected but no existing_intent found."})
                 send_whatsapp_message(sender, "System error: Lost context of previous request. Please start over.", pid)
-                end_session(login_code, session_id)
+                end_session_complete(login_code, session_id)
                 return
         else:
             if existing_intent:
@@ -1225,18 +1228,17 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 })
 
                 if is_supported and intent:
-                    # Save the new intent to history so future turns (cross-questions) can find it
                     append_message(session_id, "system", f"INTENT_SET: {intent}")
                 else:
-                    # Fallback for when Agent 1 cannot determine a valid intent
                     send_whatsapp_message(
                         sender,
                         "I'm sorry, I didn't quite catch that. I can help with task assignment, "
                         "updates, performance reports, and user management. What would you like to do?",
                         pid
                     )
-                    end_session(login_code, session_id)
+                    end_session_complete(login_code, session_id)
                     return
+                
         # Context Setup 
         AGENT2_INTENTS = {"TASK_ASSIGNMENT", "UPDATE_TASK_STATUS", "ADD_USER", "DELETE_USER"}
         agent2_required = intent in AGENT2_INTENTS
@@ -1249,17 +1251,23 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         )
 
         # Direct Tools (Agent 1 Only)
+        # Direct Tools (Agent 1 Only)
         if not agent2_required:
-            if intent == "VIEW_EMPLOYEES_UNDER_MANAGER":
-                await get_task_list_tool(ctx, view="users")
-            elif intent == "VIEW_PENDING_TASKS":
-                pending = await get_pending_tasks(login_code)
-                if pending:
-                    send_whatsapp_message(sender, "\n".join(pending), pid)
-            elif intent == "VIEW_EMPLOYEE_PERFORMANCE":
-                await get_performance_report_tool(ctx)
+            try:
+                if intent == "VIEW_EMPLOYEES_UNDER_MANAGER":
+                    await get_task_list_tool(ctx, view="users")
+                elif intent == "VIEW_PENDING_TASKS":
+                    pending = await get_pending_tasks(login_code)
+                    if pending:
+                        send_whatsapp_message(sender, "\n".join(pending), pid)
+                elif intent == "VIEW_EMPLOYEE_PERFORMANCE":
+                    await get_performance_report_tool(ctx)
+            except Exception as e:
+                logger.error(f"Error executing direct tool {intent}: {e}")
+            finally:
+                # Requirement: Clear cache on every successful or failed call
+                end_session_complete(login_code, session_id)
             
-            end_session(login_code, session_id)
             return
 
         # Agent-2 : Parameter Extraction
@@ -1429,36 +1437,36 @@ Rules:
                 send_whatsapp_message(sender, result, pid)
                 return
 
-        # Agent 2 produced JSON (either directly or after parsing above)
-        merged_data = merge_slots(session_id, result)
-        log_reasoning("AGENT_2_FLAG_TRUE", {"parameters_extracted": merged_data})
-        append_message(session_id, "slots", merged_data)
-
         # Agent 2 produced JSON (the "Flag" is now set to true)
         merged_data = merge_slots(session_id, result)
         log_reasoning("AGENT_2_FLAG_TRUE", {"parameters_extracted": merged_data})
         append_message(session_id, "slots", merged_data)
 
         # Execute Tool Calls
-        if intent == "TASK_ASSIGNMENT" and all(k in merged_data for k in ("assignee", "task_name", "deadline")):
-            await assign_new_task_tool(ctx, **merged_data)
-            log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
-            end_session(login_code, session_id)
+        try:
+            if intent == "TASK_ASSIGNMENT" and all(k in merged_data for k in ("assignee", "task_name", "deadline")):
+                log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
+                await assign_new_task_tool(ctx, **merged_data)
+                end_session_complete(login_code, session_id)
 
-        elif intent == "UPDATE_TASK_STATUS" and all(k in merged_data for k in ("task_id", "status")):
-            await update_task_status_tool(ctx, **merged_data)
-            log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
-            end_session(login_code, session_id)
+            elif intent == "UPDATE_TASK_STATUS" and all(k in merged_data for k in ("task_id", "status")):
+                log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
+                await update_task_status_tool(ctx, **merged_data)
+                end_session_complete(login_code, session_id)
 
-        elif intent == "ADD_USER" and all(k in merged_data for k in ("name", "mobile")):
-            await add_user_tool(ctx, **merged_data)
-            log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
-            end_session(login_code, session_id)
+            elif intent == "ADD_USER" and all(k in merged_data for k in ("name", "mobile")):
+                log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
+                await add_user_tool(ctx, **merged_data)
+                end_session_complete(login_code, session_id)
 
-        elif intent == "DELETE_USER" and all(k in merged_data for k in ("name", "mobile")):
-            await delete_user_tool(ctx, **merged_data)
-            log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
-            end_session(login_code, session_id)
+            elif intent == "DELETE_USER" and all(k in merged_data for k in ("name", "mobile")):
+                log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
+                await delete_user_tool(ctx, **merged_data)
+                end_session_complete(login_code, session_id)
+        except Exception as e:
+            logger.error(f"API Tool Execution Failed for {intent}: {e}")
+            # Requirement: Clear cache even on failed API calls
+            end_session_complete(login_code, session_id)
 
     except Exception:
         logger.error("handle_message failed", exc_info=True)

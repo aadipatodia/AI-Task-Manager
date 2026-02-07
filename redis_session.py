@@ -117,18 +117,23 @@ def reset_session_after_api(session_key: str, session_id: str):
     pipe.delete(f"user_active_session:{session_key}")
     pipe.execute()
 
-def end_session(login_code: str, session_id: str):
+def end_session_complete(login_code: str, session_id: str):
+
     try:
-        session_key = f"session:{session_id}"
-        active_key = f"user_active_session:{login_code}"
-        agent2_key = f"agent2_state:{session_id}"
-
-        redis_client.delete(session_key)
-        redis_client.delete(active_key)
-        redis_client.delete(agent2_key)
-
+        # Clear conversation history
+        redis_client.delete(f"session:{session_id}")
+        
+        # Clear pending task data (if any)
+        redis_client.delete(f"pending_task:{session_id}")
+        
+        # Clear Agent 2 parameter state
+        redis_client.delete(f"agent2_state:{session_id}")
+        
+        # Remove the active session pointer for this user
+        redis_client.delete(f"user_active_session:{login_code}")
+        
+        logger.info(f"Redis cache cleared for user {login_code} (Session: {session_id})")
         return True
-
     except Exception as e:
-        logger.error(f"Failed to end session {session_id}: {e}")
+        logger.error(f"Failed to clear Redis cache for {login_code}: {e}")
         return False
