@@ -62,22 +62,39 @@ def clear_pending_task(session_id: str):
     redis_client.delete(f"pending_task:{session_id}")
 
 
-def get_agent2_state(session_id):
-    return redis.get_json(session_id) or {
+def get_agent2_state(session_id: str) -> dict:
+    raw = redis_client.get(f"agent2_state:{session_id}")
+    if raw:
+        return json.loads(raw)
+
+    return {
         "intent": None,
         "parameters": {},
         "ready": False
     }
 
-def update_agent2_state(session_id, intent=None, parameters=None, ready=None):
+def update_agent2_state(
+    session_id: str,
+    intent: Optional[str] = None,
+    parameters: Optional[dict] = None,
+    ready: Optional[bool] = None
+) -> dict:
     state = get_agent2_state(session_id)
+
     if intent is not None:
         state["intent"] = intent
-    if parameters:
+
+    if parameters is not None:
         state["parameters"].update(parameters)
+
     if ready is not None:
         state["ready"] = ready
-    redis.set_json(session_id, state)
+
+    redis_client.set(
+        f"agent2_state:{session_id}",
+        json.dumps(state)
+    )
+
     return state
 
 def get_session_history(session_id: str) -> List[Dict]:
@@ -98,16 +115,10 @@ def reset_session_after_api(session_key: str, session_id: str):
     pipe.execute()
 
 def end_session(session_key: str, session_id: str):
-    """
-    End the active Redis session for a user
-    """
     try:
-        # delete session messages
         redis_client.delete(f"session:{session_id}")
-
-        # delete active session pointer
         redis_client.delete(f"user_active_session:{session_key}")
-
+        redis_client.delete(f"agent2_state:{session_id}")
     except Exception as e:
         print(f"[REDIS] Failed to end session {session_id}: {e}")
 
