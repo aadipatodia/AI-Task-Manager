@@ -1189,7 +1189,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             is_supported, intent, confidence, reasoning = intent_classifier(command)
             if is_supported and intent:
                 # Store the intent in history so we can retrieve it during cross-questioning
-                append_message(session_id, "system", f"INTENT_SET: {intent}", intent=intent)
+                append_message(session_id, "system", f"INTENT_SET: {intent}")
             
             log_reasoning("INTENT_CLASSIFIED", {
                 "intent": intent,
