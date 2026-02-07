@@ -700,7 +700,7 @@ async def get_performance_report_tool(
     except Exception:
         logger.error("get_performance_report_tool failed", exc_info=True)
         return None
-    
+   
 async def get_task_list_tool(
     ctx: ManagerContext,
     view: str = "tasks"   
@@ -1071,6 +1071,7 @@ async def update_task_status_tool(
     return None
 
 def should_send_whatsapp(text: str) -> bool:
+
     if not text:
         return False
 
@@ -1240,22 +1241,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                     if pending:
                         send_whatsapp_message(sender, "\n".join(pending), pid)
                 elif intent == "VIEW_EMPLOYEE_PERFORMANCE":
-                    result = await run_gemini_extractor(
-                        prompt=f"""
-                        RULES:
-                        - If a specific employee name is mentioned -> report_type = "Count", name = "Employee Name"
-                        - If NO name is mentioned (general request) -> report_type = "Detail", name = null
-                        Return JSON:
-                        {{
-                            "report_type": string,
-                            "name": string | null
-                        }}
-                        """,
-                        message=full_convo_context
-                    )
-                    # Pass extracted data to the tool
-                    if isinstance(result, dict):
-                        await get_performance_report_tool(ctx, name=result.get("name"))
+                    await get_performance_report_tool(ctx)
             except Exception as e:
                 logger.error(f"Error executing direct tool {intent}: {e}")
             finally:
@@ -1393,6 +1379,21 @@ Rules:
 """,
                 message=full_convo_context
             )
+            
+        elif intent == "VIEW_EMPLOYEE_PERFORMANCE":
+            result = await run_gemini_extractor(
+                prompt=f"""
+                REPORT TYPE RULES:
+                1. If the user mentions a specific person (e.g., "Abhilasha", "Rahul") -> report_type = "Count", name = "extracted name"
+                2. If the user asks for a general/overall report or no name is found -> report_type = "Detail", name = null
+                Return ONLY JSON:
+                {{
+                    "report_type": "Detail" | "Count",
+                    "name": string | null
+                }}
+                """,
+                message=full_convo_context
+            )
 
         elif intent == "DELETE_USER":
             result = await run_gemini_extractor(
@@ -1467,6 +1468,16 @@ Rules:
                 log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
                 await delete_user_tool(ctx, **merged_data)
                 end_session_complete(login_code, session_id)
+            
+            elif intent == "VIEW_EMPLOYEE_PERFORMANCE" and "report_type" in merged_data:
+                log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
+                await get_performance_report_tool(
+                    ctx,
+                    report_type=merged_data["report_type"], 
+                    name=merged_data.get("name")
+                )
+                end_session_complete(login_code, session_id)
+            
         except Exception as e:
             logger.error(f"API Tool Execution Failed for {intent}: {e}")
             # Requirement: Clear cache even on failed API calls
