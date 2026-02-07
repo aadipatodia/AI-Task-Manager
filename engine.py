@@ -1146,15 +1146,18 @@ def normalize_phone(phone: str) -> str:
 
 async def handle_message(command, sender, pid, message=None, full_message=None):
     """
-    🧠 AGENT-2 ORCHESTRATOR
+     AGENT-2 ORCHESTRATOR
     
     Flow:
     1. Normalize sender + authorize
     2. Agent-1: classify intent
+       - If unclear → ask clarification (send to WhatsApp) → STOP
+       - If clear → lock intent → proceed
     3. Agent-2 session: get/create state
     4. Extract parameters (merge with existing state)
-    5. Check if ready → execute OR ask question
-    6. Clean up session after execution
+       - If incomplete → ask clarification (send to WhatsApp) → STOP
+       - If complete → execute API → backend sends WhatsApp response
+    5. Clean up session after execution
     """
     try:
         # ========== STEP 1: NORMALIZE & AUTHORIZE ==========
@@ -1164,6 +1167,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         # Media-only handling
         if message and not command:
+            # ⚠️ CLARIFICATION NEEDED
             send_whatsapp_message(
                 sender,
                 "File received. Please provide assignee, task description, and deadline.",
@@ -1183,6 +1187,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         elif any(normalize_phone(u["phone"]) == sender for u in team):
             role = "employee"
         else:
+            # ⚠️ AUTHORIZATION ERROR
             send_whatsapp_message(
                 sender,
                 "Access Denied: Your number is not authorized.",
@@ -1201,6 +1206,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             }
 
         if not user:
+            # ⚠️ AUTHORIZATION ERROR
             send_whatsapp_message(
                 sender,
                 "Access Denied: Your number is not registered.",
@@ -1221,11 +1227,21 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         if state.get("intent") is None:
             is_supported, intent, confidence, reasoning = intent_classifier(command)
             
+            log_reasoning("INTENT_CLASSIFIED", {
+                "intent": intent,
+                "confidence": confidence,
+                "reasoning": reasoning
+            })
+            
+            # ⚠️ AGENT 1 CLARIFICATION NEEDED
             if not is_supported or intent is None:
                 send_whatsapp_message(
                     sender,
-                    "I couldn't understand what you want to do.\n"
-                    "Do you want to assign a task, update a task, or view something?",
+                    "I couldn't understand what you want to do. Please specify:\n"
+                    "- Assign a task\n"
+                    "- Update a task\n"
+                    "- Add/delete a user\n"
+                    "- View tasks or reports",
                     pid
                 )
                 return
@@ -1234,8 +1250,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             update_agent2_state(session_id, intent=intent)
             log_reasoning("INTENT_LOCKED", {
                 "intent": intent,
-                "confidence": confidence,
-                "reasoning": reasoning
+                "confidence": confidence
             })
         else:
             # Intent already locked
@@ -1250,7 +1265,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             document_data=message
         )
 
-        # ========== STEP 4: INTENT-SPECIFIC EXTRACTION ==========
+        # ========== STEP 4: INTENT-SPECIFIC EXTRACTION (AGENT-2) ==========
         
         # ---- TASK ASSIGNMENT ----
         if intent == "TASK_ASSIGNMENT":
@@ -1304,7 +1319,7 @@ Rules:
                 ready=result["ready"]
             )
 
-            # If not ready, ask question and exit
+            # AGENT 2 CLARIFICATION NEEDED
             if not result["ready"]:
                 if result["question"]:
                     send_whatsapp_message(sender, result["question"], pid)
@@ -1359,6 +1374,7 @@ Rules:
                 ready=result["ready"]
             )
 
+            # AGENT 2 CLARIFICATION NEEDED
             if not result["ready"]:
                 if result["question"]:
                     send_whatsapp_message(sender, result["question"], pid)
@@ -1408,6 +1424,7 @@ Rules:
                 ready=result["ready"]
             )
             
+            # AGENT 2 CLARIFICATION NEEDED
             if not result["ready"]:
                 if result["question"]:
                     send_whatsapp_message(sender, result["question"], pid)
@@ -1455,6 +1472,7 @@ Rules:
                 ready=result["ready"]
             )
             
+            # AGENT 2 CLARIFICATION NEEDED
             if not result["ready"]:
                 if result["question"]:
                     send_whatsapp_message(sender, result["question"], pid)
@@ -1481,7 +1499,7 @@ Return JSON ONLY.
             result = await run_gemini_extractor(extraction_prompt, command, intent=intent)
             employee = result["parameters"].get("employee")
             
-            # Execute immediately (no multi-turn needed)
+            # Execute API - backend sends WhatsApp response
             await get_performance_report_tool(ctx, name=employee)
             
             # Clean up session
@@ -1490,22 +1508,15 @@ Return JSON ONLY.
 
         # ---- VIEW EMPLOYEES UNDER MANAGER ----
         elif intent == "VIEW_EMPLOYEES_UNDER_MANAGER":
-            # No parameters needed - execute immediately
+            # Execute API - backend sends WhatsApp response
             await get_task_list_tool(ctx, view="users")
             end_session(login_code, session_id)
             return
 
         # ---- VIEW PENDING TASKS ----
         elif intent == "VIEW_PENDING_TASKS":
-            # No parameters needed
-            pending = await get_pending_tasks(login_code)
-
-            if pending:
-                output = "\n".join(pending)
-                send_whatsapp_message(sender, output, pid)
-            else:
-                send_whatsapp_message(sender, "No pending tasks found.", pid)
-
+            # Execute API - backend sends WhatsApp response
+            await get_task_list_tool(ctx, view="tasks")
             end_session(login_code, session_id)
             return
 
@@ -1519,7 +1530,7 @@ Return JSON ONLY.
                 "parameters": state["parameters"]
             })
 
-            # Execute based on intent
+            # Execute API based on intent - backend handles WhatsApp response
             if state["intent"] == "TASK_ASSIGNMENT":
                 await assign_new_task_tool(ctx, **state["parameters"])
 
@@ -1535,6 +1546,7 @@ Return JSON ONLY.
             # Clean up session after successful execution
             end_session(login_code, session_id)
             log_reasoning("SESSION_ENDED", {"session_id": session_id})
+            # ✅ NO WHATSAPP MESSAGE - backend handles it
             return
 
     except Exception:
