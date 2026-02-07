@@ -1179,14 +1179,18 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         append_message(session_id, "user", command)
 
         history = get_session_history(session_id)
-        if len(history) > 1:
-            intent = history[-2].get("intent")
+        stored_intent = next(
+            (h.get("intent") for h in reversed(history) if h.get("intent")),
+            None
+        )
+
+        if stored_intent:
+            intent = stored_intent
             is_supported = True
             confidence = 1.0
             reasoning = "Continuation from Redis session"
         else:
             is_supported, intent, confidence, reasoning = intent_classifier(command)
-            append_message(session_id, "intent", intent)
 
         log_reasoning("INTENT_CLASSIFIED", {
             "intent": intent,
