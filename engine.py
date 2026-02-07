@@ -16,7 +16,9 @@ from redis_session import (
     get_or_create_session,
     append_message,
     get_session_history,
-    end_session
+    end_session,
+    get_agent2_state,
+    update_agent2_state
 )
 from intent_classifier import intent_classifier
 from user_resolver import resolve_user_by_phone
@@ -281,27 +283,33 @@ class AddDeleteUserRequest(BaseModel):
     MOBILE_NUMBER: str
     NAME: str
     
-async def run_gemini_extractor(prompt: str, message: str):
+async def run_gemini_extractor(prompt: str, message: str,intent: Optional[str] = None):
+
     client = Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+    intent_block = f"\n\nLOCKED INTENT:\n{intent}\n" if intent else ""
 
     response = client.models.generate_content(
         model="gemini-2.5-pro",
-        contents=f"{prompt}\n\nUSER MESSAGE:\n{message}"
+        contents=f"{prompt}{intent_block}\nUSER MESSAGE:\n{message}"
     )
 
-    text = getattr(response, "text", None)
-    if not text:
-        return None
+    text = response.text.strip()
 
-    text = text.strip()
-
+    # If Gemini returns JSON → parse
     if text.startswith("{"):
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return None
+        data = json.loads(text)
+        return {
+            "parameters": data,
+            "ready": True,
+            "question": None
+        }
 
-    return text
+    return {
+        "parameters": {},
+        "ready": False,
+        "question": text
+    }
 
 def AGENT_2_POLICY(current_time: datetime.datetime) -> str:
     team = load_team()
@@ -1094,6 +1102,10 @@ async def update_task_status_tool(
         return None
     return None
 
+
+
+
+
 def should_send_whatsapp(text: str) -> bool:
 
     if not text:
@@ -1123,11 +1135,12 @@ def normalize_phone(phone: str) -> str:
 
 async def handle_message(command, sender, pid, message=None, full_message=None):
     try:
-        agent2_ready = False
+        # ---------- Normalize sender ----------
         policy = AGENT_2_POLICY(datetime.datetime.now(IST))
         log_reasoning("AGENT_2_POLICY_ACTIVE", policy)
         sender = normalize_phone(sender)
         trace_id = f"{sender}-{int(datetime.datetime.now().timestamp())}"
+        output = None
         log_reasoning("TRACE_START", trace_id)
 
         # ---------- Media-only handling ----------
@@ -1182,15 +1195,21 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         session_id = get_or_create_session(login_code)
         append_message(session_id, "user", command)
 
-        history = get_session_history(session_id)
-        if len(history) > 1:
-            intent = history[-2].get("intent")
-            is_supported = True
-            confidence = 1.0
-            reasoning = "Continuation from Redis session"
+        is_supported, intent, confidence, reasoning = intent_classifier(command)
+        if not is_supported or intent is None:
+            send_whatsapp_message(
+                sender,
+                "I couldn’t understand what you want to do.\n"
+                "Do you want to assign a task, update a task, or view something?",
+                pid
+            )
+            return
+        
+        state = get_agent2_state(session_id)
+        if state["intent"] is None:
+            update_agent2_state(session_id, intent=intent)
         else:
-            is_supported, intent, confidence, reasoning = intent_classifier(command)
-            append_message(session_id, "intent", intent)
+            intent = state["intent"]  # lock to previous intent
 
         log_reasoning("INTENT_CLASSIFIED", {
             "intent": intent,
@@ -1236,36 +1255,28 @@ Required fields:
 
 Current date: {ctx.current_time.strftime("%Y-%m-%d")}
 
-If returning JSON, use EXACTLY this format:
-{{
-  "assignee": string,
-  "task_name": string,
-  "deadline": string
-}}
-
 Rules:
-- Either return JSON OR a question
+- Either return NOTHING OR a question
 - Do not explain anything else
 """
 
             result = await run_gemini_extractor(
                 prompt=extraction_prompt,
-                message=command
+                message=command,
+                intent=intent
             )
 
     # If Gemini asked a question → forward directly
-            if isinstance(result, str):
-                send_whatsapp_message(sender, result, pid)
-                return
-
-    # Otherwise, assume valid structured output
-            agent2_ready = True
-            await assign_new_task_tool(
-                ctx,
-                assignee=result["assignee"],
-                task_name=result["task_name"],
-                deadline=result["deadline"]
+            existing = get_agent2_state(session_id).get("parameters", {})
+            merged = {**existing, **result["parameters"]}
+            update_agent2_state(
+                session_id,
+                parameters=merged,
+                ready=result["ready"]
             )
+            if not result["ready"]:
+                send_whatsapp_message(sender, result["question"], pid)
+                return
 
         elif intent == "UPDATE_TASK_STATUS":
             extraction_prompt = f"""
@@ -1288,35 +1299,28 @@ Required fields:
 Optional:
 - remark
 
-If returning JSON, use EXACTLY this format:
-{{
-  "task_id": string,
-  "status": string,
-  "remark": string | null
-}}
-
 Rules:
-- Either return JSON OR a follow-up question
+- Either return NOTHING OR a follow-up question
 - No explanations
 """
 
             result = await run_gemini_extractor(
                 extraction_prompt,
-                command
+                command,
+                intent=intent
             )
 
-            if isinstance(result, str):
-                send_whatsapp_message(sender, result, pid)
-                return
-            
-            agent2_ready = True
-            await update_task_status_tool(
-                ctx,
-                task_id=result["task_id"],
-                status=result["status"],
-                remark=result.get("remark")
+    # Gemini asked a question → forward as-is
+            existing = get_agent2_state(session_id).get("parameters", {})
+            merged = {**existing, **result["parameters"]}
+            update_agent2_state(
+                session_id,
+                parameters=merged,
+                ready=result["ready"]
             )
-            
+            if not result["ready"]:
+                send_whatsapp_message(sender, result["question"], pid)
+                return
 
         elif intent == "VIEW_EMPLOYEE_PERFORMANCE":
             extraction_prompt = f"""
@@ -1331,20 +1335,15 @@ Your job is to:
 3. Do NOT invent names
 4. Do NOT explain
 
-If returning JSON, use EXACTLY this format:
-{{
-  "employee": string | null
-}}
-
 Rules:
-- Return JSON ONLY
+- Return NOTHING
 """
 
-            result = await run_gemini_extractor(extraction_prompt, command)
-            await get_performance_report_tool(
-                ctx,
-                name=result.get("employee")
-            )
+            result = await run_gemini_extractor(extraction_prompt, command, intent=intent)
+            employee = result["parameters"].get("employee")
+            await get_performance_report_tool(ctx, name=employee)
+            update_agent2_state(session_id, ready=False)
+            return
 
         elif intent == "VIEW_EMPLOYEES_UNDER_MANAGER":
             extraction_prompt = f"""
@@ -1365,35 +1364,32 @@ Return:
   "action": "list_users"
 }}
 """
-            await run_gemini_extractor(extraction_prompt, command)
+            await run_gemini_extractor(extraction_prompt, command, intent=intent)
             await get_task_list_tool(ctx, view="users")
+            update_agent2_state(session_id, ready=False)
+            return
 
         elif intent == "VIEW_PENDING_TASKS":
             await run_gemini_extractor(
-                f"""
-You are helping a manager view employees added by them.
-
-USER QUERY (verbatim):
-\"\"\"{command}\"\"\"
-
-Your job:
-- Confirm this intent
-- No parameters are required
-- Do NOT ask questions
-- Do NOT invent anything
-- Return JSON ONLY
-
-Return:
-{{
-  "action": "list_users"
-}}
-""",
-                command
+                prompt="""
+        You are helping a user view pending tasks.
+        No parameters are required.
+        Return NOTHING.
+        """,
+                message=command,
+                intent=intent
             )
 
             pending = await get_pending_tasks(login_code)
+
             if pending:
                 output = "\n".join(pending)
+                send_whatsapp_message(sender, output, pid)
+            else:
+                send_whatsapp_message(sender, "No pending tasks found.", pid)
+
+            update_agent2_state(session_id, ready=False)
+            return
 
         elif intent == "ADD_USER":
             extraction_prompt = f"""
@@ -1411,33 +1407,24 @@ Required:
 - name
 - mobile (10 digits)
 Optional:
-- email
-
-If returning JSON, use EXACTLY:
-{{
-  "name": string,
-  "mobile": string,
-  "email": string | null
-}}
+- email (DO NOT ASK USER FOR EMAIL IF HE HASN'T PROVIDED ANY)
 
 Rules:
-- Either return JSON OR a follow-up question
+- Either return NOTHING OR a follow-up question
 - No explanations
 """
-            result = await run_gemini_extractor(extraction_prompt, command)
-
-            if isinstance(result, str):
-                send_whatsapp_message(sender, result, pid)
-                return
+            result = await run_gemini_extractor(extraction_prompt, command, intent=intent)
             
-            agent2_ready = True
-
-            await add_user_tool(
-                ctx,
-                name=result["name"],
-                mobile=result["mobile"],
-                email=result.get("email")
+            existing = get_agent2_state(session_id).get("parameters", {})
+            merged = {**existing, **result["parameters"]}
+            update_agent2_state(
+                session_id,
+                parameters=merged,
+                ready=result["ready"]
             )
+            if not result["ready"]:
+                send_whatsapp_message(sender, result["question"], pid)
+                return
 
         elif intent == "DELETE_USER":
             extraction_prompt = f"""
@@ -1455,33 +1442,49 @@ Required:
 - name
 - mobile
 
-If returning JSON, use EXACTLY:
-{{
-  "name": string,
-  "mobile": string
-}}
 
 Rules:
-- Either return JSON OR a follow-up question
+- Either return NOTHING OR a follow-up question
 - No explanations
 """
-            result = await run_gemini_extractor(extraction_prompt, command)
-
-            if isinstance(result, str):
-                send_whatsapp_message(sender, result, pid)
+            result = await run_gemini_extractor(extraction_prompt, command, intent=intent)
+            
+            existing = get_agent2_state(session_id).get("parameters", {})
+            merged = {**existing, **result["parameters"]}
+            update_agent2_state(
+                session_id,
+                parameters=merged,
+                ready=result["ready"]
+            )
+            if not result["ready"]:
+                send_whatsapp_message(sender, result["question"], pid)
                 return
             
-            agent2_ready = True
-            await delete_user_tool(
-                ctx,
-                name=result["name"],
-                mobile=result["mobile"],
-                email=None
-            )
+        # ---------- EXECUTION TRIGGER ----------
+        state = get_agent2_state(session_id)
 
-        if agent2_ready:
+        if state["ready"] is True:
+
+            if state["intent"] == "TASK_ASSIGNMENT":
+                await assign_new_task_tool(ctx, **state["parameters"])
+
+            elif state["intent"] == "UPDATE_TASK_STATUS":
+                await update_task_status_tool(ctx, **state["parameters"])
+
+            elif state["intent"] == "ADD_USER":
+                await add_user_tool(ctx, **state["parameters"])
+
+            elif state["intent"] == "DELETE_USER":
+                await delete_user_tool(ctx, **state["parameters"])
+
             end_session(login_code, session_id)
+            return
 
+        state = get_agent2_state(session_id)
+        if state["ready"] is False:
+            return  
+
+        # ---------- WhatsApp output ----------
         if output and should_send_whatsapp(output):
             send_whatsapp_message(sender, output, pid)
 

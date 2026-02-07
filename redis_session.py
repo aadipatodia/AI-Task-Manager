@@ -62,6 +62,24 @@ def clear_pending_task(session_id: str):
     redis_client.delete(f"pending_task:{session_id}")
 
 
+def get_agent2_state(session_id):
+    return redis.get_json(session_id) or {
+        "intent": None,
+        "parameters": {},
+        "ready": False
+    }
+
+def update_agent2_state(session_id, intent=None, parameters=None, ready=None):
+    state = get_agent2_state(session_id)
+    if intent is not None:
+        state["intent"] = intent
+    if parameters:
+        state["parameters"].update(parameters)
+    if ready is not None:
+        state["ready"] = ready
+    redis.set_json(session_id, state)
+    return state
+
 def get_session_history(session_id: str) -> List[Dict]:
     raw = redis_client.lrange(f"session:{session_id}", 0, -1)
     return [json.loads(x) for x in raw]
