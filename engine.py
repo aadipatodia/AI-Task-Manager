@@ -1119,6 +1119,7 @@ def normalize_phone(phone: str) -> str:
 
 def merge_slots(session_id: str, new_slots: dict):
     history = get_session_history(session_id)
+    log_reasoning("HISTORY: ", history)
 
     # find existing slots
     existing = next(
@@ -1141,7 +1142,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         if not command and not message:
             return
 
-        # ---------- Authorization ----------
+        #  Authorization
         manager_phone = normalize_phone(os.getenv("MANAGER_PHONE", ""))
         team = load_team()
 
@@ -1153,7 +1154,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             send_whatsapp_message(sender, "Access Denied: Your number is not authorized.", pid)
             return
 
-        # ---------- Resolve user ----------
+        # Resolve user
         user = resolve_user_by_phone(users_collection, sender)
         if not user and sender == manager_phone:
             user = {"login_code": "MANAGER", "phone": sender, "name": "Manager"}
@@ -1169,8 +1170,9 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         append_message(session_id, "user", command)
         log_reasoning("USER_INPUT_RECEIVED", {"sender": sender, "command": command})
         history = get_session_history(session_id)
+        log_reasoning("HISTORY: ", history)
 
-        # ---------- Agent-1 / Intent Logic ----------
+        # Agent-1 / Intent Logic 
         # Logic: Only skip Agent 1 if we are awaiting a reply to a cross-question
         last_assistant_msg = next((m for m in reversed(history) if m["role"] == "assistant"), None)
         is_cross_questioning = last_assistant_msg and "[CLARIFY]" in last_assistant_msg["content"]
@@ -1204,7 +1206,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             end_session(login_code, session_id)
             return
 
-        # ---------- Context Setup ----------
+        # Context Setup 
         AGENT2_INTENTS = {"TASK_ASSIGNMENT", "UPDATE_TASK_STATUS", "ADD_USER", "DELETE_USER"}
         agent2_required = intent in AGENT2_INTENTS
 
@@ -1215,7 +1217,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             document_data=message
         )
 
-        # ---------- Direct Tools (Agent 1 Only) ----------
+        # Direct Tools (Agent 1 Only)
         if not agent2_required:
             if intent == "VIEW_EMPLOYEES_UNDER_MANAGER":
                 await get_task_list_tool(ctx, view="users")
@@ -1229,7 +1231,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             end_session(login_code, session_id)
             return
 
-        # ---------- Agent-2 : Parameter Extraction ----------
+        # Agent-2 : Parameter Extraction
         # Retrieve latest slots and format history for Agent 2
         slots = next((m["content"] for m in reversed(history) if m.get("role") == "slots"), {})
         full_convo_context = "\n".join([f"{m['role']}: {m['content']}" for m in history])
@@ -1381,8 +1383,6 @@ Rules:
                 message=full_convo_context
             )
 
-        # ---------- Handle Agent 2 Response ----------
-        # ---------- Handle Agent 2 Response ----------
         # Logic: If it's a string, check if it's actually JSON in a string wrapper
         if isinstance(result, str):
             cleaned_result = result.strip().replace("```json", "").replace("```", "").strip()
