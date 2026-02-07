@@ -1176,76 +1176,70 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             "full_history": [f"{m['role']}: {m['content']}" for m in history]
         })
 
-        # Agent-1 / Intent Logic 
-        # Logic: Only skip Agent 1 if we are awaiting a reply to a cross-question
+        # Setup Context
         last_assistant_msg = next((m for m in reversed(history) if m["role"] == "assistant"), None)
         is_cross_questioning = last_assistant_msg and "[CLARIFY]" in last_assistant_msg["content"]
-        log_reasoning("LAST_ASSISTED_MESSAGE: ", {
-            "last_assisted_msg": last_assistant_msg
-        })
-        log_reasoning("CROSS_QUESTIONING: ", {
-            "is_cross_questioning": is_cross_questioning
-        })
-        
+
+        # Find the most recent intent saved in the system history
         existing_intent = next(
             (m["content"].replace("INTENT_SET: ", "") 
-             for m in reversed(history) 
-             if m["role"] == "system" and "INTENT_SET:" in m["content"]), 
-            log_reasoning("LAST_ASSISTED_MESSAGE: ", {
-                "last_assisted_msg": last_assistant_msg
-            })
-            log_reasoning("CROSS_QUESTIONING: ", {
-                "is_cross_questioning": is_cross_questioning
-            })
+            for m in reversed(history) 
+            if m["role"] == "system" and "INTENT_SET:" in m["content"]), 
             None
         )
 
-        # 3. Decision Gate
-        if is_cross_questioning and existing_intent:
-            intent = existing_intent
-            is_supported = True
-            log_reasoning("AGENT_2_RESUME", {"intent": intent, "reason": "Reply to [CLARIFY]"})
-            log_reasoning("LAST_ASSISTED_MESSAGE: ", {
-                "last_assisted_msg": last_assistant_msg
-            })
-            log_reasoning("CROSS_QUESTIONING: ", {
-                "is_cross_questioning": is_cross_questioning
-            })
+        # Logging
+        log_reasoning("DEBUG_STATE", {
+            "is_cross_questioning": is_cross_questioning,
+            "existing_intent": existing_intent,
+            "last_assistant_msg": last_assistant_msg["content"] if last_assistant_msg else None
+        })
+
+        intent = None
+        is_supported = False
+
+        if is_cross_questioning:
+            if existing_intent:
+                # CONDITION: Cross question and intent is not null -> Agent 2
+                intent = existing_intent
+                is_supported = True
+                log_reasoning("AGENT_2_RESUME", {"intent": intent, "reason": "Reply to [CLARIFY]"})
+            else:
+                # CONDITION : Cross question and intent is null -> Error
+                log_reasoning("ERROR", {"reason": "Cross-question state detected but no existing_intent found."})
+                send_whatsapp_message(sender, "System error: Lost context of previous request. Please start over.", pid)
+                end_session(login_code, session_id)
+                return
         else:
-            is_supported, intent, confidence, reasoning = intent_classifier(command)
-            if is_supported and intent:
-                append_message(session_id, "system", f"INTENT_SET: {intent}")
+            if existing_intent:
+                # CONDITION: Intent is not null (not in cross-question) -> Agent 2
+                intent = existing_intent
+                is_supported = True
+                log_reasoning("AGENT_2_CONTINUE", {"intent": intent})
+            else:
+                # CONDITION: Intent is null -> Agent 1 call
+                is_supported, intent, confidence, reasoning = intent_classifier(command)
         
-        # Find existing intent from history tags
-        existing_intent = next((m.get("intent") for m in reversed(history) if "intent" in m), None)
+                log_reasoning("INTENT_CLASSIFIED", {
+                    "intent": intent,
+                    "confidence": confidence,
+                    "reasoning": reasoning,
+                    "is_supported": is_supported
+                })
 
-        if is_cross_questioning and existing_intent:
-            intent = existing_intent
-            is_supported = True
-            log_reasoning("AGENT_2_RESUME", {"intent": intent})
-
-        else:
-            # Agent-1 : intent classification
-            is_supported, intent, confidence, reasoning = intent_classifier(command)
-            if is_supported and intent:
-                append_message(session_id, "system", f"INTENT_SET: {intent}")
-            
-            log_reasoning("INTENT_CLASSIFIED", {
-                "intent": intent,
-                "confidence": confidence,
-                "reasoning": reasoning
-            })
-
-        if not is_supported or not intent:
-            send_whatsapp_message(
-                sender,
-                "I can help with task assignment, task updates, performance reports, "
-                "viewing tasks, and user management. Please clarify your request.",
-                pid
-            )
-            end_session(login_code, session_id)
-            return
-
+                if is_supported and intent:
+                    # Save the new intent to history so future turns (cross-questions) can find it
+                    append_message(session_id, "system", f"INTENT_SET: {intent}")
+                else:
+                    # Fallback for when Agent 1 cannot determine a valid intent
+                    send_whatsapp_message(
+                        sender,
+                        "I'm sorry, I didn't quite catch that. I can help with task assignment, "
+                        "updates, performance reports, and user management. What would you like to do?",
+                        pid
+                    )
+                    end_session(login_code, session_id)
+                    return
         # Context Setup 
         AGENT2_INTENTS = {"TASK_ASSIGNMENT", "UPDATE_TASK_STATUS", "ADD_USER", "DELETE_USER"}
         agent2_required = intent in AGENT2_INTENTS
