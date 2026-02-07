@@ -1219,7 +1219,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                     return
                 
         # Context Setup 
-        AGENT2_INTENTS = {"TASK_ASSIGNMENT", "UPDATE_TASK_STATUS", "ADD_USER", "DELETE_USER"}
+        AGENT2_INTENTS = {"TASK_ASSIGNMENT", "UPDATE_TASK_STATUS", "ADD_USER", "DELETE_USER", "VIEW_EMPLOYEE_PERFORMANCE"}
         agent2_required = intent in AGENT2_INTENTS
 
         ctx = ManagerContext(
@@ -1241,7 +1241,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                         send_whatsapp_message(sender, "\n".join(pending), pid)
                 elif intent == "VIEW_EMPLOYEE_PERFORMANCE":
                     result = await run_gemini_extractor(
-                        prompt=f"""You are processing a performance report request.
+                        prompt=f"""
                         RULES:
                         - If a specific employee name is mentioned -> report_type = "Count", name = "Employee Name"
                         - If NO name is mentioned (general request) -> report_type = "Detail", name = null
