@@ -1284,6 +1284,7 @@ Rules:
 
     # If Gemini asked a question → forward directly
             if isinstance(result, str):
+                merge_slots(session_id, {"_awaiting": "deadline"})
                 send_whatsapp_message(sender, result, pid)
                 return
             
@@ -1344,6 +1345,7 @@ Rules:
 
     # Gemini asked a question → forward as-is
             if isinstance(result, str):
+                merge_slots(session_id, {"_awaiting": "deadline"})
                 send_whatsapp_message(sender, result, pid)
                 return
 
@@ -1487,6 +1489,7 @@ Rules:
                 result = merge_slots(session_id, result)
 
             if isinstance(result, str):
+                merge_slots(session_id, {"_awaiting": "deadline"})
                 send_whatsapp_message(sender, result, pid)
                 return
             
@@ -1536,6 +1539,7 @@ Rules:
                 result = merge_slots(session_id, result)
                 
             if isinstance(result, str):
+                merge_slots(session_id, {"_awaiting": "deadline"})
                 send_whatsapp_message(sender, result, pid)
                 return
             
