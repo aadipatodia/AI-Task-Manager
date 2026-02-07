@@ -1167,12 +1167,13 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         
         # Save user input to history
         append_message(session_id, "user", command)
+        log_reasoning("USER_INPUT_RECEIVED", {"sender": sender, "command": command})
         history = get_session_history(session_id)
 
         # ---------- Agent-1 / Intent Logic ----------
         # Logic: Only skip Agent 1 if we are awaiting a reply to a cross-question
         last_assistant_msg = next((m for m in reversed(history) if m["role"] == "assistant"), None)
-        is_cross_questioning = last_assistant_msg and last_assistant_msg.get("is_clarification", False)
+        is_cross_questioning = last_assistant_msg and "[CLARIFY]" in last_assistant_msg["content"]
         
         # Find existing intent from history tags
         existing_intent = next((m.get("intent") for m in reversed(history) if "intent" in m), None)
@@ -1185,7 +1186,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             # Agent-1 : intent classification
             is_supported, intent, confidence, reasoning = intent_classifier(command)
             if is_supported and intent:
-                # Store the intent in history so we can retrieve it during cross-questioning
                 append_message(session_id, "system", f"INTENT_SET: {intent}")
             
             log_reasoning("INTENT_CLASSIFIED", {
@@ -1233,6 +1233,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         # Retrieve latest slots and format history for Agent 2
         slots = next((m["content"] for m in reversed(history) if m.get("role") == "slots"), {})
         full_convo_context = "\n".join([f"{m['role']}: {m['content']}" for m in history])
+        log_reasoning("AGENT_2_HISTORY_CONTEXT", {"history_sent": full_convo_context})
 
         result = None
 
@@ -1383,30 +1384,37 @@ Rules:
         # ---------- Handle Agent 2 Response ----------
         if isinstance(result, str):
             # Agent 2 produced a question. Mark as clarification for next message bypass.
-            append_message(session_id, "assistant", result, is_clarification=True)
+            log_reasoning("AGENT_2_CLARIFICATION_SENT", {"agent_msg": result})
+            append_message(session_id, "assistant", f"[CLARIFY] {result}") 
             send_whatsapp_message(sender, result, pid)
             return
 
         # Agent 2 produced JSON (the "Flag" is now set to true)
         merged_data = merge_slots(session_id, result)
+        log_reasoning("AGENT_2_FLAG_TRUE", {"parameters_extracted": merged_data})
         append_message(session_id, "slots", merged_data)
 
         # Execute Tool Calls
         if intent == "TASK_ASSIGNMENT" and all(k in merged_data for k in ("assignee", "task_name", "deadline")):
             await assign_new_task_tool(ctx, **merged_data)
+            log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
             end_session(login_code, session_id)
 
         elif intent == "UPDATE_TASK_STATUS" and all(k in merged_data for k in ("task_id", "status")):
             await update_task_status_tool(ctx, **merged_data)
+            log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
             end_session(login_code, session_id)
 
         elif intent == "ADD_USER" and all(k in merged_data for k in ("name", "mobile")):
             await add_user_tool(ctx, **merged_data)
+            log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
             end_session(login_code, session_id)
 
         elif intent == "DELETE_USER" and all(k in merged_data for k in ("name", "mobile")):
             await delete_user_tool(ctx, **merged_data)
+            log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
             end_session(login_code, session_id)
 
     except Exception:
         logger.error("handle_message failed", exc_info=True)
+        
