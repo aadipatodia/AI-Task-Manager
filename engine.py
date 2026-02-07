@@ -282,7 +282,6 @@ class AddDeleteUserRequest(BaseModel):
     NAME: str
     
 async def run_gemini_extractor(prompt: str, message: str):
-
     client = Client(api_key=os.getenv("GEMINI_API_KEY"))
 
     response = client.models.generate_content(
@@ -290,13 +289,18 @@ async def run_gemini_extractor(prompt: str, message: str):
         contents=f"{prompt}\n\nUSER MESSAGE:\n{message}"
     )
 
-    text = response.text.strip()
-    
-    # If Gemini returns JSON → parse
-    if text.startswith("{"):
-        return json.loads(text)
+    text = getattr(response, "text", None)
+    if not text:
+        return None
 
-    # Otherwise → treat as user-facing follow-up question
+    text = text.strip()
+
+    if text.startswith("{"):
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return None
+
     return text
 
 def AGENT_2_POLICY(current_time: datetime.datetime) -> str:
@@ -1478,7 +1482,6 @@ Rules:
         if agent2_ready:
             end_session(login_code, session_id)
 
-        # ---------- WhatsApp output ----------
         if output and should_send_whatsapp(output):
             send_whatsapp_message(sender, output, pid)
 
