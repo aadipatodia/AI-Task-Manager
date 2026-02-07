@@ -1119,16 +1119,17 @@ def normalize_phone(phone: str) -> str:
 
 def merge_slots(session_id: str, new_slots: dict):
     history = get_session_history(session_id)
-    log_reasoning("HISTORY: ", history)
+    log_reasoning("SESSION_HISTORY_LOG", {
+        "session_id": session_id,
+        "full_history": [f"{m['role']}: {m['content']}" for m in history]
+    })
 
     # find existing slots
     existing = next(
         (msg["content"] for msg in history if msg["role"] == "slots"),
         {}
     )
-
     merged = {**existing, **new_slots}
-
     append_message(session_id, "slots", merged)
     return merged
 
@@ -1170,7 +1171,10 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         append_message(session_id, "user", command)
         log_reasoning("USER_INPUT_RECEIVED", {"sender": sender, "command": command})
         history = get_session_history(session_id)
-        log_reasoning("HISTORY: ", history)
+        log_reasoning("SESSION_HISTORY_LOG", {
+            "session_id": session_id,
+            "full_history": [f"{m['role']}: {m['content']}" for m in history]
+        })
 
         # Agent-1 / Intent Logic 
         # Logic: Only skip Agent 1 if we are awaiting a reply to a cross-question
