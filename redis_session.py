@@ -3,7 +3,7 @@ import json
 import redis
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional
-
+import logging
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -100,6 +100,9 @@ def update_agent2_state(
 def get_session_history(session_id: str) -> List[Dict]:
     raw = redis_client.lrange(f"session:{session_id}", 0, -1)
     return [json.loads(x) for x in raw]
+logging.basicConfig(level=logging.INFO)
+
+logger = logging.getLogger(__name__)
 
 def reset_session_after_api(session_key: str, session_id: str):
 
@@ -114,11 +117,18 @@ def reset_session_after_api(session_key: str, session_id: str):
     pipe.delete(f"user_active_session:{session_key}")
     pipe.execute()
 
-def end_session(session_key: str, session_id: str):
+def end_session(login_code: str, session_id: str):
     try:
-        redis_client.delete(f"session:{session_id}")
-        redis_client.delete(f"user_active_session:{session_key}")
-        redis_client.delete(f"agent2_state:{session_id}")
-    except Exception as e:
-        print(f"[REDIS] Failed to end session {session_id}: {e}")
+        session_key = f"session:{session_id}"
+        active_key = f"user_active_session:{login_code}"
+        agent2_key = f"agent2_state:{session_id}"
 
+        redis_client.delete(session_key)
+        redis_client.delete(active_key)
+        redis_client.delete(agent2_key)
+
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to end session {session_id}: {e}")
+        return False

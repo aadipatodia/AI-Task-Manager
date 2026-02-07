@@ -16,9 +16,7 @@ from redis_session import (
     get_or_create_session,
     append_message,
     get_session_history,
-    end_session,
-    get_agent2_state,
-    update_agent2_state
+    end_session
 )
 from intent_classifier import intent_classifier
 from user_resolver import resolve_user_by_phone
@@ -60,15 +58,15 @@ API_CONFIGS = {
     },
     
     "CHECK_OWNERSHIP": {
-        "url": f"{APPSAVY_BASE_URL}/GetDataJSONClient",
+        "url": f"{APPSAVY_BASE_URL}/GetDataJSONClient", # [cite: 3]
         "headers": {
-            "sid": "632",
-            "pid": "309",
-            "fid": "13598",
-            "cid": "64",
-            "uid": "TM_API",
-            "roleid": "1627",
-            "TokenKey": "d103e11f-3aff-4785-aae0-564facf33261"
+            "sid": "632",         # Session ID [cite: 5]
+            "pid": "309",         # Project ID [cite: 5]
+            "fid": "13598",       # Form ID [cite: 6]
+            "cid": "64",          # Client ID [cite: 7]
+            "uid": "TM_API",      # User ID [cite: 8]
+            "roleid": "1627",     # Role ID [cite: 9]
+            "TokenKey": "d103e11f-3aff-4785-aae0-564facf33261" # [cite: 9]
         }
     },
       
@@ -116,7 +114,7 @@ API_CONFIGS = {
         "headers": {
             "sid": "607",
             "pid": "309",
-            "fid": "10345",
+            "fid": "10345",  # Updated to match Dak Management Form ID
             "cid": "64",
             "uid": "TM_API",
             "roleid": "1627",
@@ -154,7 +152,7 @@ API_CONFIGS = {
     "GET_USERS_BY_ID": {
         "url": f"{APPSAVY_BASE_URL}/GetDataJSONClient",
         "headers": {
-            "sid": "609",
+            "sid": "609", # Verify if this SID should be different for detail lookup
             "pid": "309",
             "fid": "10344", 
             "cid": "64",
@@ -189,7 +187,7 @@ class ManagerContext(BaseModel):
 class WhatsAppPdfReportRequest(BaseModel):
     SID: str = "627"
     ASSIGNED_TO: str
-    REPORT_TYPE: str
+    REPORT_TYPE: str  # Count / Detail
     STATUS: str
     MOBILE_NUMBER: str
     FROM_DATE: str = ""
@@ -283,60 +281,23 @@ class AddDeleteUserRequest(BaseModel):
     MOBILE_NUMBER: str
     NAME: str
     
-async def run_gemini_extractor(
-    prompt: str,
-    message: str,
-    intent: Optional[str] = None
-):
-    """
-    Agent-2's extraction engine.
-    Returns:
-    - parameters: dict of extracted fields
-    - ready: True if all required fields present, False otherwise
-    - question: follow-up question if not ready, None otherwise
-    """
-    client = Client(api_key=os.getenv("GEMINI_API_KEY"))
+async def run_gemini_extractor(prompt: str, message: str):
 
-    intent_block = f"\n\nLOCKED INTENT:\n{intent}\n" if intent else ""
+    client = Client(api_key=os.getenv("GEMINI_API_KEY"))
 
     response = client.models.generate_content(
         model="gemini-2.5-pro",
-        contents=f"{prompt}{intent_block}\nUSER MESSAGE:\n{message}"
+        contents=f"{prompt}\n\nUSER MESSAGE:\n{message}"
     )
 
-    raw_text = response.text
-
-    if not raw_text:
-        return {
-            "parameters": {},
-            "ready": False,
-            "question": "I couldn't understand that. Please try again."
-        }
-
-    text = raw_text.strip()
-
-    # JSON → ready
+    text = response.text.strip()
+    log_reasoning("AGENT_2_OUTPUT", text)
+    # If Gemini returns JSON → parse
     if text.startswith("{"):
-        try:
-            data = json.loads(text)
-            return {
-                "parameters": data,
-                "ready": True,
-                "question": None
-            }
-        except Exception:
-            return {
-                "parameters": {},
-                "ready": False,
-                "question": "I couldn't understand that. Please try again."
-            }
+        return json.loads(text)
 
-    # Plain text → follow-up question
-    return {
-        "parameters": {},
-        "ready": False,
-        "question": text
-    }
+    # Otherwise → treat as user-facing follow-up question
+    return text
 
 def AGENT_2_POLICY(current_time: datetime.datetime) -> str:
     team = load_team()
@@ -378,7 +339,7 @@ IMPORTANT:
 """
 
 def load_team():
-    """Load users from MongoDB"""
+    """Ab ye function 100% dynamic hai, sirf MongoDB se users fetch karega."""
     if users_collection is None:
         logger.error("MongoDB connection cant be initialized")
         return []
@@ -493,9 +454,11 @@ async def delete_user_tool(
 
     msg = res.get("resultmessage", "").lower()
 
+    # Permission / ownership failure
     if "permission denied" in msg:
         return None
 
+    # Successful deletion
     if str(res.get("result")) == "1" or str(res.get("RESULT")) == "1":
         if users_collection is not None:
             users_collection.delete_one({"phone": "91" + mobile[-10:]})
@@ -560,7 +523,7 @@ def is_authorized(task_owner) -> bool:
     return str(task_owner).strip() != "0"
 
 async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
-    """Universal wrapper for Appsavy POST requests"""
+    """Universal wrapper for Appsavy POST requests - 100% API dependency."""
     config = API_CONFIGS[key]
     try:
         logger.info(f"Calling API {key} with payload: {payload.model_dump()}")
@@ -629,6 +592,7 @@ async def send_whatsapp_report_tool(
     try:
         team = load_team()
 
+        # Resolve target user
         if assigned_to:
             user = next(
                 (u for u in team if assigned_to == u["login_code"]),
@@ -654,6 +618,7 @@ async def send_whatsapp_report_tool(
             REFERENCE="WHATSAPP"
         )
         await call_appsavy_api("WHATSAPP_PDF_REPORT", req)
+        # Silent success
         return None
     except Exception:
         logger.error("send_whatsapp_report_tool error", exc_info=True)
@@ -806,6 +771,7 @@ def extract_multiple_assignees(text: str, team: list) -> list[str]:
 
     for member in team:
         name = member["name"].lower()
+        # enforce word boundary match
         if re.search(rf"\b{name}\b", text):
             found.append(member["name"])
 
@@ -849,6 +815,7 @@ def extract_task_id(text: str):
 def resolve_status(text: str, role: str):
     t = text.lower()
 
+    # Future / pending → Work In Progress
     if any(x in t for x in [
         "pending",
         "in progress",
@@ -858,6 +825,7 @@ def resolve_status(text: str, role: str):
     ]):
         return "Work In Progress"
 
+    # Done / completed → Close or Closed
     if any(x in t for x in [
         "done",
         "completed",
@@ -865,6 +833,7 @@ def resolve_status(text: str, role: str):
     ]):
         return "Closed" if role == "manager" else "Close"
 
+    # Reopen
     if "reopen" in t:
         return "Reopened"
 
@@ -873,8 +842,10 @@ def resolve_status(text: str, role: str):
 def extract_remark(text: str, task_id: str):
     t = text.lower()
 
+    # task id hatao
     t = re.sub(rf"task\s*{task_id}", "", t)
 
+    # status words hatao
     for w in [
         "is pending",
         "pending",
@@ -892,7 +863,7 @@ def extract_remark(text: str, task_id: str):
 
 async def assign_new_task_tool(
     ctx: ManagerContext,
-    assignee: str,
+    assignee: str,          # name OR phone
     task_name: str,
     deadline: str
 ) -> None:
@@ -917,19 +888,21 @@ async def assign_new_task_tool(
         if is_phone:
             normalized_phone = normalize_phone(digits)
 
+            # Mongo is authoritative for phone resolution
             resolved_user = next(
                 (u for u in team if normalize_phone(u.get("phone", "")) == normalized_phone),
                 None
             )
 
             if not resolved_user:
-                return None
+                return None  # silent failure by design
 
             matches = [resolved_user]
 
         else:
             name_l = assignee_raw.lower()
 
+            # ---- Fetch Appsavy directory ----
             assignee_res = await call_appsavy_api(
                 "GET_ASSIGNEE",
                 GetAssigneeRequest(
@@ -1018,12 +991,12 @@ async def assign_new_task_tool(
                 for u in final_options
             )
 
+            # clarification is allowed output
             return (
                 f"I found multiple users matching '{assignee}'.\n\n"
                 f"{options_text}\n\n"
                 "Please reply with the correct 10-digit phone number."
             )
-        
         user = matches[0]
         login_code = user["login_code"]
 
@@ -1047,7 +1020,6 @@ async def assign_new_task_tool(
                             DOCUMENT_NAME=fname
                         )
                     )
-        
         req = CreateTaskRequest(
             ASSIGNEE=login_code,
             DESCRIPTION=task_name,
@@ -1057,7 +1029,6 @@ async def assign_new_task_tool(
             DETAILS=Details(CHILD=[]),
             DOCUMENTS=Documents(CHILD=documents_child)
         )
-        
         api_response = await call_appsavy_api("CREATE_TASK", req)
         if not api_response:
             return None
@@ -1093,8 +1064,10 @@ async def update_task_status_tool(
 
     sender_mobile = ctx.sender_phone[-10:]
 
+    # ---- STATUS MAPPING (silent fallback) ----
     appsavy_status = APPSAVY_STATUS_MAP.get(status, "Closed")
 
+    # ---- FINAL PAYLOAD ----
     req = UpdateTaskRequest(
         TASK_ID=task_id,
         STATUS=appsavy_status,
@@ -1108,7 +1081,12 @@ async def update_task_status_tool(
 
     api_response = await call_appsavy_api("UPDATE_STATUS", req)
 
+    # ---- ONLY SUCCESS MESSAGES ----
     if api_response and (str(api_response.get("RESULT")) == "1" or str(api_response.get("result")) == "1"):
+        if status in ("Close", "Closed"):
+            return None
+        if status == "Reopened":
+            return None
         return None
     return None
 
@@ -1139,35 +1117,17 @@ def normalize_phone(phone: str) -> str:
         return digits
     return digits
 
-
-# ============================================================================
-# FIXED AGENT-2 FLOW
-# ============================================================================
-
 async def handle_message(command, sender, pid, message=None, full_message=None):
-    """
-     AGENT-2 ORCHESTRATOR
-    
-    Flow:
-    1. Normalize sender + authorize
-    2. Agent-1: classify intent
-       - If unclear → ask clarification (send to WhatsApp) → STOP
-       - If clear → lock intent → proceed
-    3. Agent-2 session: get/create state
-    4. Extract parameters (merge with existing state)
-       - If incomplete → ask clarification (send to WhatsApp) → STOP
-       - If complete → execute API → backend sends WhatsApp response
-    5. Clean up session after execution
-    """
     try:
-        # ========== STEP 1: NORMALIZE & AUTHORIZE ==========
+        # ---------- Normalize sender ----------
+        policy = AGENT_2_POLICY(datetime.datetime.now(IST))
+        log_reasoning("AGENT_2_POLICY_ACTIVE", policy)
         sender = normalize_phone(sender)
         trace_id = f"{sender}-{int(datetime.datetime.now().timestamp())}"
         log_reasoning("TRACE_START", trace_id)
 
-        # Media-only handling
+        # ---------- Media-only handling ----------
         if message and not command:
-            # ⚠️ CLARIFICATION NEEDED
             send_whatsapp_message(
                 sender,
                 "File received. Please provide assignee, task description, and deadline.",
@@ -1177,8 +1137,10 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         if not command:
             return
+        
+        task_completed = False
 
-        # Authorization
+        # ---------- Authorization ----------
         manager_phone = normalize_phone(os.getenv("MANAGER_PHONE", ""))
         team = load_team()
 
@@ -1187,7 +1149,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         elif any(normalize_phone(u["phone"]) == sender for u in team):
             role = "employee"
         else:
-            # ⚠️ AUTHORIZATION ERROR
             send_whatsapp_message(
                 sender,
                 "Access Denied: Your number is not authorized.",
@@ -1195,7 +1156,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
             return
 
-        # Resolve user
+        # ---------- Resolve user ----------
         user = resolve_user_by_phone(users_collection, sender)
 
         if not user and sender == manager_phone:
@@ -1206,7 +1167,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             }
 
         if not user:
-            # ⚠️ AUTHORIZATION ERROR
             send_whatsapp_message(
                 sender,
                 "Access Denied: Your number is not registered.",
@@ -1216,48 +1176,49 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         login_code = user["login_code"]
 
-        # ========== STEP 2: INTENT CLASSIFICATION (AGENT-1) ==========
+        # ---------- Redis session ----------
         session_id = get_or_create_session(login_code)
         append_message(session_id, "user", command)
+        history = get_session_history(session_id)
+        locked_intent = next(
+            (msg["content"] for msg in history if msg["role"] == "intent"),
+            None
+        )
 
-        # Get current state
-        state = get_agent2_state(session_id)
-        
-        # If no intent locked, classify now
-        if state.get("intent") is None:
+        if locked_intent:
+            is_supported = True
+            intent = locked_intent
+            log_reasoning("INTENT_RESUMED", {
+                "intent": intent,
+                "source": "redis_lock"
+            })
+        else:
             is_supported, intent, confidence, reasoning = intent_classifier(command)
-            
+
             log_reasoning("INTENT_CLASSIFIED", {
                 "intent": intent,
                 "confidence": confidence,
                 "reasoning": reasoning
             })
-            
-            # ⚠️ AGENT 1 CLARIFICATION NEEDED
-            if not is_supported or intent is None:
-                send_whatsapp_message(
-                    sender,
-                    "I couldn't understand what you want to do. Please specify:\n"
-                    "- Assign a task\n"
-                    "- Update a task\n"
-                    "- Add/delete a user\n"
-                    "- View tasks or reports",
-                    pid
-                )
-                return
-            
-            # Lock intent in state
-            update_agent2_state(session_id, intent=intent)
-            log_reasoning("INTENT_LOCKED", {
-                "intent": intent,
-                "confidence": confidence
-            })
-        else:
-            # Intent already locked
-            intent = state["intent"]
-            log_reasoning("INTENT_REUSED", {"intent": intent})
 
-        # ========== STEP 3: BUILD CONTEXT ==========
+            if is_supported and intent:
+                append_message(session_id, "intent", intent)
+
+        log_reasoning("INTENT_CLASSIFIED", {
+            "intent": intent,
+            "confidence": confidence,
+            "reasoning": reasoning
+        })
+
+        if intent is None:
+            send_whatsapp_message(
+                sender,
+                "I can help with task assignment, task updates, performance reports, "
+                "viewing tasks, and user management. Please clarify your request.",
+                pid
+                )
+            return
+
         ctx = ManagerContext(
             sender_phone=sender,
             role=role,
@@ -1265,294 +1226,279 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             document_data=message
         )
 
-        # ========== STEP 4: INTENT-SPECIFIC EXTRACTION (AGENT-2) ==========
-        
-        # ---- TASK ASSIGNMENT ----
         if intent == "TASK_ASSIGNMENT":
             extraction_prompt = f"""
 You are helping assign a task.
 
-CONVERSATION HISTORY:
-{json.dumps(get_session_history(session_id), indent=2)}
-
-CURRENT USER MESSAGE:
-"{command}"
+USER QUERY (verbatim):
+\"\"\"{command}\"\"\"
 
 Your job:
-- Review the conversation history to find any previously mentioned information
-- Extract ONLY missing values from the current message
-- If ALL required fields are present (in history OR current message) → return JSON
+- Reuse ANY information already present in the user query
+- Extract missing values ONLY if they are not clearly specified
+- If ALL required fields are present → return JSON
 - If ANY required field is missing → ask ONE clear follow-up question
 - Do NOT invent values
-- Do NOT repeat questions already answered
+- Do NOT repeat information already given
 
 Required fields:
 - assignee (name or phone)
 - task_name
-- deadline (ISO format YYYY-MM-DDTHH:MM:SS)
+- deadline (ISO format if possible)
 
 Current date: {ctx.current_time.strftime("%Y-%m-%d")}
 
-RESPONSE FORMAT:
-- If ready → return JSON: {{"assignee": "...", "task_name": "...", "deadline": "..."}}
-- If not ready → return plain text question (NO JSON, NO explanation)
+If returning JSON, use EXACTLY this format:
+{{
+  "assignee": string,
+  "task_name": string,
+  "deadline": string
+}}
 
 Rules:
-- Use information from conversation history when available
-- Ask only for what's truly missing
-- Be concise
+- Either return JSON OR a question
+- Do not explain anything else
 """
 
             result = await run_gemini_extractor(
                 prompt=extraction_prompt,
-                message=command,
-                intent=intent
+                message=command
             )
 
-            # Merge with existing parameters
-            existing = state.get("parameters", {})
-            merged = {**existing, **result["parameters"]}
-            
-            update_agent2_state(
-                session_id,
-                parameters=merged,
-                ready=result["ready"]
-            )
-
-            # AGENT 2 CLARIFICATION NEEDED
-            if not result["ready"]:
-                if result["question"]:
-                    send_whatsapp_message(sender, result["question"], pid)
+    # If Gemini asked a question → forward directly
+            if isinstance(result, str):
+                send_whatsapp_message(sender, result, pid)
                 return
 
-        # ---- UPDATE TASK STATUS ----
+    # Otherwise, assume valid structured output
+            await assign_new_task_tool(
+                ctx,
+                assignee=result["assignee"],
+                task_name=result["task_name"],
+                deadline=result["deadline"]
+            )
+            task_completed = True
+
         elif intent == "UPDATE_TASK_STATUS":
             extraction_prompt = f"""
 You are helping update a task status.
 
-CONVERSATION HISTORY:
-{json.dumps(get_session_history(session_id), indent=2)}
-
-CURRENT USER MESSAGE:
-"{command}"
+USER QUERY (verbatim):
+\"\"\"{command}\"\"\"
 
 Your job:
-- Review the conversation history
-- Extract ONLY missing values from current message
-- If ALL required fields present → return JSON
-- If ANY required field missing → ask ONE follow-up question
+- Reuse ANY information already present in the user query
+- Extract missing values ONLY if they are not clearly specified
+- If ALL required fields are present → return JSON
+- If ANY required field is missing → ask ONE clear follow-up question
 - Do NOT invent values
+- Do NOT repeat information already given
 
 Required fields:
-- task_id (numeric)
+- task_id
 - status (open / in progress / closed / reopened)
 Optional:
 - remark
 
-RESPONSE FORMAT:
-- If ready → return JSON: {{"task_id": "123", "status": "closed", "remark": "..."}}
-- If not ready → return plain text question
+If returning JSON, use EXACTLY this format:
+{{
+  "task_id": string,
+  "status": string,
+  "remark": string | null
+}}
 
 Rules:
-- Reuse history when available
-- Ask only for missing info
-- Be concise
+- Either return JSON OR a follow-up question
+- No explanations
 """
 
             result = await run_gemini_extractor(
                 extraction_prompt,
-                command,
-                intent=intent
+                command
             )
 
-            existing = state.get("parameters", {})
-            merged = {**existing, **result["parameters"]}
-            
-            update_agent2_state(
-                session_id,
-                parameters=merged,
-                ready=result["ready"]
-            )
-
-            # AGENT 2 CLARIFICATION NEEDED
-            if not result["ready"]:
-                if result["question"]:
-                    send_whatsapp_message(sender, result["question"], pid)
+    # Gemini asked a question → forward as-is
+            if isinstance(result, str):
+                send_whatsapp_message(sender, result, pid)
                 return
 
-        # ---- ADD USER ----
+    # Gemini returned structured output → execute
+            await update_task_status_tool(
+                ctx,
+                task_id=result["task_id"],
+                status=result["status"],
+                remark=result.get("remark")
+            )
+            task_completed = True
+
+        elif intent == "VIEW_EMPLOYEE_PERFORMANCE":
+            extraction_prompt = f"""
+You are helping generate a performance report.
+
+USER QUERY (verbatim):
+\"\"\"{command}\"\"\"
+
+Your job is to:
+1. Detect if the user mentioned a specific employee
+2. If no employee is mentioned → return null
+3. Do NOT invent names
+4. Do NOT explain
+
+If returning JSON, use EXACTLY this format:
+{{
+  "employee": string | null
+}}
+
+Rules:
+- Return JSON ONLY
+"""
+
+            result = await run_gemini_extractor(extraction_prompt, command)
+            await get_performance_report_tool(
+                ctx,
+                name=result.get("employee")
+            )
+
+        elif intent == "VIEW_EMPLOYEES_UNDER_MANAGER":
+            extraction_prompt = f"""
+You are helping a manager view employees added by them.
+
+USER QUERY (verbatim):
+\"\"\"{command}\"\"\"
+
+Your job:
+- Confirm this intent
+- No parameters are required
+- Do NOT ask questions
+- Do NOT invent anything
+- Return JSON ONLY
+
+Return:
+{{
+  "action": "list_users"
+}}
+"""
+            await run_gemini_extractor(extraction_prompt, command)
+            await get_task_list_tool(ctx, view="users")
+            task_completed = True
+
+        elif intent == "VIEW_PENDING_TASKS":
+            await run_gemini_extractor(
+                f"""
+You are helping a manager view employees added by them.
+
+USER QUERY (verbatim):
+\"\"\"{command}\"\"\"
+
+Your job:
+- Confirm this intent
+- No parameters are required
+- Do NOT ask questions
+- Do NOT invent anything
+- Return JSON ONLY
+
+Return:
+{{
+  "action": "list_users"
+}}
+""",
+                command
+            )
+
+            pending = await get_pending_tasks(login_code)
+            if pending:
+                output = "\n".join(pending)
+            task_completed = True
+
         elif intent == "ADD_USER":
             extraction_prompt = f"""
 You are helping add a new user.
 
-CONVERSATION HISTORY:
-{json.dumps(get_session_history(session_id), indent=2)}
-
-CURRENT USER MESSAGE:
-"{command}"
+USER QUERY (verbatim):
+\"\"\"{command}\"\"\"
 
 Your job:
-- Review conversation history
-- Extract ONLY missing values
-- If ALL required fields present → return JSON
-- If ANY required field missing → ask ONE question
+- Reuse information already present
+- Ask ONE follow-up question if something is missing
 - Do NOT invent values
 
 Required:
 - name
 - mobile (10 digits)
 Optional:
-- email (DO NOT ask if user hasn't mentioned it)
+- email
 
-RESPONSE FORMAT:
-- If ready → return JSON: {{"name": "...", "mobile": "...", "email": "..."}}
-- If not ready → return plain text question
+If returning JSON, use EXACTLY:
+{{
+  "name": string,
+  "mobile": string,
+  "email": string | null
+}}
 
 Rules:
-- Reuse history
-- Ask only for missing required fields
-- Be concise
+- Either return JSON OR a follow-up question
+- No explanations
 """
-            result = await run_gemini_extractor(extraction_prompt, command, intent=intent)
-            
-            existing = state.get("parameters", {})
-            merged = {**existing, **result["parameters"]}
-            
-            update_agent2_state(
-                session_id,
-                parameters=merged,
-                ready=result["ready"]
-            )
-            
-            # AGENT 2 CLARIFICATION NEEDED
-            if not result["ready"]:
-                if result["question"]:
-                    send_whatsapp_message(sender, result["question"], pid)
+            result = await run_gemini_extractor(extraction_prompt, command)
+
+            if isinstance(result, str):
+                send_whatsapp_message(sender, result, pid)
                 return
 
-        # ---- DELETE USER ----
+            await add_user_tool(
+                ctx,
+                name=result["name"],
+                mobile=result["mobile"],
+                email=result.get("email")
+            )
+            task_completed = True
+
         elif intent == "DELETE_USER":
             extraction_prompt = f"""
 You are helping delete a user.
 
-CONVERSATION HISTORY:
-{json.dumps(get_session_history(session_id), indent=2)}
-
-CURRENT USER MESSAGE:
-"{command}"
+USER QUERY (verbatim):
+\"\"\"{command}\"\"\"
 
 Your job:
-- Review conversation history
-- Extract ONLY missing values
-- If ALL required fields present → return JSON
-- If ANY required field missing → ask ONE question
+- Reuse information already present
+- Ask ONE follow-up question if missing
 - Do NOT invent values
 
 Required:
 - name
-- mobile (10 digits)
+- mobile
 
-RESPONSE FORMAT:
-- If ready → return JSON: {{"name": "...", "mobile": "..."}}
-- If not ready → return plain text question
+If returning JSON, use EXACTLY:
+{{
+  "name": string,
+  "mobile": string
+}}
 
 Rules:
-- Reuse history
-- Ask only for missing info
-- Be concise
+- Either return JSON OR a follow-up question
+- No explanations
 """
-            result = await run_gemini_extractor(extraction_prompt, command, intent=intent)
-            
-            existing = state.get("parameters", {})
-            merged = {**existing, **result["parameters"]}
-            
-            update_agent2_state(
-                session_id,
-                parameters=merged,
-                ready=result["ready"]
-            )
-            
-            # AGENT 2 CLARIFICATION NEEDED
-            if not result["ready"]:
-                if result["question"]:
-                    send_whatsapp_message(sender, result["question"], pid)
+            result = await run_gemini_extractor(extraction_prompt, command)
+
+            if isinstance(result, str):
+                send_whatsapp_message(sender, result, pid)
                 return
 
-        # ---- VIEW EMPLOYEE PERFORMANCE ----
-        elif intent == "VIEW_EMPLOYEE_PERFORMANCE":
-            extraction_prompt = f"""
-You are helping generate a performance report.
+            await delete_user_tool(
+                ctx,
+                name=result["name"],
+                mobile=result["mobile"],
+                email=None
+            )
+            task_completed = True
 
-USER MESSAGE:
-"{command}"
-
-Your job:
-1. Detect if user mentioned a specific employee name
-2. If no employee mentioned → return {{"employee": null}}
-3. If employee mentioned → return {{"employee": "name"}}
-4. Do NOT invent names
-5. Do NOT ask questions
-
-Return JSON ONLY.
-"""
-
-            result = await run_gemini_extractor(extraction_prompt, command, intent=intent)
-            employee = result["parameters"].get("employee")
-            
-            # Execute API - backend sends WhatsApp response
-            await get_performance_report_tool(ctx, name=employee)
-            
-            # Clean up session
+        if task_completed:
             end_session(login_code, session_id)
-            return
 
-        # ---- VIEW EMPLOYEES UNDER MANAGER ----
-        elif intent == "VIEW_EMPLOYEES_UNDER_MANAGER":
-            # Execute API - backend sends WhatsApp response
-            await get_task_list_tool(ctx, view="users")
-            end_session(login_code, session_id)
-            return
-
-        # ---- VIEW PENDING TASKS ----
-        elif intent == "VIEW_PENDING_TASKS":
-            # Execute API - backend sends WhatsApp response
-            await get_task_list_tool(ctx, view="tasks")
-            end_session(login_code, session_id)
-            return
-
-        # ========== STEP 5: EXECUTION TRIGGER ==========
-        # Re-fetch state (may have been updated)
-        state = get_agent2_state(session_id)
-
-        if state.get("ready") is True:
-            log_reasoning("EXECUTING_INTENT", {
-                "intent": state["intent"],
-                "parameters": state["parameters"]
-            })
-
-            # Execute API based on intent - backend handles WhatsApp response
-            if state["intent"] == "TASK_ASSIGNMENT":
-                await assign_new_task_tool(ctx, **state["parameters"])
-
-            elif state["intent"] == "UPDATE_TASK_STATUS":
-                await update_task_status_tool(ctx, **state["parameters"])
-
-            elif state["intent"] == "ADD_USER":
-                await add_user_tool(ctx, **state["parameters"])
-
-            elif state["intent"] == "DELETE_USER":
-                await delete_user_tool(ctx, **state["parameters"])
-
-            # Clean up session after successful execution
-            end_session(login_code, session_id)
-            log_reasoning("SESSION_ENDED", {"session_id": session_id})
-            # ✅ NO WHATSAPP MESSAGE - backend handles it
-            return
+        # ---------- WhatsApp output ----------
+        if output and should_send_whatsapp(output):
+            send_whatsapp_message(sender, output, pid)
 
     except Exception:
         logger.error("handle_message failed", exc_info=True)
-        # Clean up on error
-        try:
-            end_session(login_code, session_id)
-        except:
-            pass
