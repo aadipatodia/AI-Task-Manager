@@ -1133,10 +1133,7 @@ def merge_slots(session_id: str, new_slots: dict):
 
 async def handle_message(command, sender, pid, message=None, full_message=None):
     try:
-        # ---------- Normalize sender ----------
-        policy = AGENT_2_POLICY(datetime.datetime.now(IST))
-        log_reasoning("AGENT_2_POLICY_ACTIVE", policy)
-
+        
         sender = normalize_phone(sender)
         trace_id = f"{sender}-{int(datetime.datetime.now().timestamp())}"
         log_reasoning("TRACE_START", trace_id)
