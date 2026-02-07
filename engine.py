@@ -1382,12 +1382,26 @@ Rules:
             )
 
         # ---------- Handle Agent 2 Response ----------
+        # ---------- Handle Agent 2 Response ----------
+        # Logic: If it's a string, check if it's actually JSON in a string wrapper
         if isinstance(result, str):
-            # Agent 2 produced a question. Mark as clarification for next message bypass.
-            log_reasoning("AGENT_2_CLARIFICATION_SENT", {"agent_msg": result})
-            append_message(session_id, "assistant", f"[CLARIFY] {result}") 
-            send_whatsapp_message(sender, result, pid)
-            return
+            cleaned_result = result.strip().replace("```json", "").replace("```", "").strip()
+            
+            try:
+                # Try to parse it. If it works, it's NOT a clarification, it's DATA.
+                result = json.loads(cleaned_result)
+                log_reasoning("AGENT_2_JSON_PARSED", {"source": "string_cleaned"})
+            except json.JSONDecodeError:
+                # If parsing fails, it's definitely a question/clarification for the user.
+                log_reasoning("AGENT_2_CLARIFICATION_SENT", {"agent_msg": result})
+                append_message(session_id, "assistant", f"[CLARIFY] {result}") 
+                send_whatsapp_message(sender, result, pid)
+                return
+
+        # Agent 2 produced JSON (either directly or after parsing above)
+        merged_data = merge_slots(session_id, result)
+        log_reasoning("AGENT_2_FLAG_TRUE", {"parameters_extracted": merged_data})
+        append_message(session_id, "slots", merged_data)
 
         # Agent 2 produced JSON (the "Flag" is now set to true)
         merged_data = merge_slots(session_id, result)
