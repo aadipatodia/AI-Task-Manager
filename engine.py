@@ -1117,6 +1117,20 @@ def normalize_phone(phone: str) -> str:
         return digits
     return digits
 
+def merge_slots(session_id: str, new_slots: dict):
+    history = get_session_history(session_id)
+
+    # find existing slots
+    existing = next(
+        (msg["content"] for msg in history if msg["role"] == "slots"),
+        {}
+    )
+
+    merged = {**existing, **new_slots}
+
+    append_message(session_id, "slots", merged)
+    return merged
+
 async def handle_message(command, sender, pid, message=None, full_message=None):
     try:
         # ---------- Normalize sender ----------
@@ -1180,6 +1194,10 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         append_message(session_id, "user", command)
 
         history = get_session_history(session_id)
+        slots = next(
+            (msg["content"] for msg in history if msg["role"] == "slots"),
+            {}
+        )
         locked_intent = next(
             (msg["content"] for msg in history if msg["role"] == "intent"),
             None        
@@ -1224,8 +1242,11 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             extraction_prompt = f"""
 You are helping assign a task.
 
+KNOWN INFORMATION (do NOT ask again):
+{json.dumps(slots, indent=2)}
+
 USER QUERY (verbatim):
-\"\"\"{command}\"\"\"
+"{command}"
 
 Your job:
 - Reuse ANY information already present in the user query
@@ -1258,13 +1279,18 @@ Rules:
                 prompt=extraction_prompt,
                 message=command
             )
+            if isinstance(result, dict):
+                result = merge_slots(session_id, result)
 
     # If Gemini asked a question → forward directly
             if isinstance(result, str):
                 send_whatsapp_message(sender, result, pid)
                 return
-
-    # Otherwise, assume valid structured output
+            
+            required = ("assignee", "task_name", "deadline")
+            if not all(k in result for k in required):
+                return
+    
             await assign_new_task_tool(
                 ctx,
                 assignee=result["assignee"],
@@ -1277,8 +1303,11 @@ Rules:
             extraction_prompt = f"""
 You are helping update a task status.
 
+KNOWN INFORMATION (do NOT ask again):
+{json.dumps(slots, indent=2)}
+
 USER QUERY (verbatim):
-\"\"\"{command}\"\"\"
+"{command}"
 
 Your job:
 - Reuse ANY information already present in the user query
@@ -1310,6 +1339,8 @@ Rules:
                 extraction_prompt,
                 command
             )
+            if isinstance(result, dict):
+                result = merge_slots(session_id, result)
 
     # Gemini asked a question → forward as-is
             if isinstance(result, str):
@@ -1317,6 +1348,10 @@ Rules:
                 return
 
     # Gemini returned structured output → execute
+            
+            required = ("task_id", "status")
+            if not all(k in result for k in required):
+                return
             await update_task_status_tool(
                 ctx,
                 task_id=result["task_id"],
@@ -1329,8 +1364,11 @@ Rules:
             extraction_prompt = f"""
 You are helping generate a performance report.
 
+KNOWN INFORMATION (do NOT ask again):
+{json.dumps(slots, indent=2)}
+
 USER QUERY (verbatim):
-\"\"\"{command}\"\"\"
+"{command}"
 
 Your job is to:
 1. Detect if the user mentioned a specific employee
@@ -1352,13 +1390,18 @@ Rules:
                 ctx,
                 name=result.get("employee")
             )
+            if isinstance(result, dict):
+                result = merge_slots(session_id, result)
 
         elif intent == "VIEW_EMPLOYEES_UNDER_MANAGER":
             extraction_prompt = f"""
 You are helping a manager view employees added by them.
 
+KNOWN INFORMATION (do NOT ask again):
+{json.dumps(slots, indent=2)}
+
 USER QUERY (verbatim):
-\"\"\"{command}\"\"\"
+"{command}"
 
 Your job:
 - Confirm this intent
@@ -1381,8 +1424,11 @@ Return:
                 f"""
 You are helping a manager view employees added by them.
 
+KNOWN INFORMATION (do NOT ask again):
+{json.dumps(slots, indent=2)}
+
 USER QUERY (verbatim):
-\"\"\"{command}\"\"\"
+"{command}"
 
 Your job:
 - Confirm this intent
@@ -1408,8 +1454,11 @@ Return:
             extraction_prompt = f"""
 You are helping add a new user.
 
+KNOWN INFORMATION (do NOT ask again):
+{json.dumps(slots, indent=2)}
+
 USER QUERY (verbatim):
-\"\"\"{command}\"\"\"
+"{command}"
 
 Your job:
 - Reuse information already present
@@ -1434,9 +1483,15 @@ Rules:
 - No explanations
 """
             result = await run_gemini_extractor(extraction_prompt, command)
+            if isinstance(result, dict):
+                result = merge_slots(session_id, result)
 
             if isinstance(result, str):
                 send_whatsapp_message(sender, result, pid)
+                return
+            
+            required = ("name", "mobile")
+            if not all(k in result for k in required):
                 return
 
             await add_user_tool(
@@ -1451,8 +1506,11 @@ Rules:
             extraction_prompt = f"""
 You are helping delete a user.
 
+KNOWN INFORMATION (do NOT ask again):
+{json.dumps(slots, indent=2)}
+
 USER QUERY (verbatim):
-\"\"\"{command}\"\"\"
+"{command}"
 
 Your job:
 - Reuse information already present
@@ -1474,9 +1532,15 @@ Rules:
 - No explanations
 """
             result = await run_gemini_extractor(extraction_prompt, command)
-
+            if isinstance(result, dict):
+                result = merge_slots(session_id, result)
+                
             if isinstance(result, str):
                 send_whatsapp_message(sender, result, pid)
+                return
+            
+            required = ("name", "mobile")
+            if not all(k in result for k in required):
                 return
 
             await delete_user_tool(
