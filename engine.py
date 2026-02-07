@@ -283,8 +283,11 @@ class AddDeleteUserRequest(BaseModel):
     MOBILE_NUMBER: str
     NAME: str
     
-async def run_gemini_extractor(prompt: str, message: str,intent: Optional[str] = None):
-
+async def run_gemini_extractor(
+    prompt: str,
+    message: str,
+    intent: Optional[str] = None
+):
     client = Client(api_key=os.getenv("GEMINI_API_KEY"))
 
     intent_block = f"\n\nLOCKED INTENT:\n{intent}\n" if intent else ""
@@ -294,17 +297,35 @@ async def run_gemini_extractor(prompt: str, message: str,intent: Optional[str] =
         contents=f"{prompt}{intent_block}\nUSER MESSAGE:\n{message}"
     )
 
-    text = response.text.strip()
+    raw_text = response.text
 
-    # If Gemini returns JSON → parse
-    if text.startswith("{"):
-        data = json.loads(text)
+    # 🔒 CRITICAL GUARD
+    if not raw_text:
         return {
-            "parameters": data,
-            "ready": True,
+            "parameters": {},
+            "ready": False,
             "question": None
         }
 
+    text = raw_text.strip()
+
+    # JSON → ready
+    if text.startswith("{"):
+        try:
+            data = json.loads(text)
+            return {
+                "parameters": data,
+                "ready": True,
+                "question": None
+            }
+        except Exception:
+            return {
+                "parameters": {},
+                "ready": False,
+                "question": "I couldn’t understand that. Please try again."
+            }
+
+    # Plain text → follow-up question
     return {
         "parameters": {},
         "ready": False,
