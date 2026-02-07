@@ -1180,11 +1180,23 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         # Logic: Only skip Agent 1 if we are awaiting a reply to a cross-question
         last_assistant_msg = next((m for m in reversed(history) if m["role"] == "assistant"), None)
         is_cross_questioning = last_assistant_msg and "[CLARIFY]" in last_assistant_msg["content"]
+        log_reasoning("LAST_ASSISTED_MESSAGE: ", {
+            "last_assisted_msg": last_assistant_msg
+        })
+        log_reasoning("CROSS_QUESTIONING: ", {
+            "is_cross_questioning": is_cross_questioning
+        })
         
         existing_intent = next(
             (m["content"].replace("INTENT_SET: ", "") 
              for m in reversed(history) 
              if m["role"] == "system" and "INTENT_SET:" in m["content"]), 
+            log_reasoning("LAST_ASSISTED_MESSAGE: ", {
+                "last_assisted_msg": last_assistant_msg
+            })
+            log_reasoning("CROSS_QUESTIONING: ", {
+                "is_cross_questioning": is_cross_questioning
+            })
             None
         )
 
@@ -1193,6 +1205,12 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             intent = existing_intent
             is_supported = True
             log_reasoning("AGENT_2_RESUME", {"intent": intent, "reason": "Reply to [CLARIFY]"})
+            log_reasoning("LAST_ASSISTED_MESSAGE: ", {
+                "last_assisted_msg": last_assistant_msg
+            })
+            log_reasoning("CROSS_QUESTIONING: ", {
+                "is_cross_questioning": is_cross_questioning
+            })
         else:
             is_supported, intent, confidence, reasoning = intent_classifier(command)
             if is_supported and intent:
