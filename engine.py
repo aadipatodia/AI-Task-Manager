@@ -282,7 +282,6 @@ class AddDeleteUserRequest(BaseModel):
     NAME: str
     
 async def run_gemini_extractor(prompt: str, message: str):
-
     client = Client(api_key=os.getenv("GEMINI_API_KEY"))
 
     response = client.models.generate_content(
@@ -290,13 +289,38 @@ async def run_gemini_extractor(prompt: str, message: str):
         contents=f"{prompt}\n\nUSER MESSAGE:\n{message}"
     )
 
-    text = response.text.strip()
-    
-    # If Gemini returns JSON → parse
-    if text.startswith("{"):
-        return json.loads(text)
+    # ---------- SAFE TEXT EXTRACTION ----------
+    text = None
 
-    # Otherwise → treat as user-facing follow-up question
+    # Preferred: response.text (only if present)
+    if hasattr(response, "text") and response.text:
+        text = response.text
+
+    # Fallback: dig into candidates
+    elif hasattr(response, "candidates"):
+        for c in response.candidates or []:
+            for part in getattr(c.content, "parts", []):
+                if hasattr(part, "text") and part.text:
+                    text = part.text
+                    break
+            if text:
+                break
+
+    # Absolute fallback
+    if not text:
+        logger.error("Gemini returned no usable text")
+        return "I need a bit more information to proceed."
+
+    text = text.strip()
+
+    # ---------- JSON HANDLING ----------
+    if text.startswith("{"):
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            logger.error("Gemini returned invalid JSON")
+            return "I couldn’t understand that. Please rephrase."
+
     return text
 
 def AGENT_2_POLICY(current_time: datetime.datetime) -> str:
