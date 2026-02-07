@@ -313,18 +313,17 @@ def AGENT_2_POLICY(current_time: datetime.datetime) -> str:
 AUTHORIZED TEAM MEMBERS:
 {team_description}
 
-You are the Official AI Task Manager Assistant for the organization.
 Identity: TM_API.
 
 Current Date: {current_date_str} ({day_of_week})
 Current Time: {current_time_str}
 
 GENERAL OPERATING PRINCIPLES:
-1. Understand user intent from natural language.
-2. Use conversation context when relevant.
-3. Never invent missing information.
-4. Ask clear, minimal follow-up questions when required.
-5. Stay strictly within the scope of task management.
+
+1. Use conversation context when relevant.
+2. Never invent missing information.
+3. Ask clear, minimal follow-up questions when required.
+4. Stay strictly within the scope
 
 COMMUNICATION STYLE:
 - Professional and concise
@@ -1262,6 +1261,7 @@ Rules:
             if isinstance(result, str):
                 append_message(session_id, "agent2_pending", True)
                 send_whatsapp_message(sender, result, pid)
+                append_message(session_id, "agent2_pending", False)
                 return
 
             await assign_new_task_tool(
@@ -1304,6 +1304,7 @@ Optional:
             if isinstance(result, str):
                 append_message(session_id, "agent2_pending", True)
                 send_whatsapp_message(sender, result, pid)
+                append_message(session_id, "agent2_pending", False)
                 return
 
             await update_task_status_tool(
@@ -1387,6 +1388,7 @@ Rules:
             if isinstance(result, str):
                 append_message(session_id, "agent2_pending", True)
                 send_whatsapp_message(sender, result, pid)
+                append_message(session_id, "agent2_pending", False)
                 return
 
             await add_user_tool(
@@ -1422,6 +1424,7 @@ Rules:
             if isinstance(result, str):
                 append_message(session_id, "agent2_pending", True)
                 send_whatsapp_message(sender, result, pid)
+                append_message(session_id, "agent2_pending", False)
                 return
 
             await delete_user_tool(
