@@ -254,12 +254,13 @@ class UploadDocument(BaseModel):
     BASE64: str = ""
 
 class UpdateTaskRequest(BaseModel):
-    SID: str = "607"
-    TASK_ID: str
-    STATUS: str
-    COMMENTS: str
-    UPLOAD_DOCUMENT: UploadDocument
-    WHATSAPP_MOBILE_NUMBER: str
+    SID: str = "607"  
+    TASK_ID: str 
+    STATUS: str  
+    COMMENTS: str  
+    UPLOAD_DOCUMENT: str = ""  
+    BASE64: str = "" 
+    WHATSAPP_MOBILE_NUMBER: str 
 
 class GetCountRequest(BaseModel):
     Event: str = "107567"
@@ -1032,10 +1033,11 @@ APPSAVY_STATUS_MAP = {
 async def update_task_status_tool(
     ctx: ManagerContext,
     task_id: str,
-    status: str, # Directly received from Gemini extractor
+    status: str,  # Status from Gemini 
     remark: Optional[str] = None
 ) -> None:
     
+    # Mapping to ensure API-compatible strings 
     APPSAVY_VALUE_MAP = {
         "Open": "Open",
         "Work In Progress": "Work In Progress",
@@ -1043,33 +1045,19 @@ async def update_task_status_tool(
         "Reopen": "Reopen" 
     }
 
-    target_status = APPSAVY_VALUE_MAP.get(status.title(),status)
+    # Normalize input and map to target status 
+    target_status = APPSAVY_VALUE_MAP.get(status.title(), "Closed")
 
+    # Create FLAT request object as per source 38
     req = UpdateTaskRequest(
-        PARAMETERS={
-            "SID": {"VALUE": "607"}, # [cite: 26, 34]
-            "TASK_ID": {"VALUE": str(task_id)}, # [cite: 30, 35]
-            "STATUS": {"VALUE": target_status}, # [cite: 29, 35]
-            "COMMENTS": {"VALUE": remark or "Updated via AI"}, # [cite: 27, 34]
-            "UPLOAD_DOCUMENT": {
-                "VALUE": "", # [cite: 31, 36]
-                "BASE64": "" # [cite: 33, 36]
-            },
-            "WHATSAPP_MOBILE_NUMBER": {"VALUE": ctx.sender_phone[-10:]}
-        }
+        SID="607", 
+        TASK_ID=str(task_id),  
+        STATUS=target_status, 
+        COMMENTS=remark or "Updated via AI Assistant", 
+        WHATSAPP_MOBILE_NUMBER=ctx.sender_phone[-10:] 
     )
 
-    log_reasoning("UPDATE_TASK_STATUS_START", {
-        "task_id": task_id,
-        "mapped_status": target_status,
-        "raw_status": status
-    })
-
-    api_response = await call_appsavy_api("UPDATE_STATUS", req)
-
-    if api_response and (str(api_response.get("RESULT")) == "1" or str(api_response.get("result")) == "1"):
-        return None
-    return None
+    await call_appsavy_api("UPDATE_STATUS", req)
 
 def should_send_whatsapp(text: str) -> bool:
 
