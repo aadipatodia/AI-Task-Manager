@@ -1120,8 +1120,9 @@ def normalize_phone(phone: str) -> str:
 async def handle_message(command, sender, pid, message=None, full_message=None):
     try:
         agent2_complete = False
-        policy = AGENT_2_POLICY(datetime.datetime.now(IST))
-        log_reasoning("AGENT_2_POLICY_ACTIVE", policy)
+        output = None
+
+        # ---------- Normalize sender ----------
         sender = normalize_phone(sender)
         trace_id = f"{sender}-{int(datetime.datetime.now().timestamp())}"
         log_reasoning("TRACE_START", trace_id)
@@ -1179,18 +1180,29 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         append_message(session_id, "user", command)
 
         history = get_session_history(session_id)
+
+        # ---------- Detect Agent-2 pending ----------
+        agent2_pending = any(
+            h.get("agent2_pending") is True
+            for h in reversed(history)
+        )
+
         stored_intent = next(
             (h.get("intent") for h in reversed(history) if h.get("intent")),
             None
         )
 
-        if stored_intent:
+        # ---------- Intent resolution ----------
+        if agent2_pending and stored_intent:
             intent = stored_intent
             is_supported = True
             confidence = 1.0
-            reasoning = "Continuation from Redis session"
+            reasoning = "Agent-2 continuation"
         else:
             is_supported, intent, confidence, reasoning = intent_classifier(command)
+
+            if is_supported and intent:
+                append_message(session_id, "intent", intent)
 
         log_reasoning("INTENT_CLASSIFIED", {
             "intent": intent,
@@ -1207,6 +1219,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             )
             return
 
+        # ---------- Context ----------
         ctx = ManagerContext(
             sender_phone=sender,
             role=role,
@@ -1214,6 +1227,11 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             document_data=message
         )
 
+        # ---------- Agent-2 policy (ONLY here) ----------
+        policy = AGENT_2_POLICY(ctx.current_time)
+        log_reasoning("AGENT_2_POLICY_ACTIVE", policy)
+
+        # ================= TASK ASSIGNMENT =================
         if intent == "TASK_ASSIGNMENT":
             extraction_prompt = f"""
 You are helping assign a task.
@@ -1247,19 +1265,16 @@ Rules:
 - Either return JSON OR a question
 - Do not explain anything else
 """
-
             result = await run_gemini_extractor(
                 prompt=extraction_prompt,
                 message=command
             )
 
-    # If Gemini asked a question → forward directly
             if isinstance(result, str):
+                append_message(session_id, "agent2_pending", True)
                 send_whatsapp_message(sender, result, pid)
-                agent2_complete = False
                 return
 
-    # Otherwise, assume valid structured output
             await assign_new_task_tool(
                 ctx,
                 assignee=result["assignee"],
@@ -1268,6 +1283,7 @@ Rules:
             )
             agent2_complete = True
 
+        # ================= UPDATE TASK STATUS =================
         elif intent == "UPDATE_TASK_STATUS":
             extraction_prompt = f"""
 You are helping update a task status.
@@ -1300,15 +1316,14 @@ Rules:
 - Either return JSON OR a follow-up question
 - No explanations
 """
-
             result = await run_gemini_extractor(
                 extraction_prompt,
                 command
             )
 
             if isinstance(result, str):
+                append_message(session_id, "agent2_pending", True)
                 send_whatsapp_message(sender, result, pid)
-                agent2_complete = False
                 return
 
             await update_task_status_tool(
@@ -1319,6 +1334,7 @@ Rules:
             )
             agent2_complete = True
 
+        # ================= VIEW PERFORMANCE =================
         elif intent == "VIEW_EMPLOYEE_PERFORMANCE":
             extraction_prompt = f"""
 You are helping generate a performance report.
@@ -1340,13 +1356,11 @@ If returning JSON, use EXACTLY this format:
 Rules:
 - Return JSON ONLY
 """
-
             result = await run_gemini_extractor(extraction_prompt, command)
-            await get_performance_report_tool(
-                ctx,
-                name=result.get("employee")
-            )
+            await get_performance_report_tool(ctx, name=result.get("employee"))
+            agent2_complete = True
 
+        # ================= VIEW USERS =================
         elif intent == "VIEW_EMPLOYEES_UNDER_MANAGER":
             extraction_prompt = f"""
 You are helping a manager view employees added by them.
@@ -1368,34 +1382,16 @@ Return:
 """
             await run_gemini_extractor(extraction_prompt, command)
             await get_task_list_tool(ctx, view="users")
+            agent2_complete = True
 
+        # ================= VIEW PENDING TASKS =================
         elif intent == "VIEW_PENDING_TASKS":
-            await run_gemini_extractor(
-                f"""
-You are helping a manager view employees added by them.
-
-USER QUERY (verbatim):
-\"\"\"{command}\"\"\"
-
-Your job:
-- Confirm this intent
-- No parameters are required
-- Do NOT ask questions
-- Do NOT invent anything
-- Return JSON ONLY
-
-Return:
-{{
-  "action": "list_users"
-}}
-""",
-                command
-            )
-
             pending = await get_pending_tasks(login_code)
             if pending:
                 output = "\n".join(pending)
+            agent2_complete = True
 
+        # ================= ADD USER =================
         elif intent == "ADD_USER":
             extraction_prompt = f"""
 You are helping add a new user.
@@ -1428,8 +1424,8 @@ Rules:
             result = await run_gemini_extractor(extraction_prompt, command)
 
             if isinstance(result, str):
+                append_message(session_id, "agent2_pending", True)
                 send_whatsapp_message(sender, result, pid)
-                agent2_complete = False
                 return
 
             await add_user_tool(
@@ -1440,6 +1436,7 @@ Rules:
             )
             agent2_complete = True
 
+        # ================= DELETE USER =================
         elif intent == "DELETE_USER":
             extraction_prompt = f"""
 You are helping delete a user.
@@ -1469,8 +1466,8 @@ Rules:
             result = await run_gemini_extractor(extraction_prompt, command)
 
             if isinstance(result, str):
+                append_message(session_id, "agent2_pending", True)
                 send_whatsapp_message(sender, result, pid)
-                agent2_complete = False
                 return
 
             await delete_user_tool(
@@ -1481,7 +1478,9 @@ Rules:
             )
             agent2_complete = True
 
+        # ---------- End session ----------
         if agent2_complete:
+            append_message(session_id, "agent2_pending", False)
             end_session(login_code, session_id)
 
         # ---------- WhatsApp output ----------
