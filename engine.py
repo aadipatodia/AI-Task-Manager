@@ -1230,8 +1230,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             current_time=datetime.datetime.now(IST),
             document_data=message
         )
-
-        # Direct Tools (Agent 1 Only)
+        
         # Direct Tools (Agent 1 Only)
         if not agent2_required:
             try:
@@ -1268,6 +1267,14 @@ KNOWN INFORMATION (do NOT ask again):
 
 USER QUERY (verbatim):
 "{command}"
+
+Current Date: {ctx.current_time.strftime("%Y-%m-%d")}
+Current Time: {ctx.current_time.strftime("%I:%M %p")}
+
+RULES:
+- Convert relative deadlines (e.g., "in 4 hours", "tomorrow", "by EOD") into absolute ISO 8601 format.
+- "EOD" should be treated as 18:00 (6:00 PM) of the current day.
+- Ensure the 'deadline' string is strictly a valid ISO format.
 
 Your job:
 - Reuse ANY information already present in the user query
@@ -1307,6 +1314,14 @@ KNOWN INFORMATION (do NOT ask again):
 
 USER QUERY (verbatim):
 "{command}"
+
+Current Date: {ctx.current_time.strftime("%Y-%m-%d")}
+Current Time: {ctx.current_time.strftime("%I:%M %p")}
+
+RULES:
+- Convert relative deadlines (e.g., "in 4 hours", "tomorrow", "by EOD") into absolute ISO 8601 format.
+- "EOD" should be treated as 18:00 (6:00 PM) of the current day.
+- Ensure the 'deadline' string is strictly a valid ISO format.
 
 Your job:
 - Reuse ANY information already present in the user query
