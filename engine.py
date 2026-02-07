@@ -1181,12 +1181,12 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         history = get_session_history(session_id)
         agent2_pending = any(
-            h.get("agent2_pending") is True
+            h.get("role") == "agent2_pending" and h.get("content") is True
             for h in reversed(history)
-        )
+            )
 
         stored_intent = next(
-            (h.get("intent") for h in reversed(history) if h.get("intent")),
+            (h.get("content") for h in reversed(history) if h.get("role") == "intent"),
             None
         )
 
