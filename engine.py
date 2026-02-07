@@ -378,7 +378,7 @@ async def add_user_tool(
 
     res = await call_appsavy_api("ADD_DELETE_USER", req)
     if not isinstance(res, dict):
-        return f"Failed to add user: {res}"
+        return 
     
     msg = res.get("resultmessage", "")
     login_code = None
@@ -1376,7 +1376,7 @@ Required:
 - name
 - mobile (10 digits)
 Optional:
-- email
+- email (do not ask for emil if not provided by user)
 
 Rules:
 - Either return nothing OR a follow-up question
