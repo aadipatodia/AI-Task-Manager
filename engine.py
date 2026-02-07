@@ -280,7 +280,7 @@ class AddDeleteUserRequest(BaseModel):
     EMAIL: Optional[str] = ""
     MOBILE_NUMBER: str
     NAME: str
-    
+
 async def run_gemini_extractor(prompt: str, message: str):
     client = Client(api_key=os.getenv("GEMINI_API_KEY"))
 
@@ -289,37 +289,43 @@ async def run_gemini_extractor(prompt: str, message: str):
         contents=f"{prompt}\n\nUSER MESSAGE:\n{message}"
     )
 
-    # ---------- SAFE TEXT EXTRACTION ----------
     text = None
 
-    # Preferred: response.text (only if present)
+    # Preferred path
     if hasattr(response, "text") and response.text:
         text = response.text
 
-    # Fallback: dig into candidates
+    # Safe fallback
     elif hasattr(response, "candidates"):
         for c in response.candidates or []:
-            for part in getattr(c.content, "parts", []):
+            content = getattr(c, "content", None)
+            if not content:
+                continue
+
+            parts = getattr(content, "parts", None)
+            if not parts:
+                continue
+
+            for part in parts:
                 if hasattr(part, "text") and part.text:
                     text = part.text
                     break
+
             if text:
                 break
 
-    # Absolute fallback
     if not text:
         logger.error("Gemini returned no usable text")
-        return "I need a bit more information to proceed."
+        return None
 
     text = text.strip()
 
-    # ---------- JSON HANDLING ----------
     if text.startswith("{"):
         try:
             return json.loads(text)
         except json.JSONDecodeError:
             logger.error("Gemini returned invalid JSON")
-            return "I couldn’t understand that. Please rephrase."
+            return None
 
     return text
 
