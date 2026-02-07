@@ -291,7 +291,7 @@ async def run_gemini_extractor(prompt: str, message: str):
     )
 
     text = response.text.strip()
-    log_reasoning("AGENT_2_OUTPUT", text)
+    
     # If Gemini returns JSON → parse
     if text.startswith("{"):
         return json.loads(text)
@@ -1119,7 +1119,7 @@ def normalize_phone(phone: str) -> str:
 
 async def handle_message(command, sender, pid, message=None, full_message=None):
     try:
-        # ---------- Normalize sender ----------
+        agent2_complete = False
         policy = AGENT_2_POLICY(datetime.datetime.now(IST))
         log_reasoning("AGENT_2_POLICY_ACTIVE", policy)
         sender = normalize_phone(sender)
@@ -1178,7 +1178,15 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         session_id = get_or_create_session(login_code)
         append_message(session_id, "user", command)
 
-        is_supported, intent, confidence, reasoning = intent_classifier(command)
+        history = get_session_history(session_id)
+        if len(history) > 1:
+            intent = history[-2].get("intent")
+            is_supported = True
+            confidence = 1.0
+            reasoning = "Continuation from Redis session"
+        else:
+            is_supported, intent, confidence, reasoning = intent_classifier(command)
+            append_message(session_id, "intent", intent)
 
         log_reasoning("INTENT_CLASSIFIED", {
             "intent": intent,
@@ -1244,6 +1252,7 @@ Rules:
     # If Gemini asked a question → forward directly
             if isinstance(result, str):
                 send_whatsapp_message(sender, result, pid)
+                agent2_complete = False
                 return
 
     # Otherwise, assume valid structured output
@@ -1253,6 +1262,7 @@ Rules:
                 task_name=result["task_name"],
                 deadline=result["deadline"]
             )
+            agent2_complete = True
 
         elif intent == "UPDATE_TASK_STATUS":
             extraction_prompt = f"""
@@ -1292,18 +1302,18 @@ Rules:
                 command
             )
 
-    # Gemini asked a question → forward as-is
             if isinstance(result, str):
                 send_whatsapp_message(sender, result, pid)
+                agent2_complete = False
                 return
 
-    # Gemini returned structured output → execute
             await update_task_status_tool(
                 ctx,
                 task_id=result["task_id"],
                 status=result["status"],
                 remark=result.get("remark")
             )
+            agent2_complete = True
 
         elif intent == "VIEW_EMPLOYEE_PERFORMANCE":
             extraction_prompt = f"""
@@ -1415,6 +1425,7 @@ Rules:
 
             if isinstance(result, str):
                 send_whatsapp_message(sender, result, pid)
+                agent2_complete = False
                 return
 
             await add_user_tool(
@@ -1423,6 +1434,7 @@ Rules:
                 mobile=result["mobile"],
                 email=result.get("email")
             )
+            agent2_complete = True
 
         elif intent == "DELETE_USER":
             extraction_prompt = f"""
@@ -1454,6 +1466,7 @@ Rules:
 
             if isinstance(result, str):
                 send_whatsapp_message(sender, result, pid)
+                agent2_complete = False
                 return
 
             await delete_user_tool(
@@ -1462,9 +1475,10 @@ Rules:
                 mobile=result["mobile"],
                 email=None
             )
+            agent2_complete = True
 
-        # ---------- End session ----------
-        end_session(login_code, session_id)
+        if agent2_complete:
+            end_session(login_code, session_id)
 
         # ---------- WhatsApp output ----------
         if output and should_send_whatsapp(output):
