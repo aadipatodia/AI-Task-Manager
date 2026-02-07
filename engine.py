@@ -1231,7 +1231,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         policy = AGENT_2_POLICY(ctx.current_time)
         log_reasoning("AGENT_2_POLICY_ACTIVE", policy)
 
-        # ================= TASK ASSIGNMENT =================
         if intent == "TASK_ASSIGNMENT":
             extraction_prompt = f"""
 You are helping assign a task.
@@ -1253,13 +1252,6 @@ Required fields:
 - deadline (ISO format if possible)
 
 Current date: {ctx.current_time.strftime("%Y-%m-%d")}
-
-If returning JSON, use EXACTLY this format:
-{{
-  "assignee": string,
-  "task_name": string,
-  "deadline": string
-}}
 
 Rules:
 - Either return JSON OR a question
@@ -1305,15 +1297,6 @@ Required fields:
 Optional:
 - remark
 
-If returning JSON, use EXACTLY this format:
-{{
-  "task_id": string,
-  "status": string,
-  "remark": string | null
-}}
-
-Rules:
-- Either return JSON OR a follow-up question
 - No explanations
 """
             result = await run_gemini_extractor(
@@ -1348,11 +1331,6 @@ Your job is to:
 3. Do NOT invent names
 4. Do NOT explain
 
-If returning JSON, use EXACTLY this format:
-{{
-  "employee": string | null
-}}
-
 Rules:
 - Return JSON ONLY
 """
@@ -1360,7 +1338,6 @@ Rules:
             await get_performance_report_tool(ctx, name=result.get("employee"))
             agent2_complete = True
 
-        # ================= VIEW USERS =================
         elif intent == "VIEW_EMPLOYEES_UNDER_MANAGER":
             extraction_prompt = f"""
 You are helping a manager view employees added by them.
@@ -1375,23 +1352,17 @@ Your job:
 - Do NOT invent anything
 - Return JSON ONLY
 
-Return:
-{{
-  "action": "list_users"
-}}
 """
             await run_gemini_extractor(extraction_prompt, command)
             await get_task_list_tool(ctx, view="users")
             agent2_complete = True
 
-        # ================= VIEW PENDING TASKS =================
         elif intent == "VIEW_PENDING_TASKS":
             pending = await get_pending_tasks(login_code)
             if pending:
                 output = "\n".join(pending)
             agent2_complete = True
 
-        # ================= ADD USER =================
         elif intent == "ADD_USER":
             extraction_prompt = f"""
 You are helping add a new user.
@@ -1410,15 +1381,8 @@ Required:
 Optional:
 - email
 
-If returning JSON, use EXACTLY:
-{{
-  "name": string,
-  "mobile": string,
-  "email": string | null
-}}
-
 Rules:
-- Either return JSON OR a follow-up question
+- Either return nothing OR a follow-up question
 - No explanations
 """
             result = await run_gemini_extractor(extraction_prompt, command)
@@ -1435,8 +1399,7 @@ Rules:
                 email=result.get("email")
             )
             agent2_complete = True
-
-        # ================= DELETE USER =================
+            
         elif intent == "DELETE_USER":
             extraction_prompt = f"""
 You are helping delete a user.
@@ -1453,14 +1416,8 @@ Required:
 - name
 - mobile
 
-If returning JSON, use EXACTLY:
-{{
-  "name": string,
-  "mobile": string
-}}
-
 Rules:
-- Either return JSON OR a follow-up question
+- Either return nothing OR a follow-up question
 - No explanations
 """
             result = await run_gemini_extractor(extraction_prompt, command)
