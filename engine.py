@@ -1032,41 +1032,42 @@ APPSAVY_STATUS_MAP = {
 async def update_task_status_tool(
     ctx: ManagerContext,
     task_id: str,
-    status: str,
+    status: str, # Directly received from Gemini extractor
     remark: Optional[str] = None
 ) -> None:
     
+    APPSAVY_VALUE_MAP = {
+        "Open": "Open",
+        "Work In Progress": "Work In Progress",
+        "Closed": "Closed",
+        "Reopen": "Reopen" 
+    }
+
+    target_status = APPSAVY_VALUE_MAP.get(status.title(),status)
+
+    req = UpdateTaskRequest(
+        PARAMETERS={
+            "SID": {"VALUE": "607"}, # [cite: 26, 34]
+            "TASK_ID": {"VALUE": str(task_id)}, # [cite: 30, 35]
+            "STATUS": {"VALUE": target_status}, # [cite: 29, 35]
+            "COMMENTS": {"VALUE": remark or "Updated via AI"}, # [cite: 27, 34]
+            "UPLOAD_DOCUMENT": {
+                "VALUE": "", # [cite: 31, 36]
+                "BASE64": "" # [cite: 33, 36]
+            },
+            "WHATSAPP_MOBILE_NUMBER": {"VALUE": ctx.sender_phone[-10:]}
+        }
+    )
+
     log_reasoning("UPDATE_TASK_STATUS_START", {
         "task_id": task_id,
-        "requested_status": status,
-        "mapped_status": APPSAVY_STATUS_MAP.get(status),
-        "by": ctx.role
+        "mapped_status": target_status,
+        "raw_status": status
     })
-
-    sender_mobile = ctx.sender_phone[-10:]
-
-    appsavy_status = APPSAVY_STATUS_MAP.get(status.title(), "Closed")
-
-    # ---- FINAL PAYLOAD ----
-    req = UpdateTaskRequest(
-        TASK_ID=task_id,
-        STATUS=appsavy_status,
-        COMMENTS=remark or "Terminal Test",
-        UPLOAD_DOCUMENT={
-            "VALUE": "",
-            "BASE64": ""
-        },
-        WHATSAPP_MOBILE_NUMBER=sender_mobile
-    )
 
     api_response = await call_appsavy_api("UPDATE_STATUS", req)
 
-    # ---- ONLY SUCCESS MESSAGES ----
     if api_response and (str(api_response.get("RESULT")) == "1" or str(api_response.get("result")) == "1"):
-        if status in ("Close", "Closed"):
-            return None
-        if status == "Reopened":
-            return None
         return None
     return None
 
