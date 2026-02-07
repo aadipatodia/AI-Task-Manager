@@ -660,45 +660,34 @@ async def get_pending_tasks(login_code: str) -> List[str]:
 
 async def get_performance_report_tool(
     ctx: ManagerContext,
+    report_type: str,  # Now passed from Gemini's extracted JSON
     name: Optional[str] = None
 ) -> None:
-
     try:
         team = load_team()
 
-        if not name:
-            if ctx.role != "manager":
-                return None
-
-            req = WhatsAppPdfReportRequest(
-                ASSIGNED_TO="",
-                REPORT_TYPE="Detail",
-                STATUS="",
-                MOBILE_NUMBER=ctx.sender_phone[-10:],
-                ASSIGNED_BY="",
-                REFERENCE="WHATSAPP"
+        # Resolve target login_code if a name is provided
+        target_login = ""
+        if name:
+            name_l = name.lower()
+            user = next(
+                (u for u in team if name_l == u["login_code"].lower() or name_l in u["name"].lower()),
+                None
             )
+            if not user:
+                logger.error(f"User {name} not found for performance report.")
+                return None
+            target_login = user["login_code"]
 
-            await call_appsavy_api("WHATSAPP_PDF_REPORT", req)
-            return None
-
-        name_l = name.lower()
-
-        user = next(
-            (
-                u for u in team
-                if name_l == u["login_code"].lower()
-                or name_l in u["name"].lower()
-            ),
-            None
-        )
-
-        if not user:
+        # Safety check: Only managers can request 'Detail' reports
+        final_report_type = report_type
+        if final_report_type == "Detail" and ctx.role != "manager":
+            logger.warning("Unauthorized Detail report request blocked.")
             return None
 
         req = WhatsAppPdfReportRequest(
-            ASSIGNED_TO=user["login_code"],
-            REPORT_TYPE="Count",
+            ASSIGNED_TO=target_login,
+            REPORT_TYPE=final_report_type, # Uses value extracted by Gemini
             STATUS="",
             MOBILE_NUMBER=ctx.sender_phone[-10:],
             ASSIGNED_BY="",
@@ -1056,8 +1045,7 @@ async def update_task_status_tool(
 
     sender_mobile = ctx.sender_phone[-10:]
 
-    # ---- STATUS MAPPING (silent fallback) ----
-    appsavy_status = APPSAVY_STATUS_MAP.get(status, "Closed")
+    appsavy_status = APPSAVY_STATUS_MAP.get(status.title(), "Closed")
 
     # ---- FINAL PAYLOAD ----
     req = UpdateTaskRequest(
@@ -1083,7 +1071,6 @@ async def update_task_status_tool(
     return None
 
 def should_send_whatsapp(text: str) -> bool:
-
     if not text:
         return False
 
@@ -1253,7 +1240,22 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                     if pending:
                         send_whatsapp_message(sender, "\n".join(pending), pid)
                 elif intent == "VIEW_EMPLOYEE_PERFORMANCE":
-                    await get_performance_report_tool(ctx)
+                    result = await run_gemini_extractor(
+                        prompt=f"""You are processing a performance report request.
+                        RULES:
+                        - If a specific employee name is mentioned -> report_type = "Count", name = "Employee Name"
+                        - If NO name is mentioned (general request) -> report_type = "Detail", name = null
+                        Return JSON:
+                        {{
+                            "report_type": string,
+                            "name": string | null
+                        }}
+                        """,
+                        message=full_convo_context
+                    )
+                    # Pass extracted data to the tool
+                    if isinstance(result, dict):
+                        await get_performance_report_tool(ctx, name=result.get("name"))
             except Exception as e:
                 logger.error(f"Error executing direct tool {intent}: {e}")
             finally:
@@ -1327,9 +1329,19 @@ Your job:
 - Do NOT invent values
 - Do NOT repeat information already given
 
+REQUIRED MAPPING RULES:
+- If user wants to redo, open again, or restart or anything with similar meaning: status = "Reopen"
+- If user says pending, working, or started or anything with similar meaning: status = "Work In Progress"
+- If user says finished, done, or fixed or anything with similar meaning: status = "Closed"
+- If user says still open or keep open or anything with similar meaning: status = "Open"
+
+1. Map the user's intent to one of the 4 statuses above.
+2. Extract task_id and optional remark.
+3. If information is missing, ask ONE follow-up question.
+
 Required fields:
 - task_id
-- status (open / in progress / closed / reopened)
+- status
 Optional:
 - remark
 
