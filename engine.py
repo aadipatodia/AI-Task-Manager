@@ -485,6 +485,33 @@ def log_reasoning(step: str, details: dict | str):
         step,
         json.dumps(details, ensure_ascii=False) if isinstance(details, dict) else details
     )
+    
+async def get_duplicate_resolution_message(matches: list, assignee_name: str) -> str:
+    """
+    Fetches full user details from MongoDB for duplicates and formats the WhatsApp response.
+    """
+    options_text = ""
+    
+    for i, candidate in enumerate(matches, 1):
+        login_code = candidate.get("login_code")
+        
+        # Search Mongo for the authoritative record
+        user_record = users_collection.find_one({"login_code": login_code})
+        
+        if user_record:
+            name = user_record.get("name", candidate.get("name", "Unknown")).upper()
+            phone = user_record.get("phone", "N/A")
+            email = user_record.get("email", "N/A")
+            options_text += f"{i}. *{name}*\n    {phone}\n    {email}\n\n"
+        else:
+            # Fallback if Appsavy has a user that isn't in your Mongo yet
+            options_text += f"{i}. *{candidate['name'].upper()}*\n   (Details not found in DB)\n\n"
+
+    return (
+        f"I found multiple employees named '{assignee_name}'. Which one do you mean?\n\n"
+        f"{options_text}"
+        "Please reply with the correct *Mobile Number* to proceed."
+    )
 
 def normalize_status_for_report(status: str) -> str:
     report_status_map = {
@@ -688,6 +715,11 @@ async def get_performance_report_tool(
                 logger.error(f"User {name} not found for performance report.")
                 return None
             target_login = user["login_code"]
+            if len(user) > 1:
+                log_reasoning("PERFORMANCE_REPORT_DUPLICATE_FOUND", {"count": len(user)})
+                # This calls your MongoDB search and returns the formatted string
+                clarification_msg = await get_duplicate_resolution_message(user, name)
+                return clarification_msg
 
         # Safety check: Only managers can request 'Detail' reports
         final_report_type = report_type
@@ -935,49 +967,11 @@ async def assign_new_task_tool(
             return None
 
         if len(matches) > 1:
-            final_options = []
-
-            for candidate in matches:
-                details_res = await call_appsavy_api(
-                    "GET_USERS_BY_ID",
-                    GetUsersByIdRequest(
-                        Event="107018",
-                        Child=[{
-                            "Control_Id": "107019",
-                            "AC_ID": "111271",
-                            "Parent": [{
-                                "Control_Id": "106771",
-                                "Value": candidate["login_code"],
-                                "Data_Form_Id": ""
-                            }]
-                        }]
-                    )
-                )
-
-                res_list = (
-                    details_res.get("data", {}).get("Result", [])
-                    if isinstance(details_res, dict)
-                    else details_res or []
-                )
-
-                if res_list:
-                    d = res_list[0]
-                    candidate["phone"] = d.get("MOBILE", "N/A")
-    
-
-                final_options.append(candidate)
-
-            options_text = "\n".join(
-                f"- {u['name']} ({u.get('office', 'Office N/A')}): {u['phone']}"
-                for u in final_options
-            )
-
-            # clarification is allowed output
-            return (
-                f"I found multiple users matching '{assignee}'.\n\n"
-                f"{options_text}\n\n"
-                "Please reply with the correct 10-digit phone number."
-            )
+                log_reasoning("DUPLICATE_FOUND_RESOLVING_VIA_MONGO", {"count": len(matches)})
+                clarification_msg = await get_duplicate_resolution_message(matches, assignee_raw)
+                
+                return clarification_msg
+            
         user = matches[0]
         login_code = user["login_code"]
 
