@@ -300,6 +300,7 @@ async def run_gemini_extractor(prompt: str, message: str):
         contents=f"{prompt}\n\nUSER MESSAGE:\n{message}"
     )
 
+
     text = response.text.strip()
     log_reasoning("AGENT_2_OUTPUT", text)
     # If Gemini returns JSON → parse
