@@ -989,7 +989,7 @@ async def assign_new_task_tool(
         documents_child = []
         document_data = ctx.document_data
         if document_data:
-            media_type = document_data.get("type")
+            media_type = document_data.get("type") 
             media_info = document_data.get(media_type)
             if media_info:
                 base64_data = download_and_encode_document(media_info)
@@ -1047,6 +1047,7 @@ async def update_task_status_tool(
     sender_mobile = ctx.sender_phone[-10:]
 
     # Handle optional document
+
     doc_value, doc_base64 = "", ""
     if ctx.document_data:
         media_type = ctx.document_data.get("type")
@@ -1057,13 +1058,11 @@ async def update_task_status_tool(
                 doc_value = media_info.get("filename") or "update_attachment"
                 doc_base64 = base64_data
 
-    # Construct payload using the status directly as returned by Agent 2
     req = UpdateTaskRequest(
-        SID="607",
         TASK_ID=str(task_id),
-        STATUS=status, # No mapping needed here anymore
+        STATUS=status,
         COMMENTS=remark or "Updated via AI Assistant",
-        UPLOAD_DOCUMENT=UploadDocument(VALUE=doc_value, BASE64=doc_base64),
+        UPLOAD_DOCUMENT=UploadDocument(VALUE=doc_value, BASE64=doc_base64), # Correct mapping
         WHATSAPP_MOBILE_NUMBER=sender_mobile
     )
 
