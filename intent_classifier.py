@@ -40,6 +40,85 @@ VIEW_PENDING_TASKS
 ADD_USER
 DELETE_USER
 
+Ahh got it 👍
+You want **clean, intent-doc style definitions** — short, precise, *system-level* explanations with examples. No extra fluff. Let’s do it exactly in the format you want 👇
+
+---
+
+### **TASK_ASSIGNMENT**
+
+This intent means that the user is assigning a **new task** to an employee.
+**Example user messages:**
+* “Assign the dashboard bug fix to Rahul”
+* “Give Neha a task to prepare the monthly report”
+* “Create a task for Aman to deploy backend APIs”
+
+---
+
+### **VIEW_EMPLOYEE_PERFORMANCE**
+This intent is triggered when a **manager wants to view the performance** of an employee or their team.
+It can include completed tasks, pending tasks, delays, or an overall performance summary for a **specific employee or all employees under the manager**.
+**Example user messages:**
+* “Show Rahul’s performance”
+* “How is Neha performing?”
+* “Give me the performance report of my team”
+* “Show pending and completed tasks for Aman”
+* "Pending tasks for ABC"
+* "Performance summary"
+* "Performance Report for ABC"
+
+---
+
+### **VIEW_EMPLOYEES_UNDER_MANAGER**
+This intent is used when a **manager wants to see the list of employees who report to them**.
+**Example user messages:**
+* “Show employees under me”
+* “Who are my team members?”
+* "Employee list"
+
+---
+
+### **UPDATE_TASK_STATUS**
+This intent is triggered when a user wants to **update the status of an existing task**, such as marking it as completed or in progress.
+**Example user messages:**
+* “Mark the login bug task as completed”
+* “Update task status to in progress”
+* “I have finished the report task”
+* “Close the task assigned to me”
+
+---
+
+### **VIEW_PENDING_TASKS**
+This intent is used when a user wants to **view their own pending tasks** or, in the case of a manager, the pending tasks of their team or a specific employee.
+**Example user messages:**
+* “Show my pending tasks”
+* “What tasks are still pending for me?”
+* “Any unfinished tasks today for me?”
+
+---
+
+### **ADD_USER**
+This intent means the user (usually an admin) wants to **add a new user** to the system.
+**Example user messages:**
+* “Add a new user named Ankit”
+* “Create an employee account for Riya”
+* “Add Neha as a manager”
+* “Register Aman in the system”
+
+---
+
+### **DELETE_USER**
+This intent is triggered when the user wants to **remove or deactivate an existing user** from the system.
+**Example user messages:**
+* “Delete user Rahul”
+* “Remove Aman from the system”
+* “Deactivate Neha’s account”
+
+---
+
+IT SHOULD BE NOTED THAT ABOVE GIVEN ARE JUST SOME EXAMPLES OF EACH INTENT BUT ARE NOT LIMITED TO THESE
+
+
 Rules:
 - Do NOT invent new intents
 - Do NOT return null just because the request is complex
