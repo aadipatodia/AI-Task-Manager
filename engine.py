@@ -1412,9 +1412,13 @@ Rules:
         try:
             if intent == "TASK_ASSIGNMENT" and all(k in merged_data for k in ("assignee", "task_name", "deadline")):
                 log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
-                await assign_new_task_tool(ctx, **merged_data)
+                tool_output = await assign_new_task_tool(ctx, **merged_data)
+                
+                if isinstance(tool_output, str):
+                    append_message(session_id, "assistant", f"[CLARIFY] {tool_output}") 
+                    send_whatsapp_message(sender, tool_output, pid)
+                    return 
                 end_session_complete(login_code, session_id)
-
             elif intent == "UPDATE_TASK_STATUS" and all(k in merged_data for k in ("task_id", "status")):
                 log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
                 await update_task_status_tool(ctx, **merged_data)
