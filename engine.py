@@ -875,10 +875,9 @@ async def assign_new_task_tool(
     assignee: str,          # name OR phone
     task_name: str,
     deadline: str
-) -> None:
-
+) -> Optional[str]:
     try:
-        team = load_team()
+        team = load_team()  # This already loads from MongoDB
         assignee_raw = assignee.strip()
 
         log_reasoning("ASSIGN_TASK_START", {
@@ -891,68 +890,24 @@ async def assign_new_task_tool(
         digits = re.sub(r"\D", "", assignee_raw)
         is_phone = len(digits) in (10, 12)
 
-        resolved_user = None
         matches: list[dict] = []
 
         if is_phone:
             normalized_phone = normalize_phone(digits)
-
-            # Mongo is authoritative for phone resolution
             resolved_user = next(
                 (u for u in team if normalize_phone(u.get("phone", "")) == normalized_phone),
                 None
             )
-
             if not resolved_user:
-                return None  # silent failure by design
-
+                return None
             matches = [resolved_user]
-
         else:
+            # DIRECT MONGO SEARCH: No Appsavy API call here
             name_l = assignee_raw.lower()
-
-            # ---- Fetch Appsavy directory ----
-            assignee_res = await call_appsavy_api(
-                "GET_ASSIGNEE",
-                GetAssigneeRequest(
-                    Event="0",
-                    Child=[{"Control_Id": "106771", "AC_ID": "111057"}]
-                )
-            )
-
-            appsavy_users = []
-            if isinstance(assignee_res, dict):
-                appsavy_users = assignee_res.get("data", {}).get("Result", [])
-            elif isinstance(assignee_res, list):
-                appsavy_users = assignee_res
-
-            appsavy_matches = [
-                {
-                    "name": u.get("NAME"),
-                    "login_code": u.get("ID"),
-                    "phone": "N/A"
-                }
-                for u in appsavy_users
-                if re.search(rf"\b{name_l}\b", str(u.get("NAME", "")).lower())
+            matches = [
+                u for u in team 
+                if re.search(rf"\b{re.escape(name_l)}\b", u["name"].lower())
             ]
-
-            mongo_matches = [
-                {
-                    "name": u["name"],
-                    "login_code": u["login_code"],
-                    "phone": u.get("phone", "N/A")
-                }
-                for u in team
-                if re.search(rf"\b{name_l}\b", u["name"].lower())
-            ]
-
-            combined: dict[str, dict] = {}
-            for u in appsavy_matches:
-                combined[u["login_code"]] = u
-            for u in mongo_matches:
-                combined.setdefault(u["login_code"], u)
-
-            matches = list(combined.values())
 
         log_reasoning("ASSIGNEE_MATCHES_FOUND", {
             "count": len(matches),
@@ -960,13 +915,17 @@ async def assign_new_task_tool(
         })
 
         if not matches:
-            return None
+            return f"I couldn't find any employee named '{assignee_raw}' in the database."
 
+        # HANDLE MULTIPLE USERS FROM MONGO
         if len(matches) > 1:
-                log_reasoning("DUPLICATE_FOUND_RESOLVING_VIA_MONGO", {"count": len(matches)})
-                clarification_msg = await get_duplicate_resolution_message(matches, assignee_raw)
-                
-                return clarification_msg
+            log_reasoning("DUPLICATE_FOUND_RESOLVING_VIA_MONGO", {"count": len(matches)})
+            clarification_msg = await get_duplicate_resolution_message(matches, assignee_raw)
+            return clarification_msg
+
+        # Unique user resolved
+        user = matches[0]
+        login_code = user["login_code"]
             
         user = matches[0]
         login_code = user["login_code"]
