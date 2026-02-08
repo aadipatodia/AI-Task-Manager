@@ -296,7 +296,7 @@ class AddDeleteUserRequest(BaseModel):
 async def run_gemini_extractor(prompt: str, message: str):
     client = Client(api_key=os.getenv("GEMINI_API_KEY"))
     response = client.models.generate_content(
-        model="gemini-2.5-pro",
+        model="gemini-2.5-flash-lite",
         contents=f"{prompt}\n\nUSER MESSAGE:\n{message}"
     )
 
