@@ -7,7 +7,7 @@ from google.genai import Client
 # Load environment variables
 load_dotenv()
 
-MODEL_NAME = "gemini-2.5-flash-lite"
+MODEL_NAME = "gemini-3-pro"
 
 SUPPORTED_INTENTS = {
     "TASK_ASSIGNMENT",
@@ -58,9 +58,11 @@ It can include completed tasks, pending tasks, delays, or an overall performance
 * “How is Neha performing?”
 * “Give me the performance report of my team”
 * “Show pending and completed tasks for Aman”
-* "Pending tasks for ABC"
+* "Pending tasks for ABC"  
+    - **This is an important type of command if user specifies someone's name when and asks pending tasks then it should classify intent as VIEW_EMPLOYEE_PERFORMANCE**
 * "Performance summary"
 * "Performance Report for ABC"
+
 
 ---
 
