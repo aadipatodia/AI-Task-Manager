@@ -15,6 +15,8 @@ from send_message import send_whatsapp_message
 from redis_session import (
     get_or_create_session,
     append_message,
+    set_pending_document,
+    get_pending_document,
     get_session_history,
     end_session_complete
 )
@@ -258,9 +260,8 @@ class UpdateTaskRequest(BaseModel):
     TASK_ID: str 
     STATUS: str  
     COMMENTS: str  
-    UPLOAD_DOCUMENT: str = ""  
-    BASE64: str = "" 
-    WHATSAPP_MOBILE_NUMBER: str 
+    UPLOAD_DOCUMENT: UploadDocument = Field(default_factory=UploadDocument) # Changed from str to UploadDocument
+    WHATSAPP_MOBILE_NUMBER: str
 
 class GetCountRequest(BaseModel):
     Event: str = "107567"
@@ -283,9 +284,7 @@ class AddDeleteUserRequest(BaseModel):
     NAME: str
     
 async def run_gemini_extractor(prompt: str, message: str):
-
     client = Client(api_key=os.getenv("GEMINI_API_KEY"))
-
     response = client.models.generate_content(
         model="gemini-2.5-pro",
         contents=f"{prompt}\n\nUSER MESSAGE:\n{message}"
@@ -1027,7 +1026,7 @@ APPSAVY_STATUS_MAP = {
     "Work In Progress": "Work In Progress",
     "Close": "Closed",
     "Closed": "Closed",
-    "Reopened": "Reopened"
+    "Reopened": "Reopen"
 }
 
 async def update_task_status_tool(
@@ -1036,28 +1035,35 @@ async def update_task_status_tool(
     status: str,
     remark: Optional[str] = None
 ) -> None:
-    
+    """
+    Updates the status of an existing task using the pre-mapped status from Agent 2.
+    """
     log_reasoning("UPDATE_TASK_STATUS_START", {
         "task_id": task_id,
-        "requested_status": status,
-        "mapped_status": APPSAVY_STATUS_MAP.get(status),
+        "status": status,
         "by": ctx.role
     })
 
     sender_mobile = ctx.sender_phone[-10:]
 
-    # ---- STATUS MAPPING (silent fallback) ----
-    appsavy_status = APPSAVY_STATUS_MAP.get(status, "Closed")
+    # Handle optional document
+    doc_value, doc_base64 = "", ""
+    if ctx.document_data:
+        media_type = ctx.document_data.get("type")
+        media_info = ctx.document_data.get(media_type)
+        if media_info:
+            base64_data = download_and_encode_document(media_info)
+            if base64_data:
+                doc_value = media_info.get("filename") or "update_attachment"
+                doc_base64 = base64_data
 
-    # ---- FINAL PAYLOAD ----
+    # Construct payload using the status directly as returned by Agent 2
     req = UpdateTaskRequest(
-        TASK_ID=task_id,
-        STATUS=appsavy_status,
-        COMMENTS=remark or "Terminal Test",
-        UPLOAD_DOCUMENT={
-            "VALUE": "",
-            "BASE64": ""
-        },
+        SID="607",
+        TASK_ID=str(task_id),
+        STATUS=status, # No mapping needed here anymore
+        COMMENTS=remark or "Updated via AI Assistant",
+        UPLOAD_DOCUMENT=UploadDocument(VALUE=doc_value, BASE64=doc_base64),
         WHATSAPP_MOBILE_NUMBER=sender_mobile
     )
 
@@ -1216,12 +1222,22 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         # Context Setup 
         AGENT2_INTENTS = {"TASK_ASSIGNMENT", "UPDATE_TASK_STATUS", "ADD_USER", "DELETE_USER", "VIEW_EMPLOYEE_PERFORMANCE"}
         agent2_required = intent in AGENT2_INTENTS
-
+        
+        if message and not command:
+            set_pending_document(session_id, message)
+            send_whatsapp_message(
+                sender, 
+                "I've received your document. Would you like to 'Assign a new task' with this or 'Update an existing task'?", 
+                pid
+            )
+            return
+        pending_doc = get_pending_document(session_id)
+        ctx_document = pending_doc if pending_doc else message
         ctx = ManagerContext(
             sender_phone=sender,
             role=role,
             current_time=datetime.datetime.now(IST),
-            document_data=message
+            document_data=ctx_document 
         )
         
         # Direct Tools (Agent 1 Only)
@@ -1316,29 +1332,17 @@ RULES:
 - "EOD" should be treated as 18:00 (6:00 PM) of the current day.
 - Ensure the 'deadline' string is strictly a valid ISO format.
 
-Your job:
-- Reuse ANY information already present in the user query
-- Extract missing values ONLY if they are not clearly specified
-- If ALL required fields are present → return JSON
-- If ANY required field is missing → ask ONE clear follow-up question
-- Do NOT invent values
-- Do NOT repeat information already given
-
-REQUIRED MAPPING RULES:
-- If user wants to redo, open again, or restart or anything with similar meaning: status = "Reopen"
-- If user says pending, working, or started or anything with similar meaning: status = "Work In Progress"
-- If user says finished, done, or fixed or anything with similar meaning: status = "Closed"
-- If user says still open or keep open or anything with similar meaning: status = "Open"
-
-1. Map the user's intent to one of the 4 statuses above.
-2. Extract task_id and optional remark.
-3. If information is missing, ask ONE follow-up question.
+MAPPING RULES (Return EXACTLY one of these 4 values for the 'status' field):
+- If the user wants to start, is working on it, or it's pending -> "Work In Progress"
+- If the user has finished, completed, or fixed it -> "Closed"
+- If the user wants to restart or redo a closed task -> "Reopened"
+- If the user says it is still open or should stay open -> "Open"
 
 Required fields:
-- task_id
-- status
+- task_id: string
+- status: "Open" | "Work In Progress" | "Closed" | "Reopened"
 Optional:
-- remark
+- remark: string | null
 
 If returning JSON, use EXACTLY this format:
 {{

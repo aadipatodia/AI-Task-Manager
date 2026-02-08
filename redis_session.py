@@ -94,8 +94,25 @@ def update_agent2_state(
         f"agent2_state:{session_id}",
         json.dumps(state)
     )
-
     return state
+
+def set_pending_document(session_id: str, document_data: dict, ttl: int = 600):
+    """Stores document metadata for 10 minutes."""
+    redis_client.setex(
+        f"pending_doc:{session_id}",
+        ttl,
+        json.dumps(document_data)
+    )
+
+def get_pending_document(session_id: str) -> Optional[dict]:
+    """Retrieves and then deletes the pending document (one-time use)."""
+    key = f"pending_doc:{session_id}"
+    raw = redis_client.get(key)
+    if raw:
+        redis_client.delete(key)
+        return json.loads(raw)
+    return None
+
 
 def get_session_history(session_id: str) -> List[Dict]:
     raw = redis_client.lrange(f"session:{session_id}", 0, -1)
