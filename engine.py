@@ -99,15 +99,16 @@ API_CONFIGS = {
     },
     
     "GET_TASKS": {
-        "url": f"{APPSAVY_BASE_URL}/GetDataJSONClient",
+        "url": f"{APPSAVY_BASE_URL}/PushdataJSONClient", 
         "headers": {
-            "sid": "610",
+            "sid": "675",
             "pid": "309",
-            "fid": "10349",
+            "fid": "13638",
             "cid": "64",
             "uid": "TM_API",
             "roleid": "1627",
-            "TokenKey": "e5b4e098-f8b9-47bf-83f1-751582bfe147"
+            "TokenKey": "2c96a4d5-7254-4b43-a48f-160ba1e4e542", # Updated from documentation
+            "Content-Type": "application/json"
         }
     },
 
@@ -196,6 +197,15 @@ class WhatsAppPdfReportRequest(BaseModel):
     TO_DATE: str = ""
     ASSIGNED_BY: str = ""
     REFERENCE: str = ""
+    
+class GetUserTasksRequest(BaseModel):
+    SID: str = "675"
+    EMPLOYEE: str
+    WHATSAPP_MOBILE_NUMBER: str
+    ASSIGNMENT: str = ""
+    FROM_DATE: str = ""
+    TO_DATE: str = ""
+    STATUS: str = ""
 
 class PerformanceCountResult(BaseModel):
     ASSIGNED_TASK: int = 0
@@ -700,50 +710,40 @@ async def get_performance_report_tool(
     except Exception:
         logger.error("get_performance_report_tool failed", exc_info=True)
         return None
-   
+
 async def get_task_list_tool(
     ctx: ManagerContext,
     view: str = "tasks"   
 ) -> None:
-
     sender_mobile = ctx.sender_phone[-10:]
 
+    # Handle the users list view
     if view == "users":
-        req = GetUsersByWhatsappRequest(
-            WHATSAPP_MOBILE_NUMBER=sender_mobile
-        )
+        req = GetUsersByWhatsappRequest(WHATSAPP_MOBILE_NUMBER=sender_mobile)
         await call_appsavy_api("GET_USERS_BY_WHATSAPP", req)
         return None
 
-    team = load_team()
+    # Identify the user from MongoDB to get their unique login_code
+    team = load_team() 
     user = next(
         (u for u in team if u["phone"] == normalize_phone(ctx.sender_phone)),
         None
-    )
+    )  
+    
     if not user:
+        logger.error(f"User not found in system for phone: {ctx.sender_phone}")
         return None
-    login_code = user["login_code"]
 
-    await call_appsavy_api(
-        "GET_TASKS",
-        GetTasksRequest(
-            Event="106830",
-            Child=[{
-                "Control_Id": "106831",
-                "AC_ID": "110803",
-                "Parent": [
-                    {"Control_Id": "106825", "Value": "Open,Work In Progress,Close", "Data_Form_Id": ""},
-                    {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
-                    {"Control_Id": "106827", "Value": login_code, "Data_Form_Id": ""},
-                    {"Control_Id": "106829", "Value": "", "Data_Form_Id": ""},
-                    {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
-                    {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""},
-                    {"Control_Id": "146515", "Value": sender_mobile, "Data_Form_Id": ""}
-                ]
-            }]
-        )
+    # Construct request as per 'get user task list.txt' documentation
+    req = GetUserTasksRequest(
+        SID="675",
+        EMPLOYEE=user["login_code"],
+        WHATSAPP_MOBILE_NUMBER=sender_mobile,
+        ASSIGNMENT="",
+        STATUS=""
     )
-
+    
+    await call_appsavy_api("GET_TASKS", req)
     return None
 
 def extract_multiple_assignees(text: str, team: list) -> list[str]:
@@ -1245,7 +1245,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 if intent == "VIEW_EMPLOYEES_UNDER_MANAGER":
                     await get_task_list_tool(ctx, view="users")
                 elif intent == "VIEW_PENDING_TASKS":
-                    pending = await get_pending_tasks(login_code)
+                    pending = await get_task_list_tool(ctx, view="tasks")
                     if pending:
                         send_whatsapp_message(sender, "\n".join(pending), pid)
                 elif intent == "VIEW_EMPLOYEE_PERFORMANCE":
