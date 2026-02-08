@@ -40,11 +40,6 @@ VIEW_PENDING_TASKS
 ADD_USER
 DELETE_USER
 
-Ahh got it 👍
-You want **clean, intent-doc style definitions** — short, precise, *system-level* explanations with examples. No extra fluff. Let’s do it exactly in the format you want 👇
-
----
-
 ### **TASK_ASSIGNMENT**
 
 This intent means that the user is assigning a **new task** to an employee.
