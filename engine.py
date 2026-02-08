@@ -1027,37 +1027,42 @@ APPSAVY_STATUS_MAP = {
     "Work In Progress": "Work In Progress",
     "Close": "Closed",
     "Closed": "Closed",
-    "Reopened": "Reopen"
+    "Reopened": "Reopened"
 }
 
 async def update_task_status_tool(
     ctx: ManagerContext,
     task_id: str,
-    status: str,  # Status from Gemini 
+    status: str,
     remark: Optional[str] = None
 ) -> None:
     
-    # Mapping to ensure API-compatible strings 
-    APPSAVY_VALUE_MAP = {
-        "Open": "Open",
-        "Work In Progress": "Work In Progress",
-        "Closed": "Closed",
-        "Reopen": "Reopen" 
-    }
+    log_reasoning("UPDATE_TASK_STATUS_START", {
+        "task_id": task_id,
+        "requested_status": status,
+        "mapped_status": APPSAVY_STATUS_MAP.get(status),
+        "by": ctx.role
+    })
 
-    # Normalize input and map to target status 
-    target_status = APPSAVY_VALUE_MAP.get(status.title(), status)
+    sender_mobile = ctx.sender_phone[-10:]
 
-    # Create FLAT request object as per source 38
+    # ---- STATUS MAPPING (silent fallback) ----
+    appsavy_status = APPSAVY_STATUS_MAP.get(status, "Closed")
+
+    # ---- FINAL PAYLOAD ----
     req = UpdateTaskRequest(
-        SID="607", 
-        TASK_ID=str(task_id),  
-        STATUS=target_status, 
-        COMMENTS=remark or "Updated via AI Assistant", 
-        WHATSAPP_MOBILE_NUMBER=ctx.sender_phone[-10:] 
+        TASK_ID=task_id,
+        STATUS=appsavy_status,
+        COMMENTS=remark or "Terminal Test",
+        UPLOAD_DOCUMENT={
+            "VALUE": "",
+            "BASE64": ""
+        },
+        WHATSAPP_MOBILE_NUMBER=sender_mobile
     )
 
     await call_appsavy_api("UPDATE_STATUS", req)
+    return None
 
 def should_send_whatsapp(text: str) -> bool:
 
