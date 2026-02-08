@@ -70,6 +70,7 @@ This intent is used when a **manager wants to see the list of employees who repo
 * “Show employees under me”
 * “Who are my team members?”
 * "Employee list"
+* "PENDING TASKS
 
 ---
 
@@ -89,6 +90,8 @@ This intent is used when a user wants to **view their own pending tasks** or, in
 * “Show my pending tasks”
 * “What tasks are still pending for me?”
 * “Any unfinished tasks today for me?”
+
+IT SHOULD BE NOTED THAT IT MUST ONLY BE DECIDED AS INTENT IF USER SPECIFIES THAT THEY WANT TO SEE THEIR PENDING TASKS IF NOTHING IS SPECIFIED THEN INTENT IS GOING O BE VIEW_PERFORMANCE_REPORT (FOR ALL EMPLOYEES)
 
 ---
 
@@ -130,7 +133,6 @@ Format:
 
 }
 """
-
 
 def init_gemini():
     api_key = os.getenv("GEMINI_API_KEY")
