@@ -70,7 +70,7 @@ This intent is used when a **manager wants to see the list of employees who repo
 * “Show employees under me”
 * “Who are my team members?”
 * "Employee list"
-* "PENDING TASKS
+* "PENDING TASKS"
 
 ---
 

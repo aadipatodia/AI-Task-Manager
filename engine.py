@@ -715,11 +715,7 @@ async def get_performance_report_tool(
                 logger.error(f"User {name} not found for performance report.")
                 return None
             target_login = user["login_code"]
-            if len(user) > 1:
-                log_reasoning("PERFORMANCE_REPORT_DUPLICATE_FOUND", {"count": len(user)})
-                # This calls your MongoDB search and returns the formatted string
-                clarification_msg = await get_duplicate_resolution_message(user, name)
-                return clarification_msg
+
 
         # Safety check: Only managers can request 'Detail' reports
         final_report_type = report_type
