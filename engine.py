@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 SCOPES = ['https://www.googleapis.com/auth/gmail.send']
 
-REDIRECT_URI = os.getenv("REDIRECT_URI", "https://ai-task-manager-1-ugb8.onrender.com/oauth2callback")
+REDIRECT_URI = os.getenv("REDIRECT_URI", "https://aitask.appsavy.com/")
 
 # Initialize MongoDB Connection
 MONGO_URI = os.getenv("MONGO_URI")
