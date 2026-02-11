@@ -1,0 +1,19 @@
+# Environment variables (contains secrets)
+.env
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+credentials.json
+team.json
+token.json
+user_tokens.json
+users.json
+tasks.json
+state.json
