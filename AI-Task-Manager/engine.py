@@ -20,6 +20,7 @@ from redis_session import (
     get_session_history,
     end_session_complete
 )
+from agent3 import agent3_intent_guard
 from intent_classifier import intent_classifier
 from user_resolver import resolve_user_by_phone
 import asyncio 
@@ -628,8 +629,6 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
             "payload_type": payload.__class__.__name__
         })
 
-        logger.info(f"[APPSAVY_RESPONSE] API: {key} | Status: {res.status_code}")
-        
         res = await asyncio.to_thread(
             requests.post,
             config["url"],
@@ -637,6 +636,7 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
             json=payload.model_dump(),
             timeout=15
         )
+        logger.info(f"[APPSAVY_RESPONSE] API: {key} | Status: {res.status_code}")
         
         logger.info(f"API {key} response status: {res.status_code}")
         logger.info(f"API {key} response body: {res.text}")
@@ -981,10 +981,6 @@ async def assign_new_task_tool(
             log_reasoning("DUPLICATE_FOUND_RESOLVING_VIA_MONGO", {"count": len(matches)})
             clarification_msg = await get_duplicate_resolution_message(matches, assignee_raw)
             return clarification_msg
-
-        # Unique user resolved
-        user = matches[0]
-        login_code = user["login_code"]
             
         user = matches[0]
         login_code = user["login_code"]
@@ -1157,16 +1153,30 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         login_code = user["login_code"]
         session_id = get_or_create_session(login_code)
-        
-        # Save user input to history
+
+        # ---------------- AGENT 3: INTENT SHIFT GUARD ----------------
+        action, clarification_msg = await agent3_intent_guard(session_id, command)
+
+        if action == "ASK_CLARIFICATION":
+            log_reasoning("AGENT_3_SHIFT_DETECTED", {"message": clarification_msg})
+            send_whatsapp_message(sender, clarification_msg, pid)
+            return
+
+        if action == "RESET":
+            log_reasoning("AGENT_3_RESET", {"reason": "User confirmed shift"})
+            end_session_complete(login_code, session_id)
+            session_id = get_or_create_session(login_code)
+            history = []
+
+        # append user message
         append_message(session_id, "user", command)
         log_reasoning("USER_INPUT_RECEIVED", {"sender": sender, "command": command})
+
         history = get_session_history(session_id)
         log_reasoning("SESSION_HISTORY_LOG", {
             "session_id": session_id,
             "full_history": [f"{m['role']}: {m['content']}" for m in history]
         })
-
         # Setup Context
         last_assistant_msg = next((m for m in reversed(history) if m["role"] == "assistant"), None)
         is_cross_questioning = last_assistant_msg and "[CLARIFY]" in last_assistant_msg["content"]
@@ -1465,7 +1475,6 @@ Rules:
         # Agent 2 produced JSON (the "Flag" is now set to true)
         merged_data = merge_slots(session_id, result)
         log_reasoning("AGENT_2_FLAG_TRUE", {"parameters_extracted": merged_data})
-        append_message(session_id, "slots", merged_data)
 
         # Execute Tool Calls
         try:
