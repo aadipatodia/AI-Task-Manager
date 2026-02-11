@@ -295,20 +295,42 @@ class AddDeleteUserRequest(BaseModel):
     
 async def run_gemini_extractor(prompt: str, message: str):
     client = Client(api_key=os.getenv("GEMINI_API_KEY"))
-    response = client.models.generate_content(
-        model="gemini-2.5-pro",
-        contents=f"{prompt}\n\nUSER MESSAGE:\n{message}"
-    )
 
+    logger.info(f"[GEMINI_START] Requesting extraction. Model: gemini-2.5-pro")
+    log_reasoning("GEMINI_API_REQUEST_INPUT", {
+        "prompt_char_count": len(prompt),
+        "history_char_count": len(message),
+        "preview": message[:200] + "..." if len(message) > 200 else message
+    })
 
-    text = response.text.strip()
-    log_reasoning("AGENT_2_OUTPUT", text)
-    # If Gemini returns JSON → parse
-    if text.startswith("{"):
-        return json.loads(text)
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-pro",
+            contents=f"{prompt}\n\nUSER MESSAGE:\n{message}"
+        )
 
-    # Otherwise → treat as user-facing follow-up question
-    return text
+        text = response.text.strip()
+
+        logger.info(f"[GEMINI_COMPLETE] Response received. Raw Length: {len(text)}")
+        log_reasoning("GEMINI_API_RAW_RESPONSE", text)
+
+        if text.startswith("{"):
+            try:
+                parsed_json = json.loads(text)
+                logger.info("[GEMINI_PARSE] Successfully parsed JSON output.")
+                return parsed_json
+            except json.JSONDecodeError as e:
+                logger.error(f"[GEMINI_PARSE_ERROR] Failed to decode JSON: {str(e)}")
+                log_reasoning("GEMINI_JSON_FAILURE", {"raw_text": text, "error": str(e)})
+                return text # Fallback to text if JSON is malformed
+
+        logger.info("[GEMINI_OUTPUT] Gemini returned a text/clarification string.")
+        return text
+
+    except Exception as e:
+        logger.error(f"[GEMINI_CRITICAL_FAILURE] API call failed: {str(e)}")
+        log_reasoning("GEMINI_SYSTEM_ERROR", {"error": str(e)})
+        raise e
 
 def AGENT_2_POLICY(current_time: datetime.datetime) -> str:
     team = load_team()
@@ -371,67 +393,97 @@ async def add_user_tool(
     mobile: str,
     email: Optional[str] = None
 ) -> str:
-   
+
     log_reasoning("ADD_USER_START", {
         "name": name,
         "mobile": mobile,
         "email": email,
         "requested_by": ctx.sender_phone
     })
-    
+
+    # Normalize inputs
+    normalized_name = name.lower().strip()
+    normalized_mobile = normalize_phone(mobile)
+
     req = AddDeleteUserRequest(
         ACTION="Add",
         CREATOR_MOBILE_NUMBER=ctx.sender_phone[-10:],
         NAME=name,
         EMAIL=email or "",
-        MOBILE_NUMBER=mobile[-10:]
+        MOBILE_NUMBER=normalized_mobile
     )
 
     res = await call_appsavy_api("ADD_DELETE_USER", req)
+
     if not isinstance(res, dict):
         return f"Failed to add user: {res}"
-    
-    msg = res.get("resultmessage", "")
+
+    msg = str(res.get("resultmessage", ""))
     login_code = None
 
     is_success = str(res.get("result")) == "1" or str(res.get("RESULT")) == "1"
     is_existing = "already exists" in msg.lower()
 
     if is_success or is_existing:
+
+        # Try extracting login code directly from message
         match = re.search(r"login Code:\s*([A-Z0-9-]+)", msg, re.IGNORECASE)
         login_code = match.group(1) if match else None
-        
+
         if not login_code:
             logger.info(f"ID missing from message. Fetching list to find: '{name}'")
-            assignee_res = await call_appsavy_api(
-                "GET_ASSIGNEE",
-                GetAssigneeRequest(
-                    Event="0",
-                    Child=[{"Control_Id": "106771", "AC_ID": "111057"}]
-                )
-            )
-            
-            result_list = []
-            if isinstance(assignee_res, dict):
-                result_list = assignee_res.get("data", {}).get("Result", [])
-            elif isinstance(assignee_res, list):
-                result_list = assignee_res
 
-            target_name = name.lower().strip()
-            for item in result_list:
-                item_name = str(item.get("NAME", "")).lower().strip()
-                if re.fullmatch(rf"{re.escape(target_name)}", item_name):
-                    login_code = item.get("ID") or item.get("LOGIN_ID")
-                    break
+            async def fetch_with_retry(retries=4, delay=1):
+                for attempt in range(retries):
+
+                    assignee_res = await call_appsavy_api(
+                        "GET_ASSIGNEE",
+                        GetAssigneeRequest(
+                            Event="0",
+                            Child=[{"Control_Id": "106771", "AC_ID": "111057"}]
+                        )
+                    )
+
+                    # Safe extraction
+                    result_list = []
+
+                    if isinstance(assignee_res, dict):
+                        if assignee_res.get("status") == "1":
+                            data = assignee_res.get("data")
+                            if isinstance(data, dict):
+                                result = data.get("Result", [])
+                                if isinstance(result, list):
+                                    result_list = result
+                    elif isinstance(assignee_res, list):
+                        result_list = assignee_res
+
+                    # Match by name OR phone
+                    for item in result_list:
+                        item_name = str(item.get("NAME", "")).lower().strip()
+                        item_mobile = normalize_phone(
+                            item.get("MOBILE_NUMBER", "")
+                        )
+
+                        if (
+                            item_name == normalized_name
+                            or (item_mobile and item_mobile == normalized_mobile)
+                        ):
+                            return item.get("ID") or item.get("LOGIN_ID")
+
+                    await asyncio.sleep(delay * (attempt + 1))
+
+                return None
+
+            login_code = await fetch_with_retry()
 
         if login_code:
             new_user = {
-                "name": name.lower().strip(),
-                "phone": normalize_phone(mobile),
+                "name": normalized_name,
+                "phone": normalized_mobile,
                 "email": email or None,
                 "login_code": login_code
             }
-            
+
             if users_collection is not None:
                 users_collection.update_one(
                     {"phone": new_user["phone"]},
@@ -441,7 +493,9 @@ async def add_user_tool(
 
             logger.info(f"Successfully synced {name} to MongoDB with ID {login_code}")
             return None
+
     return None
+
 
 async def delete_user_tool(
     ctx: ManagerContext,
@@ -563,6 +617,8 @@ def is_authorized(task_owner) -> bool:
 async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
     """Universal wrapper for Appsavy POST requests - 100% API dependency."""
     config = API_CONFIGS[key]
+    logger.info(f"[APPSAVY_START] API: {key} | URL: {config['url']}")
+    log_reasoning("APPSAVY_PAYLOAD", payload.model_dump())
     try:
         logger.info(f"Calling API {key} with payload: {payload.model_dump()}")
         
@@ -571,6 +627,8 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
             "trigger": "Gemini tool execution",
             "payload_type": payload.__class__.__name__
         })
+
+        logger.info(f"[APPSAVY_RESPONSE] API: {key} | Status: {res.status_code}")
         
         res = await asyncio.to_thread(
             requests.post,
@@ -1399,7 +1457,7 @@ Rules:
                 log_reasoning("AGENT_2_JSON_PARSED", {"source": "string_cleaned"})
             except json.JSONDecodeError:
                 # If parsing fails, it's definitely a question/clarification for the user.
-                log_reasoning("AGENT_2_CLARIFICATION_SENT", {"agent_msg": result})
+                log_reasoning("AGENT_2_CLARIFICATION_SENDING", {"agent_msg": result})
                 append_message(session_id, "assistant", f"[CLARIFY] {result}") 
                 send_whatsapp_message(sender, result, pid)
                 return
