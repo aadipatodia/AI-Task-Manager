@@ -1244,7 +1244,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             set_pending_document(session_id, message)
             send_whatsapp_message(
                 sender, 
-                "I've received your document. Would you like to 'Assign a new task' with this or 'Update an existing task'?", 
+                "I've received your document. Would you like to 'Assign a new task' with this or 'Update status on a task'?", 
                 pid
             )
             return
