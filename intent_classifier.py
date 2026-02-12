@@ -44,9 +44,12 @@ DELETE_USER
 
 This intent means that the user is assigning a **new task** to an employee.
 **Example user messages:**
-* “Assign the dashboard bug fix to Rahul”
-* “Give Neha a task to prepare the monthly report”
-* “Create a task for Aman to deploy backend APIs”
+- "Send this document to [Name] and tell them to [Action]"
+- "Ask [Name] to complete a report on this"
+- "Forward this to [Name]"
+- “Assign the dashboard bug fix to Rahul”
+- “Give Neha a task to prepare the monthly report”
+- “Create a task for Aman to deploy backend APIs”
 
 ---
 
