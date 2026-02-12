@@ -871,11 +871,12 @@ def extract_remark(text: str, task_id: str):
 
 async def assign_new_task_tool(
     ctx: ManagerContext,
-    assignee: str,          # name OR phone
+    assignee: str,
     task_name: str,
     deadline: str
 ) -> Optional[str]:
     try:
+        logger.info(f"DEBUG: Document Present: {ctx.document_data is not None}")
         team = load_team()  # This already loads from MongoDB
         assignee_raw = assignee.strip()
 
@@ -1185,8 +1186,21 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 pid
             )
             return
+
         pending_doc = get_pending_document(session_id)
-        ctx_document = pending_doc if pending_doc else message
+
+        # Check if the current message is a document (dictionary with 'type')
+        if message and isinstance(message, dict) and message.get("type"):
+            # If a new doc comes in, store it as the pending doc
+            set_pending_document(session_id, message)
+            ctx_document = message
+            log_reasoning("DOC_PERSISTENCE", "New document received and stored.")
+        else:
+            # If no new doc in this turn, check if one was stored previously
+            ctx_document = pending_doc
+            if ctx_document:
+                log_reasoning("DOC_PERSISTENCE", "Using existing pending document from Redis.")
+
         ctx = ManagerContext(
             sender_phone=sender,
             role=role,
@@ -1243,6 +1257,7 @@ Your job:
 - Reuse ANY information already present in the user query
 - Extract missing values ONLY if they are not clearly specified
 - If ALL required fields are present → return JSON
+- If 'document_data' is present in the context history but the user has not provided a specific task name, use "Document Task" as the default task_name.
 - If ANY required field is missing → ask ONE clear follow-up question
 - Do NOT invent values
 - Do NOT repeat information already given
