@@ -25,6 +25,7 @@ def send_whatsapp_message(recipient_number, message_text, phone_number_id=None):
     Standard function for regular bot messages (AI replies, reports, etc).
     This is what engine.py uses for 99% of its work.
     """
+
     recipient = _clean_phone_number(recipient_number)
     active_id = phone_number_id or DEFAULT_PHONE_ID
     url = f"https://graph.facebook.com/{VERSION}/{active_id}/messages"
@@ -42,11 +43,37 @@ def send_whatsapp_message(recipient_number, message_text, phone_number_id=None):
     }
 
     try:
+        # 🔹 Log BEFORE sending
+        logger.info(
+            f"[WHATSAPP_SEND] Sending message | "
+            f"To: {recipient} | "
+            f"PhoneID: {active_id} | "
+            f"Message Length: {len(message_text)}"
+        )
+
         response = requests.post(url, json=payload, headers=headers)
-        print(f"DEBUG: Meta Response for {recipient_number}: {response.text}") # Add this
-        return response.json() if response.status_code == 200 else None
+
+        # 🔹 Log AFTER receiving response
+        logger.info(
+            f"[WHATSAPP_RESPONSE] Status: {response.status_code} | "
+            f"Response: {response.text}"
+        )
+
+        if response.status_code == 200:
+            logger.info(f"[WHATSAPP_SUCCESS] Message delivered to {recipient}")
+            return response.json()
+        else:
+            logger.error(
+                f"[WHATSAPP_FAILED] Failed to send message to {recipient} | "
+                f"Status: {response.status_code} | "
+                f"Response: {response.text}"
+            )
+            return None
+
     except Exception as e:
-        logger.error(f"Error: {e}")
+        logger.exception(
+            f"[WHATSAPP_EXCEPTION] Exception while sending message to {recipient}"
+        )
         return None
 
 def send_registration_template(recipient_number, user_identifier, phone_number_id=None):
