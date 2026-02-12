@@ -1130,50 +1130,69 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         # Logging        
         log_reasoning("DEBUG_STATE", {"is_cross_questioning": is_cross_questioning, "existing_intent": existing_intent, "last_assistant_msg": last_assistant_msg})
 
+        # --- REVISED LOGIC: ALWAYS START WITH AGENT 1 UNLESS CLARIFYING ---
         intent = None
         is_supported = False
 
-        if is_cross_questioning:
-            if existing_intent:
-                # CONDITION: Cross question and intent is not null -> Agent 2
-                intent = existing_intent
-                is_supported = True
-                log_reasoning("AGENT_2_RESUME", {"intent": intent, "reason": "Reply to [CLARIFY]"})
-            else:
-                # CONDITION : Cross question and intent is null -> Error
-                log_reasoning("ERROR", {"reason": "Cross-question state detected but no existing_intent found."})
-                send_whatsapp_message(sender, "System error: Lost context of previous request. Please start over.", pid)
-                end_session_complete(login_code, session_id)
-                return
+        # Only skip Agent 1 if we are in the middle of a [CLARIFY] flow
+        if is_cross_questioning and existing_intent:
+            intent = existing_intent
+            is_supported = True
+            
+            # LOG: Resuming an existing conversation flow
+            log_reasoning("SESSION_FLOW", {
+                "action": "RESUME_AGENT_2",
+                "intent": intent,
+                "reason": "User is replying to a [CLARIFY] question",
+                "session_id": session_id
+            })
         else:
-            if existing_intent:
-                # CONDITION: Intent is not null (not in cross-question) -> Agent 2
-                intent = existing_intent
-                is_supported = True
-                log_reasoning("AGENT_2_CONTINUE", {"intent": intent})
+            # LOG: Starting a fresh classification turn
+            log_reasoning("SESSION_FLOW", {
+                "action": "START_AGENT_1",
+                "reason": "New turn or session previously cleared",
+                "existing_intent_in_history": existing_intent
+            })
+
+            # Call Agent 1
+            is_supported, intent, confidence, reasoning = intent_classifier(command)
+            
+            log_reasoning("INTENT_CLASSIFIED", {
+                "intent": intent,
+                "confidence": confidence,
+                "is_supported": is_supported,
+                "reasoning": reasoning
+            })
+
+            if is_supported and intent:
+                # LOG: New intent successfully locked in
+                log_reasoning("SESSION_UPDATE", {
+                    "action": "SET_NEW_INTENT",
+                    "new_intent": intent,
+                    "previous_intent": existing_intent
+                })
+                
+                # Save the new intent to start a fresh Agent 2 session
+                append_message(session_id, "system", f"INTENT_SET: {intent}")
             else:
-                # CONDITION: Intent is null -> Agent 1 call
-                is_supported, intent, confidence, reasoning = intent_classifier(command)
-        
-                log_reasoning("INTENT_CLASSIFIED", {
-                    "intent": intent,
-                    "confidence": confidence,
-                    "reasoning": reasoning,
-                    "is_supported": is_supported
+                # LOG: Failure to understand user input
+                log_reasoning("SESSION_FAILURE", {
+                    "reason": "Unsupported or null intent",
+                    "user_command": command,
+                    "classifier_reasoning": reasoning
                 })
 
-                if is_supported and intent:
-                    append_message(session_id, "system", f"INTENT_SET: {intent}")
-                else:
-                    send_whatsapp_message(
-                        sender,
-                        "I'm sorry, I didn't quite catch that. I can help with task assignment, "
-                        "updates, performance reports, and user management. What would you like to do?",
-                        pid
-                    )
-                    end_session_complete(login_code, session_id)
-                    return
+                send_whatsapp_message(
+                    sender,
+                    "I'm sorry, I didn't quite catch that. How can I help with your tasks today?",
+                    pid
+                )
                 
+                # LOG: Cleaning up session after failure
+                log_reasoning("SESSION_CLEANUP", {"action": "end_session_complete", "session_id": session_id})
+                end_session_complete(login_code, session_id)
+                return
+            
         # Context Setup 
         AGENT2_INTENTS = {"TASK_ASSIGNMENT", "UPDATE_TASK_STATUS", "ADD_USER", "DELETE_USER", "VIEW_EMPLOYEE_PERFORMANCE"}
         agent2_required = intent in AGENT2_INTENTS
