@@ -300,7 +300,6 @@ async def run_gemini_extractor(prompt: str, message: str):
         contents=f"{prompt}\n\nUSER MESSAGE:\n{message}"
     )
 
-
     text = response.text.strip()
     log_reasoning("AGENT_2_OUTPUT", text)
     # If Gemini returns JSON → parse
@@ -825,7 +824,6 @@ def extract_task_id(text: str):
 def resolve_status(text: str, role: str):
     t = text.lower()
 
-    # Future / pending → Work In Progress
     if any(x in t for x in [
         "pending",
         "in progress",
@@ -1039,10 +1037,17 @@ def should_send_whatsapp(text: str) -> bool:
     return not any(k in t for k in block_keywords)
 
 def normalize_phone(phone: str) -> str:
-    digits = re.sub(r"\D", "", phone)
+    if not phone:
+        return ""
+    # Ensure it's a string and strip non-digits
+    digits = re.sub(r"\D", "", str(phone))
+    # Remove leading zero if it's an 11-digit number (e.g., 09999999999)
+    if len(digits) == 11 and digits.startswith("0"):
+        digits = digits[1:]
+    # Standardize to 91XXXXXXXXXX
     if len(digits) == 10:
         return "91" + digits
-    if len(digits) == 12 and digits.startswith("91"):
+    elif len(digits) == 12 and digits.startswith("91"):
         return digits
     return digits
 

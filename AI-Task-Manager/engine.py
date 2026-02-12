@@ -1483,7 +1483,7 @@ Rules:
                 tool_output = await assign_new_task_tool(ctx, **merged_data)
                 
                 if isinstance(tool_output, str):
-                    append_message(session_id, "assistant", f"[CLARIFY] {tool_output}") 
+                    append_message(session_id, "assistant", f" {tool_output}") 
                     send_whatsapp_message(sender, tool_output, pid)
                     return 
                 end_session_complete(login_code, session_id)

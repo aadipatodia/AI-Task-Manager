@@ -3,9 +3,14 @@ from pymongo.collection import Collection
 import re
 
 def normalize_phone(phone: str) -> str:
+    if not phone:
+        return ""
+    phone = str(phone)
     digits = re.sub(r"\D", "", phone)
     if len(digits) == 10:
         return "91" + digits
+    if len(digits) == 12 and digits.startswith("91"):
+        return digits
     return digits
 
 def resolve_user_by_phone(
