@@ -754,6 +754,201 @@ async def get_pending_tasks(login_code: str) -> List[str]:
 
     return pending
 
+
+async def handle_message(command, sender, pid, message=None, full_message=None):
+    
+    try:
+        sender = normalize_phone(sender)
+        trace_id = f"{sender}-{int(datetime.datetime.now().timestamp())}"
+        log_reasoning("TRACE_START", trace_id)
+
+        if not command and not message:
+            return
+
+        # Authorization
+        manager_phone = normalize_phone(os.getenv("MANAGER_PHONE", ""))
+        team = load_team()
+
+        # Determine Role
+        if sender == manager_phone:
+            role = "manager"
+        elif any(normalize_phone(u["phone"]) == sender for u in team):
+            role = "employee"
+        else:
+            user_temp = resolve_user_by_phone(users_collection, sender)
+            if user_temp:
+                end_session_complete(
+                    user_temp["login_code"],
+                    get_or_create_session(user_temp["login_code"])
+                )
+            send_whatsapp_message(
+                sender,
+                "Access Denied: Your number is not authorized.",
+                pid
+            )
+            return
+
+        user = resolve_user_by_phone(users_collection, sender)
+
+        if not user and sender == manager_phone:
+            user = {
+                "login_code": "MANAGER",
+                "phone": sender,
+                "name": "Manager"
+            }
+
+        if not user:
+            send_whatsapp_message(
+                sender,
+                "Access Denied: Your number is not registered.",
+                pid
+            )
+            return
+
+        login_code = user["login_code"]
+        session_id = get_or_create_session(login_code)
+
+        # Save user input
+        append_message(session_id, "user", command)
+        history = get_session_history(session_id)
+
+        # Detect cross-questioning
+        last_assistant_msg = next(
+            (m for m in reversed(history) if m["role"] == "assistant"),
+            None
+        )
+        is_cross_questioning = (
+            last_assistant_msg and "[CLARIFY]" in last_assistant_msg["content"]
+        )
+
+        existing_intent = next(
+            (
+                m["content"].replace("INTENT_SET: ", "")
+                for m in reversed(history)
+                if m["role"] == "system"
+                and "INTENT_SET:" in m["content"]
+            ),
+            None
+        )
+
+        intent = None
+        is_supported = False
+
+        if is_cross_questioning:
+            if existing_intent:
+                intent = existing_intent
+                is_supported = True
+            else:
+                send_whatsapp_message(
+                    sender,
+                    "System error: Lost context of previous request. Please start over.",
+                    pid
+                )
+                end_session_complete(login_code, session_id)
+                return
+        else:
+            if existing_intent:
+                intent = existing_intent
+                is_supported = True
+            else:
+                is_supported, intent, confidence, reasoning = intent_classifier(command)
+
+                if is_supported and intent:
+                    append_message(
+                        session_id,
+                        "system",
+                        f"INTENT_SET: {intent}"
+                    )
+                else:
+                    send_whatsapp_message(
+                        sender,
+                        "I can help with task assignment, updates, performance reports, "
+                        "and user management. What would you like to do?",
+                        pid
+                    )
+                    end_session_complete(login_code, session_id)
+                    return
+
+        # Setup context
+        pending_doc = get_pending_document(session_id)
+
+        ctx = ManagerContext(
+            sender_phone=sender,
+            role=role,
+            current_time=datetime.datetime.now(IST),
+            document_data=pending_doc if pending_doc else message
+        )
+
+        # Direct tools (Agent 1 only)
+        if intent == "VIEW_EMPLOYEES_UNDER_MANAGER":
+            await get_task_list_tool(ctx, view="users")
+            end_session_complete(login_code, session_id)
+            return
+
+        if intent == "VIEW_PENDING_TASKS":
+            await get_task_list_tool(ctx, view="tasks")
+            end_session_complete(login_code, session_id)
+            return
+
+        if intent == "VIEW_EMPLOYEE_PERFORMANCE":
+            await get_performance_report_tool(ctx, report_type="Detail")
+            end_session_complete(login_code, session_id)
+            return
+
+        # Agent-2 parameter extraction
+        slots = next(
+            (m["content"] for m in reversed(history) if m["role"] == "slots"),
+            {}
+        )
+
+        full_convo_context = "\n".join(
+            [f"{m['role']}: {m['content']}" for m in history]
+        )
+
+        result = await run_gemini_extractor(
+            prompt="Extract required fields or ask clarification.",
+            message=full_convo_context
+        )
+
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except:
+                append_message(
+                    session_id,
+                    "assistant",
+                    f"[CLARIFY] {result}"
+                )
+                send_whatsapp_message(sender, result, pid)
+                return
+
+        merged_data = merge_slots(session_id, result)
+
+        # Execute tools
+        if intent == "TASK_ASSIGNMENT":
+            await assign_new_task_tool(ctx, **merged_data)
+
+        elif intent == "UPDATE_TASK_STATUS":
+            await update_task_status_tool(ctx, **merged_data)
+
+        elif intent == "ADD_USER":
+            await add_user_tool(ctx, **merged_data)
+
+        elif intent == "DELETE_USER":
+            await delete_user_tool(ctx, **merged_data)
+
+        elif intent == "VIEW_EMPLOYEE_PERFORMANCE":
+            await get_performance_report_tool(
+                ctx,
+                report_type=merged_data.get("report_type", "Detail"),
+                name=merged_data.get("name")
+            )
+
+        end_session_complete(login_code, session_id)
+
+    except Exception:
+        logger.error("handle_message failed", exc_info=True)
+
 async def get_performance_report_tool(
     ctx: ManagerContext,
     report_type: str,  # Now passed from Gemini's extracted JSON
@@ -1244,7 +1439,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             set_pending_document(session_id, message)
             send_whatsapp_message(
                 sender, 
-                "I've received your document. Would you like to 'Assign a new task' with this or 'Update status on a task'?", 
+                "I've received your document. Would you like to 'Assign a new task' with this or 'Update an existing task'?", 
                 pid
             )
             return
