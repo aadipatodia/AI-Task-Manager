@@ -20,7 +20,6 @@ from redis_session import (
     get_session_history,
     end_session_complete
 )
-from agent3 import agent3_intent_guard
 from intent_classifier import intent_classifier
 from user_resolver import resolve_user_by_phone
 import asyncio 
@@ -296,42 +295,20 @@ class AddDeleteUserRequest(BaseModel):
     
 async def run_gemini_extractor(prompt: str, message: str):
     client = Client(api_key=os.getenv("GEMINI_API_KEY"))
+    response = client.models.generate_content(
+        model="gemini-2.5-pro",
+        contents=f"{prompt}\n\nUSER MESSAGE:\n{message}"
+    )
 
-    logger.info(f"[GEMINI_START] Requesting extraction. Model: gemini-2.5-pro")
-    log_reasoning("GEMINI_API_REQUEST_INPUT", {
-        "prompt_char_count": len(prompt),
-        "history_char_count": len(message),
-        "preview": message[:200] + "..." if len(message) > 200 else message
-    })
 
-    try:
-        response = client.models.generate_content(
-            model="gemini-2.5-pro",
-            contents=f"{prompt}\n\nUSER MESSAGE:\n{message}"
-        )
+    text = response.text.strip()
+    log_reasoning("AGENT_2_OUTPUT", text)
+    # If Gemini returns JSON → parse
+    if text.startswith("{"):
+        return json.loads(text)
 
-        text = response.text.strip()
-
-        logger.info(f"[GEMINI_COMPLETE] Response received. Raw Length: {len(text)}")
-        log_reasoning("GEMINI_API_RAW_RESPONSE", text)
-
-        if text.startswith("{"):
-            try:
-                parsed_json = json.loads(text)
-                logger.info("[GEMINI_PARSE] Successfully parsed JSON output.")
-                return parsed_json
-            except json.JSONDecodeError as e:
-                logger.error(f"[GEMINI_PARSE_ERROR] Failed to decode JSON: {str(e)}")
-                log_reasoning("GEMINI_JSON_FAILURE", {"raw_text": text, "error": str(e)})
-                return text # Fallback to text if JSON is malformed
-
-        logger.info("[GEMINI_OUTPUT] Gemini returned a text/clarification string.")
-        return text
-
-    except Exception as e:
-        logger.error(f"[GEMINI_CRITICAL_FAILURE] API call failed: {str(e)}")
-        log_reasoning("GEMINI_SYSTEM_ERROR", {"error": str(e)})
-        raise e
+    # Otherwise → treat as user-facing follow-up question
+    return text
 
 def AGENT_2_POLICY(current_time: datetime.datetime) -> str:
     team = load_team()
@@ -394,97 +371,67 @@ async def add_user_tool(
     mobile: str,
     email: Optional[str] = None
 ) -> str:
-
+   
     log_reasoning("ADD_USER_START", {
         "name": name,
         "mobile": mobile,
         "email": email,
         "requested_by": ctx.sender_phone
     })
-
-    # Normalize inputs
-    normalized_name = name.lower().strip()
-    normalized_mobile = normalize_phone(mobile)
-
+    
     req = AddDeleteUserRequest(
         ACTION="Add",
         CREATOR_MOBILE_NUMBER=ctx.sender_phone[-10:],
         NAME=name,
         EMAIL=email or "",
-        MOBILE_NUMBER=normalized_mobile
+        MOBILE_NUMBER=mobile[-10:]
     )
 
     res = await call_appsavy_api("ADD_DELETE_USER", req)
-
     if not isinstance(res, dict):
         return f"Failed to add user: {res}"
-
-    msg = str(res.get("resultmessage", ""))
+    
+    msg = res.get("resultmessage", "")
     login_code = None
 
     is_success = str(res.get("result")) == "1" or str(res.get("RESULT")) == "1"
     is_existing = "already exists" in msg.lower()
 
     if is_success or is_existing:
-
-        # Try extracting login code directly from message
         match = re.search(r"login Code:\s*([A-Z0-9-]+)", msg, re.IGNORECASE)
         login_code = match.group(1) if match else None
-
+        
         if not login_code:
             logger.info(f"ID missing from message. Fetching list to find: '{name}'")
+            assignee_res = await call_appsavy_api(
+                "GET_ASSIGNEE",
+                GetAssigneeRequest(
+                    Event="0",
+                    Child=[{"Control_Id": "106771", "AC_ID": "111057"}]
+                )
+            )
+            
+            result_list = []
+            if isinstance(assignee_res, dict):
+                result_list = assignee_res.get("data", {}).get("Result", [])
+            elif isinstance(assignee_res, list):
+                result_list = assignee_res
 
-            async def fetch_with_retry(retries=4, delay=1):
-                for attempt in range(retries):
-
-                    assignee_res = await call_appsavy_api(
-                        "GET_ASSIGNEE",
-                        GetAssigneeRequest(
-                            Event="0",
-                            Child=[{"Control_Id": "106771", "AC_ID": "111057"}]
-                        )
-                    )
-
-                    # Safe extraction
-                    result_list = []
-
-                    if isinstance(assignee_res, dict):
-                        if assignee_res.get("status") == "1":
-                            data = assignee_res.get("data")
-                            if isinstance(data, dict):
-                                result = data.get("Result", [])
-                                if isinstance(result, list):
-                                    result_list = result
-                    elif isinstance(assignee_res, list):
-                        result_list = assignee_res
-
-                    # Match by name OR phone
-                    for item in result_list:
-                        item_name = str(item.get("NAME", "")).lower().strip()
-                        item_mobile = normalize_phone(
-                            item.get("MOBILE_NUMBER", "")
-                        )
-
-                        if (
-                            item_name == normalized_name
-                            or (item_mobile and item_mobile == normalized_mobile)
-                        ):
-                            return item.get("ID") or item.get("LOGIN_ID")
-
-                    await asyncio.sleep(delay * (attempt + 1))
-
-                return None
-
-            login_code = await fetch_with_retry()
+            target_name = name.lower().strip()
+            for item in result_list:
+                item_name = str(item.get("NAME", "")).lower().strip()
+                if re.fullmatch(rf"{re.escape(target_name)}", item_name):
+                    login_code = item.get("ID") or item.get("LOGIN_ID")
+                    break
 
         if login_code:
             new_user = {
-                "name": normalized_name,
-                "phone": normalized_mobile,
+                "name": name.lower().strip(),
+                "phone": normalize_phone(mobile),
                 "email": email or None,
                 "login_code": login_code
             }
-
+            
             if users_collection is not None:
                 users_collection.update_one(
                     {"phone": new_user["phone"]},
@@ -494,9 +441,7 @@ async def add_user_tool(
 
             logger.info(f"Successfully synced {name} to MongoDB with ID {login_code}")
             return None
-
     return None
-
 
 async def delete_user_tool(
     ctx: ManagerContext,
@@ -618,8 +563,6 @@ def is_authorized(task_owner) -> bool:
 async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
     """Universal wrapper for Appsavy POST requests - 100% API dependency."""
     config = API_CONFIGS[key]
-    logger.info(f"[APPSAVY_START] API: {key} | URL: {config['url']}")
-    log_reasoning("APPSAVY_PAYLOAD", payload.model_dump())
     try:
         logger.info(f"Calling API {key} with payload: {payload.model_dump()}")
         
@@ -628,7 +571,7 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
             "trigger": "Gemini tool execution",
             "payload_type": payload.__class__.__name__
         })
-
+        
         res = await asyncio.to_thread(
             requests.post,
             config["url"],
@@ -636,7 +579,6 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
             json=payload.model_dump(),
             timeout=15
         )
-        logger.info(f"[APPSAVY_RESPONSE] API: {key} | Status: {res.status_code}")
         
         logger.info(f"API {key} response status: {res.status_code}")
         logger.info(f"API {key} response body: {res.text}")
@@ -753,201 +695,6 @@ async def get_pending_tasks(login_code: str) -> List[str]:
                 pending.append(title)
 
     return pending
-
-
-async def handle_message(command, sender, pid, message=None, full_message=None):
-    
-    try:
-        sender = normalize_phone(sender)
-        trace_id = f"{sender}-{int(datetime.datetime.now().timestamp())}"
-        log_reasoning("TRACE_START", trace_id)
-
-        if not command and not message:
-            return
-
-        # Authorization
-        manager_phone = normalize_phone(os.getenv("MANAGER_PHONE", ""))
-        team = load_team()
-
-        # Determine Role
-        if sender == manager_phone:
-            role = "manager"
-        elif any(normalize_phone(u["phone"]) == sender for u in team):
-            role = "employee"
-        else:
-            user_temp = resolve_user_by_phone(users_collection, sender)
-            if user_temp:
-                end_session_complete(
-                    user_temp["login_code"],
-                    get_or_create_session(user_temp["login_code"])
-                )
-            send_whatsapp_message(
-                sender,
-                "Access Denied: Your number is not authorized.",
-                pid
-            )
-            return
-
-        user = resolve_user_by_phone(users_collection, sender)
-
-        if not user and sender == manager_phone:
-            user = {
-                "login_code": "MANAGER",
-                "phone": sender,
-                "name": "Manager"
-            }
-
-        if not user:
-            send_whatsapp_message(
-                sender,
-                "Access Denied: Your number is not registered.",
-                pid
-            )
-            return
-
-        login_code = user["login_code"]
-        session_id = get_or_create_session(login_code)
-
-        # Save user input
-        append_message(session_id, "user", command)
-        history = get_session_history(session_id)
-
-        # Detect cross-questioning
-        last_assistant_msg = next(
-            (m for m in reversed(history) if m["role"] == "assistant"),
-            None
-        )
-        is_cross_questioning = (
-            last_assistant_msg and "[CLARIFY]" in last_assistant_msg["content"]
-        )
-
-        existing_intent = next(
-            (
-                m["content"].replace("INTENT_SET: ", "")
-                for m in reversed(history)
-                if m["role"] == "system"
-                and "INTENT_SET:" in m["content"]
-            ),
-            None
-        )
-
-        intent = None
-        is_supported = False
-
-        if is_cross_questioning:
-            if existing_intent:
-                intent = existing_intent
-                is_supported = True
-            else:
-                send_whatsapp_message(
-                    sender,
-                    "System error: Lost context of previous request. Please start over.",
-                    pid
-                )
-                end_session_complete(login_code, session_id)
-                return
-        else:
-            if existing_intent:
-                intent = existing_intent
-                is_supported = True
-            else:
-                is_supported, intent, confidence, reasoning = intent_classifier(command)
-
-                if is_supported and intent:
-                    append_message(
-                        session_id,
-                        "system",
-                        f"INTENT_SET: {intent}"
-                    )
-                else:
-                    send_whatsapp_message(
-                        sender,
-                        "I can help with task assignment, updates, performance reports, "
-                        "and user management. What would you like to do?",
-                        pid
-                    )
-                    end_session_complete(login_code, session_id)
-                    return
-
-        # Setup context
-        pending_doc = get_pending_document(session_id)
-
-        ctx = ManagerContext(
-            sender_phone=sender,
-            role=role,
-            current_time=datetime.datetime.now(IST),
-            document_data=pending_doc if pending_doc else message
-        )
-
-        # Direct tools (Agent 1 only)
-        if intent == "VIEW_EMPLOYEES_UNDER_MANAGER":
-            await get_task_list_tool(ctx, view="users")
-            end_session_complete(login_code, session_id)
-            return
-
-        if intent == "VIEW_PENDING_TASKS":
-            await get_task_list_tool(ctx, view="tasks")
-            end_session_complete(login_code, session_id)
-            return
-
-        if intent == "VIEW_EMPLOYEE_PERFORMANCE":
-            await get_performance_report_tool(ctx, report_type="Detail")
-            end_session_complete(login_code, session_id)
-            return
-
-        # Agent-2 parameter extraction
-        slots = next(
-            (m["content"] for m in reversed(history) if m["role"] == "slots"),
-            {}
-        )
-
-        full_convo_context = "\n".join(
-            [f"{m['role']}: {m['content']}" for m in history]
-        )
-
-        result = await run_gemini_extractor(
-            prompt="Extract required fields or ask clarification.",
-            message=full_convo_context
-        )
-
-        if isinstance(result, str):
-            try:
-                result = json.loads(result)
-            except:
-                append_message(
-                    session_id,
-                    "assistant",
-                    f"[CLARIFY] {result}"
-                )
-                send_whatsapp_message(sender, result, pid)
-                return
-
-        merged_data = merge_slots(session_id, result)
-
-        # Execute tools
-        if intent == "TASK_ASSIGNMENT":
-            await assign_new_task_tool(ctx, **merged_data)
-
-        elif intent == "UPDATE_TASK_STATUS":
-            await update_task_status_tool(ctx, **merged_data)
-
-        elif intent == "ADD_USER":
-            await add_user_tool(ctx, **merged_data)
-
-        elif intent == "DELETE_USER":
-            await delete_user_tool(ctx, **merged_data)
-
-        elif intent == "VIEW_EMPLOYEE_PERFORMANCE":
-            await get_performance_report_tool(
-                ctx,
-                report_type=merged_data.get("report_type", "Detail"),
-                name=merged_data.get("name")
-            )
-
-        end_session_complete(login_code, session_id)
-
-    except Exception:
-        logger.error("handle_message failed", exc_info=True)
 
 async def get_performance_report_tool(
     ctx: ManagerContext,
@@ -1176,6 +923,10 @@ async def assign_new_task_tool(
             log_reasoning("DUPLICATE_FOUND_RESOLVING_VIA_MONGO", {"count": len(matches)})
             clarification_msg = await get_duplicate_resolution_message(matches, assignee_raw)
             return clarification_msg
+
+        # Unique user resolved
+        user = matches[0]
+        login_code = user["login_code"]
             
         user = matches[0]
         login_code = user["login_code"]
@@ -1348,30 +1099,16 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         login_code = user["login_code"]
         session_id = get_or_create_session(login_code)
-
-        # ---------------- AGENT 3: INTENT SHIFT GUARD ----------------
-        action, clarification_msg = await agent3_intent_guard(session_id, command)
-
-        if action == "ASK_CLARIFICATION":
-            log_reasoning("AGENT_3_SHIFT_DETECTED", {"message": clarification_msg})
-            send_whatsapp_message(sender, clarification_msg, pid)
-            return
-
-        if action == "RESET":
-            log_reasoning("AGENT_3_RESET", {"reason": "User confirmed shift"})
-            end_session_complete(login_code, session_id)
-            session_id = get_or_create_session(login_code)
-            history = []
-
-        # append user message
+        
+        # Save user input to history
         append_message(session_id, "user", command)
         log_reasoning("USER_INPUT_RECEIVED", {"sender": sender, "command": command})
-
         history = get_session_history(session_id)
         log_reasoning("SESSION_HISTORY_LOG", {
             "session_id": session_id,
             "full_history": [f"{m['role']}: {m['content']}" for m in history]
         })
+
         # Setup Context
         last_assistant_msg = next((m for m in reversed(history) if m["role"] == "assistant"), None)
         is_cross_questioning = last_assistant_msg and "[CLARIFY]" in last_assistant_msg["content"]
@@ -1662,7 +1399,7 @@ Rules:
                 log_reasoning("AGENT_2_JSON_PARSED", {"source": "string_cleaned"})
             except json.JSONDecodeError:
                 # If parsing fails, it's definitely a question/clarification for the user.
-                log_reasoning("AGENT_2_CLARIFICATION_SENDING", {"agent_msg": result})
+                log_reasoning("AGENT_2_CLARIFICATION_SENT", {"agent_msg": result})
                 append_message(session_id, "assistant", f"[CLARIFY] {result}") 
                 send_whatsapp_message(sender, result, pid)
                 return
@@ -1670,6 +1407,7 @@ Rules:
         # Agent 2 produced JSON (the "Flag" is now set to true)
         merged_data = merge_slots(session_id, result)
         log_reasoning("AGENT_2_FLAG_TRUE", {"parameters_extracted": merged_data})
+        append_message(session_id, "slots", merged_data)
 
         # Execute Tool Calls
         try:
