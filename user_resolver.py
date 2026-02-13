@@ -21,7 +21,7 @@ def normalize_phone(phone: str) -> str:
 
 def get_top_manager_phone() -> str:
     """Return the normalized phone of the hierarchy root (from env)."""
-    raw = os.getenv("TOP_MANAGER_PHONE", "")
+    raw = os.getenv("MANAGER_PHONE", "")
     return normalize_phone(raw)
 
 
