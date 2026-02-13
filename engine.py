@@ -1115,6 +1115,17 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         
         # Save user input to history
         append_message(session_id, "user", command)
+
+        if command and command.strip().lower() in RESET_PHRASES:
+            log_reasoning("HARD_RESET_TRIGGERED", {"by": sender})
+            # Clear entire session state
+            end_session_complete(login_code, session_id)
+            send_whatsapp_message(
+                sender,
+                "Conversation has been reset. How can I assist you?",
+                pid
+            )
+            return
         
         log_reasoning("USER_INPUT_RECEIVED", {"sender": sender, "command": command})
         history = get_session_history(session_id)
