@@ -397,7 +397,10 @@ async def add_user_tool(
     is_existing = "already exists" in msg.lower()
 
     if is_success or is_existing:
-        match = re.search(r"login Code:\s*([A-Z0-9-]+)", msg, re.IGNORECASE)
+        # Try extracting User ID first (new format)
+        match = re.search(r"user\s*id\s*:\s*([A-Z0-9-]+)", msg, re.IGNORECASE)
+        if not match:
+            match = re.search(r"login\s*code\s*:\s*([A-Z0-9-]+)", msg, re.IGNORECASE)
         login_code = match.group(1) if match else None
         
         if not login_code:
