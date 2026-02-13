@@ -871,12 +871,11 @@ def extract_remark(text: str, task_id: str):
 
 async def assign_new_task_tool(
     ctx: ManagerContext,
-    assignee: str,
+    assignee: str,          # name OR phone
     task_name: str,
     deadline: str
 ) -> Optional[str]:
     try:
-        logger.info(f"DEBUG: Document Present: {ctx.document_data is not None}")
         team = load_team()  # This already loads from MongoDB
         assignee_raw = assignee.strip()
 
@@ -1068,6 +1067,27 @@ def merge_slots(session_id: str, new_slots: dict):
     append_message(session_id, "slots", merged)
     return merged
 
+def should_reset_conversation(message: str) -> bool:
+    """
+    Check if the user message contains exact reset trigger phrases.
+    Returns True only if the message IS one of the trigger phrases (not just contains it).
+    """
+    if not message:
+        return False
+    
+    # Normalize the message
+    normalized_msg = message.strip().lower()
+    
+    # Define exact trigger phrases
+    RESET_TRIGGERS = [
+        "reset conversation",
+        "start over",
+        "clear chat"
+    ]
+    
+    # Check for exact match (not substring)
+    return normalized_msg in RESET_TRIGGERS
+
 async def handle_message(command, sender, pid, message=None, full_message=None):
     
     try:
@@ -1130,62 +1150,64 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         # Logging        
         log_reasoning("DEBUG_STATE", {"is_cross_questioning": is_cross_questioning, "existing_intent": existing_intent, "last_assistant_msg": last_assistant_msg})
 
-        # --- NEW DOCUMENT & INTENT RESOLUTION ---
         intent = None
         is_supported = False
-        
-        # 1. Capture Document Data and Check for "Doc-Only" uploads
-        # We define these locally here to ensure they are available for logic
-        is_current_msg_doc = message is not None
-        pending_doc_data = get_pending_document(session_id)
 
-        # Catch Document-Only messages before anything else
-        if is_current_msg_doc and (not command or command.strip() == ""):
-            set_pending_document(session_id, message)
-            prompt_msg = "I've received your document. Would you like to 'Assign a new task' with this or 'Update status of a specific task'?"
-            append_message(session_id, "assistant", f"[CLARIFY] {prompt_msg}")
-            send_whatsapp_message(sender, prompt_msg, pid)
-            log_reasoning("DOC_ONLY_FLOW", "Document received without text. Choice prompt sent.")
-            return # EXIT EARLY - Wait for user to pick an action
-
-        # 2. Resolve Intent (Smart Switching)
-        has_doc_context = is_current_msg_doc or (pending_doc_data is not None)
-        
-        # We call Agent 1 to check for a new or specific intent
-        is_supported, new_intent, confidence, reasoning = intent_classifier(command, has_document=has_doc_context)
-
-        # DECISION LOGIC: Use existing lock or switch to new intent?
-        if is_cross_questioning and existing_intent:
-            # If Agent 1 is confident in a NEW intent (like TASK_ASSIGNMENT), switch to it
-            if new_intent and confidence >= 0.8:
-                intent = new_intent
-                log_reasoning("SESSION_FLOW", {"action": "SWITCH_INTENT", "new": intent, "old": existing_intent})
-                append_message(session_id, "system", f"INTENT_SET: {intent}")
-            else:
-                # If Agent 1 is unsure (e.g. user just said a name), stay with the existing flow
+        if is_cross_questioning:
+            if existing_intent:
+                # CONDITION: Cross question and intent is not null -> Agent 2
                 intent = existing_intent
                 is_supported = True
-                log_reasoning("SESSION_FLOW", {"action": "RESUME", "intent": intent})
-        else:
-            # Fresh message flow
-            intent = new_intent
-            if is_supported and intent:
-                log_reasoning("INTENT_CLASSIFIED", {"intent": intent, "has_doc": has_doc_context})
-                append_message(session_id, "system", f"INTENT_SET: {intent}")
+                log_reasoning("AGENT_2_RESUME", {"intent": intent, "reason": "Reply to [CLARIFY]"})
             else:
-                log_reasoning("CLASSIFICATION_FAILED", {"reasoning": reasoning})
-                send_whatsapp_message(sender, "I'm sorry, I didn't quite catch that. How can I help with your tasks today?", pid)
+                # CONDITION : Cross question and intent is null -> Error
+                log_reasoning("ERROR", {"reason": "Cross-question state detected but no existing_intent found."})
+                send_whatsapp_message(sender, "System error: Lost context of previous request. Please start over.", pid)
                 end_session_complete(login_code, session_id)
                 return
-            
-        # 3. Finalize Context Document
-        ctx_document = None
-        if is_current_msg_doc:
-            set_pending_document(session_id, message)
-            ctx_document = message
-        elif pending_doc_data:
-            ctx_document = pending_doc_data
+        else:
+            if existing_intent:
+                # CONDITION: Intent is not null (not in cross-question) -> Agent 2
+                intent = existing_intent
+                is_supported = True
+                log_reasoning("AGENT_2_CONTINUE", {"intent": intent})
+            else:
+                # CONDITION: Intent is null -> Agent 1 call
+                is_supported, intent, confidence, reasoning = intent_classifier(command)
+        
+                log_reasoning("INTENT_CLASSIFIED", {
+                    "intent": intent,
+                    "confidence": confidence,
+                    "reasoning": reasoning,
+                    "is_supported": is_supported
+                })
 
+                if is_supported and intent:
+                    append_message(session_id, "system", f"INTENT_SET: {intent}")
+                else:
+                    send_whatsapp_message(
+                        sender,
+                        "I'm sorry, I didn't quite catch that. I can help with task assignment, "
+                        "updates, performance reports, and user management. What would you like to do?",
+                        pid
+                    )
+                    end_session_complete(login_code, session_id)
+                    return
+                
+        # Context Setup 
+        AGENT2_INTENTS = {"TASK_ASSIGNMENT", "UPDATE_TASK_STATUS", "ADD_USER", "DELETE_USER", "VIEW_EMPLOYEE_PERFORMANCE"}
+        agent2_required = intent in AGENT2_INTENTS
+        
+        if message and not command:
+            set_pending_document(session_id, message)
+            send_whatsapp_message(
+                sender, 
+                "I've received your document. Would you like to 'Assign a new task' with this or 'Update an existing task'?", 
+                pid
+            )
+            return
+        pending_doc = get_pending_document(session_id)
+        ctx_document = pending_doc if pending_doc else message
         ctx = ManagerContext(
             sender_phone=sender,
             role=role,
@@ -1198,14 +1220,12 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             try:
                 if intent == "VIEW_EMPLOYEES_UNDER_MANAGER":
                     await get_task_list_tool(ctx, view="users")
-                    end_session_complete(login_code, session_id)
                 elif intent == "VIEW_PENDING_TASKS":
                     pending = await get_task_list_tool(ctx, view="tasks")
                     if pending:
                         send_whatsapp_message(sender, "\n".join(pending), pid)
                 elif intent == "VIEW_EMPLOYEE_PERFORMANCE":
                     await get_performance_report_tool(ctx)
-                    end_session_complete(login_code, session_id)
             except Exception as e:
                 logger.error(f"Error executing direct tool {intent}: {e}")
             finally:
@@ -1244,7 +1264,6 @@ Your job:
 - Reuse ANY information already present in the user query
 - Extract missing values ONLY if they are not clearly specified
 - If ALL required fields are present → return JSON
-- If 'document_data' is present in the context history but the user has not provided a specific task name, use "Document Task" as the default task_name.
 - If ANY required field is missing → ask ONE clear follow-up question
 - Do NOT invent values
 - Do NOT repeat information already given
