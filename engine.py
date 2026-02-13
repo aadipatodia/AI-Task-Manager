@@ -1130,93 +1130,53 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         # Logging        
         log_reasoning("DEBUG_STATE", {"is_cross_questioning": is_cross_questioning, "existing_intent": existing_intent, "last_assistant_msg": last_assistant_msg})
 
-        # --- REVISED LOGIC: ALWAYS START WITH AGENT 1 UNLESS CLARIFYING ---
+        # --- NEW DOCUMENT & INTENT RESOLUTION ---
         intent = None
         is_supported = False
+        
+        # 1. Capture Document Data and Check for "Doc-Only" uploads
+        # We define these locally here to ensure they are available for logic
+        is_current_msg_doc = message is not None
+        pending_doc_data = get_pending_document(session_id)
 
-        # Only skip Agent 1 if we are in the middle of a [CLARIFY] flow
+        # Catch Document-Only messages before anything else
+        if is_current_msg_doc and (not command or command.strip() == ""):
+            set_pending_document(session_id, message)
+            prompt_msg = "I've received your document. Would you like to 'Assign a new task' with this or 'Update status of a specific task'?"
+            append_message(session_id, "assistant", f"[CLARIFY] {prompt_msg}")
+            send_whatsapp_message(sender, prompt_msg, pid)
+            log_reasoning("DOC_ONLY_FLOW", "Document received without text. Choice prompt sent.")
+            return # EXIT EARLY - Wait for user to pick an action
+
+        # 2. Resolve Intent (For text messages or replies to choice prompt)
         if is_cross_questioning and existing_intent:
             intent = existing_intent
             is_supported = True
-            
-            # LOG: Resuming an existing conversation flow
-            log_reasoning("SESSION_FLOW", {
-                "action": "RESUME_AGENT_2",
-                "intent": intent,
-                "reason": "User is replying to a [CLARIFY] question",
-                "session_id": session_id
-            })
+            log_reasoning("SESSION_FLOW", {"action": "RESUME", "intent": intent})
         else:
-            # LOG: Starting a fresh classification turn
-            log_reasoning("SESSION_FLOW", {
-                "action": "START_AGENT_1",
-                "reason": "New turn or session previously cleared",
-                "existing_intent_in_history": existing_intent
-            })
-
-            # Call Agent 1
-            has_document = is_current_msg_doc or (pending_doc_data is not None)
-            is_supported, intent, confidence, reasoning = intent_classifier(command, has_document=has_document)
+            # Check if a doc exists now OR is waiting in Redis
+            has_doc_context = is_current_msg_doc or (pending_doc_data is not None)
             
-            log_reasoning("INTENT_CLASSIFIED", {
-                "intent": intent,
-                "confidence": confidence,
-                "is_supported": is_supported,
-                "reasoning": reasoning
-            })
+            # Call Agent 1 (Intent Classifier)
+            is_supported, intent, confidence, reasoning = intent_classifier(command, has_document=has_doc_context)
 
             if is_supported and intent:
-                # LOG: New intent successfully locked in
-                log_reasoning("SESSION_UPDATE", {
-                    "action": "SET_NEW_INTENT",
-                    "new_intent": intent,
-                    "previous_intent": existing_intent
-                })
-                
-                # Save the new intent to start a fresh Agent 2 session
+                log_reasoning("INTENT_CLASSIFIED", {"intent": intent, "has_doc": has_doc_context})
                 append_message(session_id, "system", f"INTENT_SET: {intent}")
             else:
-                # LOG: Failure to understand user input
-                log_reasoning("SESSION_FAILURE", {
-                    "reason": "Unsupported or null intent",
-                    "user_command": command,
-                    "classifier_reasoning": reasoning
-                })
-
-                send_whatsapp_message(
-                    sender,
-                    "I'm sorry, I didn't quite catch that. How can I help with your tasks today?",
-                    pid
-                )
-                
-                # LOG: Cleaning up session after failure
-                log_reasoning("SESSION_CLEANUP", {"action": "end_session_complete", "session_id": session_id})
+                # Failure fallback - Only send if there is no doc waiting either
+                log_reasoning("CLASSIFICATION_FAILED", {"reasoning": reasoning})
+                send_whatsapp_message(sender, "I'm sorry, I didn't quite catch that. How can I help with your tasks today?", pid)
                 end_session_complete(login_code, session_id)
                 return
-            
-        # Context Setup 
-        AGENT2_INTENTS = {"TASK_ASSIGNMENT", "UPDATE_TASK_STATUS", "ADD_USER", "DELETE_USER", "VIEW_EMPLOYEE_PERFORMANCE"}
-        agent2_required = intent in AGENT2_INTENTS
-        
-        if is_current_msg_doc and not command:
-            set_pending_document(session_id, message)
-            send_whatsapp_message(
-                sender, 
-                "I've received your document. Would you like to 'Assign a new task' with this or 'Update status of a specific task'?",
-                pid
-            )
-            return
 
-        # Re-establish ctx_document
+        # 3. Finalize Context Document
         ctx_document = None
         if is_current_msg_doc:
             set_pending_document(session_id, message)
             ctx_document = message
-            log_reasoning("DOC_PERSISTENCE", "New document received and stored.")
         elif pending_doc_data:
-            set_pending_document(session_id, pending_doc_data) # Keep it alive for tools/clarification
             ctx_document = pending_doc_data
-            log_reasoning("DOC_PERSISTENCE", "Using existing pending document from Redis.")
 
         ctx = ManagerContext(
             sender_phone=sender,
