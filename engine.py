@@ -1067,13 +1067,14 @@ def merge_slots(session_id: str, new_slots: dict):
     append_message(session_id, "slots", merged)
     return merged
 
-def check_for_reset_trigger(message: str) -> bool:
+def check_for_reset_trigger(command: str, sender: str, pid: str, users_collection) -> bool:
     """
-    Checks if the user explicitly wants to kill the current session.
+    Checks if user wants to reset. If yes, clears session and sends message.
+    Returns True if reset was triggered (caller should return immediately).
     """
-    if not message:
+    if not command:
         return False
-        
+    
     reset_phrases = [
         "reset conversation",
         "clear session",
@@ -1081,8 +1082,34 @@ def check_for_reset_trigger(message: str) -> bool:
         "start over"
     ]
     
-    # Normalize and check for exact match
-    return message.lower().strip() in reset_phrases
+    # Check for exact match
+    if command.lower().strip() not in reset_phrases:
+        return False
+    
+    # Reset triggered - now resolve user and clear session
+    try:
+        user = resolve_user_by_phone(users_collection, sender)
+        manager_phone = normalize_phone(os.getenv("MANAGER_PHONE", ""))
+        
+        if not user and sender == manager_phone:
+            user = {"login_code": "MANAGER", "phone": sender, "name": "Manager"}
+        
+        if user:
+            login_code = user["login_code"]
+            session_id = get_or_create_session(login_code)
+            end_session_complete(login_code, session_id)
+            log_reasoning("CONVERSATION_RESET", {"sender": sender, "trigger": command})
+        
+        send_whatsapp_message(
+            sender, 
+            "Ok lets start again, please tell me how can I be of your help", 
+            pid
+        )
+        return True
+        
+    except Exception as e:
+        logger.error(f"Reset trigger failed: {e}")
+        return True  # Still return True to prevent further processing
 
 async def handle_message(command, sender, pid, message=None, full_message=None):
     
@@ -1094,6 +1121,9 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         if not command and not message:
             return
         
+        if check_for_reset_trigger(command, sender, pid, users_collection):
+            return 
+        
         #  Authorization
         manager_phone = normalize_phone(os.getenv("MANAGER_PHONE", ""))
         team = load_team()
@@ -1101,18 +1131,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         # ====== ADD THIS SECTION HERE ======
         login_code = user["login_code"]
         session_id = get_or_create_session(login_code)
-
-        # --- INTEGRATION START ---
-        if check_for_reset_trigger(command):
-            log_reasoning("MANUAL_RESET_TRIGGERED", {"user": login_code})
-            end_session_complete(login_code, session_id)
-            send_whatsapp_message(sender, "Your session has been reset. How can I help you from scratch?", pid)
-            return
-        # --- INTEGRATION END ---
-
-        # Save user input to history and continue...
-        append_message(session_id, "user", command)
-        # ====== END OF NEW SECTION ======
+        
         # Determine Role
         if sender == manager_phone:
             role = "manager"
