@@ -91,6 +91,8 @@ This intent is triggered when a user wants to **update the status of an existing
 * “Mark the login bug task as completed”
 * “Update task status to in progress”
 * “I have finished the report task”
+* "Mark this task complete based on the document"
+* "Upload this evidence and mark task as done"
 * “Close the task assigned to me”
 
 **IMPORTANT: When document is sent:**
