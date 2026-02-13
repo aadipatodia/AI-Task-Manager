@@ -21,7 +21,7 @@ def resolve_user_by_phone(
         return None
 
     normalized = normalize_phone(phone)
-    return users_collection.find_one({"phone": normalized})
+    return users_collection.find_one({"phone": normalized}, {"_id": 0})
 
 def resolve_user_by_phone_or_email(users_collection, value: str):
     value = value.strip().lower()

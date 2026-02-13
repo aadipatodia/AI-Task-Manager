@@ -7,7 +7,7 @@ from google.genai import Client
 # Load environment variables
 load_dotenv()
 
-MODEL_NAME = "gemini-2.5-pro"
+MODEL_NAME = "gemini-2.0-flash"
 
 SUPPORTED_INTENTS = {
     "TASK_ASSIGNMENT",

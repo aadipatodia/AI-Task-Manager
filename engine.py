@@ -27,6 +27,7 @@ from redis_session import (
 )
 from intent_classifier import intent_classifier
 from user_resolver import resolve_user_by_phone
+from agent3 import agent3_intent_guard
 import asyncio 
 from datetime import timezone, timedelta
 
@@ -184,9 +185,12 @@ API_CONFIGS = {
     }
 }
 
-class ManagerContext(BaseModel):
+class UserContext(BaseModel):
+    """Per-user context passed to all tool functions."""
     sender_phone: str
-    role: str
+    login_code: str
+    user_name: str
+    role: str  # "manager" or "employee" — derived dynamically
     current_time: datetime.datetime = Field(
         default_factory=lambda: datetime.datetime.now(IST)
     )
@@ -300,11 +304,15 @@ class AddDeleteUserRequest(BaseModel):
     
 async def run_gemini_extractor(prompt: str, message: str):
     client = Client(api_key=os.getenv("GEMINI_API_KEY"))
+
     async def _gemini_call(client, prompt, message):
-        return client.models.generate_content(
-            model="gemini-2.5-pro",
-            contents=f"{prompt}\n\nUSER MESSAGE:\n{message}"
+        return await asyncio.to_thread(
+            lambda: client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=f"{prompt}\n\nUSER MESSAGE:\n{message}"
+            )
         )
+
     response = await timed_api_call(
         "GEMINI_GENERATE_CONTENT",
         _gemini_call,
@@ -313,17 +321,36 @@ async def run_gemini_extractor(prompt: str, message: str):
         message
     )
 
-    text = response.text.strip()
-    log_reasoning("AGENT_2_OUTPUT", text)
-    # If Gemini returns JSON → parse
-    if text.startswith("{"):
-        return json.loads(text)
+    if not response:
+        raise ValueError("Gemini returned empty response")
 
-    # Otherwise → treat as user-facing follow-up question
+    # 🔒 Safe extraction
+    text = None
+    if hasattr(response, "text") and response.text:
+        text = response.text.strip()
+    elif hasattr(response, "candidates"):
+        try:
+            text = response.candidates[0].content.parts[0].text.strip()
+        except Exception:
+            pass
+
+    if not text:
+        raise ValueError(f"Invalid Gemini response format: {response}")
+
+    log_reasoning("AGENT_2_OUTPUT", text)
+
+    if text.startswith("{"):
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            # Gemini returned something that looks like JSON but isn't valid
+            pass
+
     return text
 
-def AGENT_2_POLICY(current_time: datetime.datetime) -> str:
-    team = load_team()
+def AGENT_2_POLICY(current_time: datetime.datetime, user_phone: str = "") -> str:
+    # If user_phone provided, scope team to their direct reports; else global
+    team = get_team_for_user(user_phone) if user_phone else load_team()
     team_description = "\n".join(
         [f"- {u['name']} (Login: {u['login_code']})" for u in team]
     )
@@ -362,7 +389,7 @@ IMPORTANT:
 """
 
 def load_team():
-    """Ab ye function 100% dynamic hai, sirf MongoDB se users fetch karega."""
+    """Load ALL users from MongoDB (global list)."""
     if users_collection is None:
         logger.error("MongoDB connection cant be initialized")
         return []
@@ -377,8 +404,37 @@ def load_team():
         logger.error(f"Failed to fetch users from MongoDB: {e}")
         return []
 
+
+def resolve_role(user_phone: str) -> str:
+    """
+    Determine if a user is a 'manager' or 'employee'.
+    A user is a manager if ANY other user in MongoDB has
+    manager_phone == this user's phone.
+    """
+    if users_collection is None:
+        return "employee"
+    phone = normalize_phone(user_phone)
+    subordinate = users_collection.find_one({"manager_phone": phone, "phone": {"$ne": phone}})
+    if subordinate:
+        return "manager"
+    return "employee"
+
+
+def get_team_for_user(user_phone: str) -> list:
+    """
+    Return only users who report to this phone number (direct reports).
+    Excludes the manager themselves from the list.
+    """
+    if users_collection is None:
+        return []
+    phone = normalize_phone(user_phone)
+    return list(users_collection.find(
+        {"manager_phone": phone, "phone": {"$ne": phone}},
+        {"_id": 0}
+    ))
+
 async def add_user_tool(
-    ctx: ManagerContext,
+    ctx: UserContext,
     name: str,
     mobile: str,
     email: Optional[str] = None
@@ -444,7 +500,8 @@ async def add_user_tool(
                 "name": name.lower().strip(),
                 "phone": normalize_phone(mobile),
                 "email": email or None,
-                "login_code": login_code
+                "login_code": login_code,
+                "manager_phone": normalize_phone(ctx.sender_phone)
             }
             
             if users_collection is not None:
@@ -459,7 +516,7 @@ async def add_user_tool(
     return None
 
 async def delete_user_tool(
-    ctx: ManagerContext,
+    ctx: UserContext,
     name: str,
     mobile: str,
     email: Optional[str] = None
@@ -644,21 +701,31 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
         logger.error(f"Exception calling API {key}: {str(e)}")
         return None
 
-def download_and_encode_document(document_data: Dict):
-    """Downloads media from Meta and returns base64 string."""
+async def download_and_encode_document(document_data: Dict):
+    """Downloads media from Meta and returns base64 string (non-blocking)."""
     try:
         access_token = os.getenv("ACCESS_TOKEN")
         media_id = document_data.get("id")
         
         headers = {"Authorization": f"Bearer {access_token}"}
-        r = requests.get(f"https://graph.facebook.com/v20.0/{media_id}/", headers=headers)
+        r = await asyncio.to_thread(
+            requests.get,
+            f"https://graph.facebook.com/v20.0/{media_id}/",
+            headers=headers,
+            timeout=10
+        )
         
         if r.status_code != 200:
             logger.error("Failed to get media URL")
             return None
         
         download_url = r.json().get("url")
-        dr = requests.get(download_url, headers=headers)
+        dr = await asyncio.to_thread(
+            requests.get,
+            download_url,
+            headers=headers,
+            timeout=15
+        )
         
         if dr.status_code == 200:
             return base64.b64encode(dr.content).decode("utf-8")
@@ -669,7 +736,7 @@ def download_and_encode_document(document_data: Dict):
         return None
 
 async def send_whatsapp_report_tool(
-    ctx: ManagerContext,
+    ctx: UserContext,
     report_type: str,
     status: str,
     assigned_to: Optional[str] = None
@@ -745,12 +812,13 @@ async def get_pending_tasks(login_code: str) -> List[str]:
     return pending
 
 async def get_performance_report_tool(
-    ctx: ManagerContext,
+    ctx: UserContext,
     report_type: str,  # Now passed from Gemini's extracted JSON
     name: Optional[str] = None
 ) -> None:
     try:
-        team = load_team()
+        # Scope to current user's direct reports
+        team = get_team_for_user(ctx.sender_phone)
 
         # Resolve target login_code if a name is provided
         target_login = ""
@@ -761,7 +829,7 @@ async def get_performance_report_tool(
                 None
             )
             if not user:
-                logger.error(f"User {name} not found for performance report.")
+                logger.error(f"User {name} not found in your team for performance report.")
                 return None
             target_login = user["login_code"]
 
@@ -788,32 +856,21 @@ async def get_performance_report_tool(
         return None
 
 async def get_task_list_tool(
-    ctx: ManagerContext,
+    ctx: UserContext,
     view: str = "tasks"   
 ) -> None:
     sender_mobile = ctx.sender_phone[-10:]
 
-    # Handle the users list view
+    # Handle the users list view — scoped to current user's direct reports
     if view == "users":
         req = GetUsersByWhatsappRequest(WHATSAPP_MOBILE_NUMBER=sender_mobile)
         await call_appsavy_api("GET_USERS_BY_WHATSAPP", req)
         return None
 
-    # Identify the user from MongoDB to get their unique login_code
-    team = load_team() 
-    user = next(
-        (u for u in team if u["phone"] == normalize_phone(ctx.sender_phone)),
-        None
-    )  
-    
-    if not user:
-        logger.error(f"User not found in system for phone: {ctx.sender_phone}")
-        return None
-
-    # Construct request as per 'get user task list.txt' documentation
+    # Use login_code from context directly (no MongoDB round-trip needed)
     req = GetUserTasksRequest(
         SID="675",
-        EMPLOYEE=user["login_code"],
+        EMPLOYEE=ctx.login_code,
         WHATSAPP_MOBILE_NUMBER=sender_mobile,
         ASSIGNMENT="",
         STATUS=""
@@ -918,13 +975,14 @@ def extract_remark(text: str, task_id: str):
     return t.capitalize() if t else ""
 
 async def assign_new_task_tool(
-    ctx: ManagerContext,
+    ctx: UserContext,
     assignee: str,          # name OR phone
     task_name: str,
     deadline: str
 ) -> Optional[str]:
     try:
-        team = load_team()  # This already loads from MongoDB
+        # Scope to current user's direct reports
+        team = get_team_for_user(ctx.sender_phone)
         assignee_raw = assignee.strip()
 
         log_reasoning("ASSIGN_TASK_START", {
@@ -972,9 +1030,6 @@ async def assign_new_task_tool(
         # Unique user resolved
         user = matches[0]
         login_code = user["login_code"]
-            
-        user = matches[0]
-        login_code = user["login_code"]
 
         log_reasoning("ASSIGNEE_RESOLVED", {
             "login_code": login_code,
@@ -987,7 +1042,7 @@ async def assign_new_task_tool(
             media_type = document_data.get("type") 
             media_info = document_data.get(media_type)
             if media_info:
-                base64_data = download_and_encode_document(media_info)
+                base64_data = await download_and_encode_document(media_info)
                 if base64_data:
                     fname = media_info.get("filename") or "attachment"
                     documents_child.append(
@@ -1025,7 +1080,7 @@ APPSAVY_STATUS_MAP = {
 }
 
 async def update_task_status_tool(
-    ctx: ManagerContext,
+    ctx: UserContext,
     task_id: str,
     status: str,
     remark: Optional[str] = None
@@ -1048,7 +1103,7 @@ async def update_task_status_tool(
         media_type = ctx.document_data.get("type")
         media_info = ctx.document_data.get(media_type)
         if media_info:
-            base64_data = download_and_encode_document(media_info)
+            base64_data = await download_and_encode_document(media_info)
             if base64_data:
                 doc_value = media_info.get("filename") or "update_attachment"
                 doc_base64 = base64_data
@@ -1100,14 +1155,10 @@ def normalize_phone(phone: str) -> str:
 
 def merge_slots(session_id: str, new_slots: dict):
     history = get_session_history(session_id)
-    log_reasoning("SESSION_HISTORY_LOG", {
-        "session_id": session_id,
-        "full_history": [f"{m['role']}: {m['content']}" for m in history]
-    })
 
-    # find existing slots
+    # find the MOST RECENT slots entry (not the first)
     existing = next(
-        (msg["content"] for msg in history if msg["role"] == "slots"),
+        (msg["content"] for msg in reversed(history) if msg["role"] == "slots"),
         {}
     )
     merged = {**existing, **new_slots}
@@ -1132,40 +1183,20 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         if not command and not message:
             return
 
-        #  Authorization
-        manager_phone = normalize_phone(os.getenv("MANAGER_PHONE", ""))
-        team = load_team()
-
-        # Determine Role
-        if sender == manager_phone:
-            role = "manager"
-        elif any(normalize_phone(u["phone"]) == sender for u in team):
-            role = "employee"
-        else:
-            user_temp = resolve_user_by_phone(users_collection, sender)
-            if user_temp:
-                end_session_complete(user_temp["login_code"], get_or_create_session(user_temp["login_code"]))
-            
-            send_whatsapp_message(sender, "Access Denied: Your number is not authorized.", pid)
-            return
-
+        # ──── AUTH: Resolve user from MongoDB (multi-user) ────
         user = resolve_user_by_phone(users_collection, sender)
-        if not user and sender == manager_phone:
-            user = {"login_code": "MANAGER", "phone": sender, "name": "Manager"}
-
         if not user:
             send_whatsapp_message(sender, "Access Denied: Your number is not registered.", pid)
             return
 
         login_code = user["login_code"]
-        session_id = get_or_create_session(login_code)
-        
-        # Save user input to history
-        append_message(session_id, "user", command)
+        role = resolve_role(sender)  # Dynamic: manager if anyone reports to them
 
+        session_id = get_or_create_session(login_code)
+
+        # ──── HARD RESET CHECK ────
         if command and command.strip().lower() in RESET_PHRASES:
             log_reasoning("HARD_RESET_TRIGGERED", {"by": sender})
-            # Clear entire session state
             clear_pending_document_state(session_id)
             end_session_complete(login_code, session_id)
             send_whatsapp_message(
@@ -1174,7 +1205,25 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 pid
             )
             return
-        
+
+        # ──── AGENT 3: INTENT SHIFT GUARD ────
+        # Must run BEFORE appending the new user message to history
+        action, clarification_msg = await agent3_intent_guard(session_id, command)
+
+        if action == "ASK_CLARIFICATION":
+            log_reasoning("AGENT_3_SHIFT_DETECTED", {"message": clarification_msg})
+            send_whatsapp_message(sender, clarification_msg, pid)
+            return
+
+        if action == "RESET":
+            log_reasoning("AGENT_3_RESET", {"reason": "Intent shift or inactivity"})
+            end_session_complete(login_code, session_id)
+            session_id = get_or_create_session(login_code)
+
+        # Save user input to history (after agent3 check)
+        if command and command.strip():
+            append_message(session_id, "user", command)
+
         log_reasoning("USER_INPUT_RECEIVED", {"sender": sender, "command": command})
         history = get_session_history(session_id)
         log_reasoning("SESSION_HISTORY_LOG", {
@@ -1283,7 +1332,9 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 # ============= END DOCUMENT VALIDATION =============
             else:
                 # CONDITION: Intent is null -> Agent 1 call
-                is_supported, intent, confidence, reasoning = intent_classifier(command)
+                is_supported, intent, confidence, reasoning = await asyncio.to_thread(
+                    intent_classifier, command
+                )
         
                 log_reasoning("INTENT_CLASSIFIED", {
                     "intent": intent,
@@ -1311,8 +1362,10 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         
         pending_doc = get_pending_document(session_id)
         ctx_document = pending_doc if pending_doc else message
-        ctx = ManagerContext(
+        ctx = UserContext(
             sender_phone=sender,
+            login_code=login_code,
+            user_name=user.get("name", "User"),
             role=role,
             current_time=datetime.datetime.now(IST),
             document_data=ctx_document 
@@ -1537,7 +1590,6 @@ Rules:
         # Agent 2 produced JSON (the "Flag" is now set to true)
         merged_data = merge_slots(session_id, result)
         log_reasoning("AGENT_2_FLAG_TRUE", {"parameters_extracted": merged_data})
-        append_message(session_id, "slots", merged_data)
 
         # Execute Tool Calls
         try:
@@ -1590,5 +1642,6 @@ Rules:
         try:
             if 'session_id' in locals():
                 clear_pending_document_state(session_id)
-        except:
+                end_session_complete(login_code, session_id)
+        except Exception:
             pass
