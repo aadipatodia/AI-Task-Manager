@@ -15,8 +15,6 @@ from send_message import send_whatsapp_message
 from redis_session import (
     get_or_create_session,
     append_message,
-    set_pending_document,
-    get_pending_document,
     set_pending_document_state,
     get_pending_document_state,
     clear_pending_document_state,
