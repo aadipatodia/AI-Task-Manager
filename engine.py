@@ -1067,26 +1067,13 @@ def merge_slots(session_id: str, new_slots: dict):
     append_message(session_id, "slots", merged)
     return merged
 
-def should_reset_conversation(message: str) -> bool:
-    """
-    Check if the user message contains exact reset trigger phrases.
-    Returns True only if the message IS one of the trigger phrases (not just contains it).
-    """
-    if not message:
-        return False
-    
-    # Normalize the message
-    normalized_msg = message.strip().lower()
-    
-    # Define exact trigger phrases
-    RESET_TRIGGERS = [
-        "reset conversation",
-        "start over",
-        "clear chat"
-    ]
-    
-    # Check for exact match (not substring)
-    return normalized_msg in RESET_TRIGGERS
+# Hard conversation reset phrases
+RESET_PHRASES = {
+    "start over",
+    "reset conversation",
+    "clear chat",
+    "cancel this"
+}
 
 async def handle_message(command, sender, pid, message=None, full_message=None):
     
@@ -1128,6 +1115,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         
         # Save user input to history
         append_message(session_id, "user", command)
+        
         log_reasoning("USER_INPUT_RECEIVED", {"sender": sender, "command": command})
         history = get_session_history(session_id)
         log_reasoning("SESSION_HISTORY_LOG", {
@@ -1477,4 +1465,3 @@ Rules:
 
     except Exception:
         logger.error("handle_message failed", exc_info=True)
-        
