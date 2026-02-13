@@ -120,7 +120,7 @@ This intent is triggered when the user wants to **remove or deactivate an existi
 ---
 
 ### **DOCUMENT_UPLOAD_HANDLING**
-If the user has uploaded a document and is responding to the bot's question: "Would you like to 'Assign a new task' with this or 'Update an existing task'?", the intent **MUST** be one of the following two:
+If the user has uploaded a document and is responding to the bot's question: "Would you like to 'Assign a new task' with this or 'Update status of a specific task'?", the intent **MUST** be one of the following two:
 The decision MUST be based on the content of the user's message.
 
 1. **TASK_ASSIGNMENT**
