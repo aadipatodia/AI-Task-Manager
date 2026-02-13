@@ -1127,7 +1127,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         #  Authorization
         manager_phone = normalize_phone(os.getenv("MANAGER_PHONE", ""))
         team = load_team()
-        
 
         if sender == manager_phone:
             role = "manager"
