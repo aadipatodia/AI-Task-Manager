@@ -455,13 +455,16 @@ async def add_user_tool(
     # The auth gate already ensures sender is registered.
     # The new user's manager_phone will be set to the sender,
     # placing them below the sender in the hierarchy.
+
+    # Normalize mobile: strip spaces, +, country code → clean 10 digits
+    clean_mobile = normalize_phone(mobile)[-10:]
     
     req = AddDeleteUserRequest(
         ACTION="Add",
         CREATOR_MOBILE_NUMBER=ctx.sender_phone[-10:],
         NAME=name,
         EMAIL=email or "",
-        MOBILE_NUMBER=mobile[-10:]
+        MOBILE_NUMBER=clean_mobile
     )
 
     res = await call_appsavy_api("ADD_DELETE_USER", req)
@@ -540,12 +543,15 @@ async def delete_user_tool(
         )
         return "You can only remove users who are under you in the hierarchy."
 
+    # Normalize mobile: strip spaces, +, country code → clean 10 digits
+    clean_mobile = normalize_phone(mobile)[-10:]
+
     req = AddDeleteUserRequest(
         ACTION="Delete",
         CREATOR_MOBILE_NUMBER=ctx.sender_phone[-10:],
         NAME=name,
         EMAIL=email or "",
-        MOBILE_NUMBER=mobile[-10:]
+        MOBILE_NUMBER=clean_mobile
     )
 
     res = await call_appsavy_api("ADD_DELETE_USER", req)
@@ -564,7 +570,7 @@ async def delete_user_tool(
         if users_collection is not None:
             users_collection.delete_one({"phone": target_phone})
             logger.info(
-                f"User with mobile {mobile[-10:]} removed from MongoDB."
+                f"User with mobile {clean_mobile} removed from MongoDB."
             )
         return None
 
