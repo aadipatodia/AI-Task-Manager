@@ -1123,6 +1123,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         if command and command.strip().lower() in RESET_PHRASES:
             log_reasoning("HARD_RESET_TRIGGERED", {"by": sender})
             # Clear entire session state
+            clear_pending_document_state(session_id)
             end_session_complete(login_code, session_id)
             send_whatsapp_message(
                 sender,
@@ -1153,81 +1154,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         # Logging        
         log_reasoning("DEBUG_STATE", {"is_cross_questioning": is_cross_questioning, "existing_intent": existing_intent, "last_assistant_msg": last_assistant_msg})
 
-        intent = None
-        is_supported = False
-
-        if is_cross_questioning:
-            if existing_intent:
-                # CONDITION: Cross question and intent is not null -> Agent 2
-                intent = existing_intent
-                is_supported = True
-                log_reasoning("AGENT_2_RESUME", {"intent": intent, "reason": "Reply to [CLARIFY]"})
-            else:
-                # CONDITION : Cross question and intent is null -> Error
-                log_reasoning("ERROR", {"reason": "Cross-question state detected but no existing_intent found."})
-                send_whatsapp_message(sender, "System error: Lost context of previous request. Please start over.", pid)
-                end_session_complete(login_code, session_id)
-                return
-        else:
-            if existing_intent:
-                # CONDITION: Intent is not null (not in cross-question) -> Agent 2
-                intent = existing_intent
-                is_supported = True
-                log_reasoning("AGENT_2_CONTINUE", {"intent": intent})
-                doc_state = get_pending_document_state(session_id)
-                has_pending_doc = get_pending_document(session_id) is not None
-                if has_pending_doc and doc_state and not doc_state.get("is_first_message"):
-            # Document sent AFTER intent was already set
-            # Intent MUST be one of: TASK_ASSIGNMENT or UPDATE_TASK_STATUS
-                    log_reasoning("DOCUMENT_INTENT_VALIDATION", {
-                        "document_exists": True,
-                        "is_continuation": True,
-                        "must_validate_intent": existing_intent
-                    })
-            
-            # Validate that existing_intent is one of the two allowed values
-                    if existing_intent not in ["TASK_ASSIGNMENT", "UPDATE_TASK_STATUS"]:
-                        log_reasoning("DOCUMENT_INTENT_ERROR", {
-                            "error": f"Document sent with invalid intent '{existing_intent}'",
-                            "must_be_one_of": ["TASK_ASSIGNMENT", "UPDATE_TASK_STATUS"]
-                        })
-                        send_whatsapp_message(
-                            sender,
-                            "Error: Documents can only be used with 'Assign a new task' or 'Update status of a task'.",
-                            pid
-                        )
-                        clear_pending_document_state(session_id)
-                        end_session_complete(login_code, session_id)
-                        return
-        # ============= END DOCUMENT VALIDATION =============
-            else:
-                # CONDITION: Intent is null -> Agent 1 call
-                is_supported, intent, confidence, reasoning = intent_classifier(command)
-        
-                log_reasoning("INTENT_CLASSIFIED", {
-                    "intent": intent,
-                    "confidence": confidence,
-                    "reasoning": reasoning,
-                    "is_supported": is_supported
-                })
-
-                if is_supported and intent:
-                    append_message(session_id, "system", f"INTENT_SET: {intent}")
-                else:
-                    send_whatsapp_message(
-                        sender,
-                        "I'm sorry, I didn't quite catch that. I can help with task assignment, "
-                        "updates, performance reports, and user management. What would you like to do?",
-                        pid
-                    )
-                    end_session_complete(login_code, session_id)
-                    return
-                
-        # Context Setup 
-        AGENT2_INTENTS = {"TASK_ASSIGNMENT", "UPDATE_TASK_STATUS", "ADD_USER", "DELETE_USER", "VIEW_EMPLOYEE_PERFORMANCE"}
-        agent2_required = intent in AGENT2_INTENTS
-        
-                # ============= DOCUMENT HANDLING =============
+        # ============= DOCUMENT HANDLING (FIRST CHECK) =============
         if message and not command:
             log_reasoning("DOCUMENT_RECEIVED", {
                 "type": message.get("type"),
@@ -1257,7 +1184,87 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                     "existing_intent": existing_intent,
                     "intent_must_be_one_of_two": ["TASK_ASSIGNMENT", "UPDATE_TASK_STATUS"]
                 })
+                # Continue below with existing intent
+        # ============= END DOCUMENT HANDLING =============
+
+        intent = None
+        is_supported = False
+
+        if is_cross_questioning:
+            if existing_intent:
+                # CONDITION: Cross question and intent is not null -> Agent 2
+                intent = existing_intent
+                is_supported = True
+                log_reasoning("AGENT_2_RESUME", {"intent": intent, "reason": "Reply to [CLARIFY]"})
+            else:
+                # CONDITION : Cross question and intent is null -> Error
+                log_reasoning("ERROR", {"reason": "Cross-question state detected but no existing_intent found."})
+                send_whatsapp_message(sender, "System error: Lost context of previous request. Please start over.", pid)
+                clear_pending_document_state(session_id)
+                end_session_complete(login_code, session_id)
+                return
+        else:
+            if existing_intent:
+                # CONDITION: Intent is not null (not in cross-question) -> Agent 2
+                intent = existing_intent
+                is_supported = True
+                log_reasoning("AGENT_2_CONTINUE", {"intent": intent})
+                
+                # ============= DOCUMENT VALIDATION (if not first message) =============
+                doc_state = get_pending_document_state(session_id)
+                has_pending_doc = get_pending_document(session_id) is not None
+                
+                if has_pending_doc and doc_state and not doc_state.get("is_first_message"):
+                    # Document sent AFTER intent was already set
+                    # Intent MUST be one of: TASK_ASSIGNMENT or UPDATE_TASK_STATUS
+                    log_reasoning("DOCUMENT_INTENT_VALIDATION", {
+                        "document_exists": True,
+                        "is_continuation": True,
+                        "must_validate_intent": existing_intent
+                    })
+            
+                    # Validate that existing_intent is one of the two allowed values
+                    if existing_intent not in ["TASK_ASSIGNMENT", "UPDATE_TASK_STATUS"]:
+                        log_reasoning("DOCUMENT_INTENT_ERROR", {
+                            "error": f"Document sent with invalid intent '{existing_intent}'",
+                            "must_be_one_of": ["TASK_ASSIGNMENT", "UPDATE_TASK_STATUS"]
+                        })
+                        send_whatsapp_message(
+                            sender,
+                            "Error: Documents can only be used with 'Assign a new task' or 'Update status of a task'.",
+                            pid
+                        )
+                        clear_pending_document_state(session_id)
+                        end_session_complete(login_code, session_id)
+                        return
+                # ============= END DOCUMENT VALIDATION =============
+            else:
+                # CONDITION: Intent is null -> Agent 1 call
+                is_supported, intent, confidence, reasoning = intent_classifier(command)
         
+                log_reasoning("INTENT_CLASSIFIED", {
+                    "intent": intent,
+                    "confidence": confidence,
+                    "reasoning": reasoning,
+                    "is_supported": is_supported
+                })
+
+                if is_supported and intent:
+                    append_message(session_id, "system", f"INTENT_SET: {intent}")
+                else:
+                    send_whatsapp_message(
+                        sender,
+                        "I'm sorry, I didn't quite catch that. I can help with task assignment, "
+                        "updates, performance reports, and user management. What would you like to do?",
+                        pid
+                    )
+                    clear_pending_document_state(session_id)
+                    end_session_complete(login_code, session_id)
+                    return
+                
+        # Context Setup 
+        AGENT2_INTENTS = {"TASK_ASSIGNMENT", "UPDATE_TASK_STATUS", "ADD_USER", "DELETE_USER", "VIEW_EMPLOYEE_PERFORMANCE"}
+        agent2_required = intent in AGENT2_INTENTS
         
         pending_doc = get_pending_document(session_id)
         ctx_document = pending_doc if pending_doc else message
@@ -1283,6 +1290,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 logger.error(f"Error executing direct tool {intent}: {e}")
             finally:
                 # Requirement: Clear cache on every successful or failed call
+                clear_pending_document_state(session_id)
                 end_session_complete(login_code, session_id)
             
             return
@@ -1498,20 +1506,24 @@ Rules:
                     append_message(session_id, "assistant", f"[CLARIFY] {tool_output}") 
                     send_whatsapp_message(sender, tool_output, pid)
                     return 
+                clear_pending_document_state(session_id)
                 end_session_complete(login_code, session_id)
             elif intent == "UPDATE_TASK_STATUS" and all(k in merged_data for k in ("task_id", "status")):
                 log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
                 await update_task_status_tool(ctx, **merged_data)
+                clear_pending_document_state(session_id)
                 end_session_complete(login_code, session_id)
 
             elif intent == "ADD_USER" and all(k in merged_data for k in ("name", "mobile")):
                 log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
                 await add_user_tool(ctx, **merged_data)
+                clear_pending_document_state(session_id)
                 end_session_complete(login_code, session_id)
 
             elif intent == "DELETE_USER" and all(k in merged_data for k in ("name", "mobile")):
                 log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
                 await delete_user_tool(ctx, **merged_data)
+                clear_pending_document_state(session_id)
                 end_session_complete(login_code, session_id)
             
             elif intent == "VIEW_EMPLOYEE_PERFORMANCE" and "report_type" in merged_data:
@@ -1521,6 +1533,7 @@ Rules:
                     report_type=merged_data["report_type"], 
                     name=merged_data.get("name")
                 )
+                clear_pending_document_state(session_id)
                 end_session_complete(login_code, session_id)
             
         except Exception as e:
@@ -1532,6 +1545,7 @@ Rules:
     except Exception:
         logger.error("handle_message failed", exc_info=True)
         try:
-            clear_pending_document_state(session_id)
+            if 'session_id' in locals():
+                clear_pending_document_state(session_id)
         except:
             pass
