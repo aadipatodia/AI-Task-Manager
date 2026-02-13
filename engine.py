@@ -1099,19 +1099,19 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         team = load_team()
 
         # ====== ADD THIS SECTION HERE ======
-        if should_reset_conversation(command):
-            user = resolve_user_by_phone(users_collection, sender)
-            if user:
-                login_code = user["login_code"]
-                session_id = get_or_create_session(login_code)
-                end_session_complete(login_code, session_id)
-                log_reasoning("CONVERSATION_RESET", {"sender": sender, "trigger": command})
-                send_whatsapp_message(
-                    sender, 
-                    "Ok lets start again, please tell me how can I be of your help",
-                    pid
-                )
+        login_code = user["login_code"]
+        session_id = get_or_create_session(login_code)
+
+        # --- INTEGRATION START ---
+        if check_for_reset_trigger(command):
+            log_reasoning("MANUAL_RESET_TRIGGERED", {"user": login_code})
+            end_session_complete(login_code, session_id)
+            send_whatsapp_message(sender, "Your session has been reset. How can I help you from scratch?", pid)
             return
+        # --- INTEGRATION END ---
+
+        # Save user input to history and continue...
+        append_message(session_id, "user", command)
         # ====== END OF NEW SECTION ======
         # Determine Role
         if sender == manager_phone:
