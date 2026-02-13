@@ -1670,8 +1670,19 @@ Rules:
             
             try:
                 # Try to parse it. If it works, it's NOT a clarification, it's DATA.
-                result = json.loads(cleaned_result)
-                log_reasoning("AGENT_2_JSON_PARSED", {"source": "string_cleaned"})
+                parsed = json.loads(cleaned_result)
+                # Must be a dict to be valid slot data; a parsed JSON string
+                # (e.g. "What is the mobile number?") is still a clarification.
+                if isinstance(parsed, dict):
+                    result = parsed
+                    log_reasoning("AGENT_2_JSON_PARSED", {"source": "string_cleaned"})
+                else:
+                    # JSON string literal — treat as clarification
+                    clarification_text = parsed if isinstance(parsed, str) else cleaned_result
+                    log_reasoning("AGENT_2_CLARIFICATION_SENT", {"agent_msg": clarification_text})
+                    append_message(session_id, "assistant", f"[CLARIFY] {clarification_text}")
+                    send_whatsapp_message(sender, clarification_text, pid)
+                    return
             except json.JSONDecodeError:
                 # If parsing fails, it's definitely a question/clarification for the user.
                 log_reasoning("AGENT_2_CLARIFICATION_SENT", {"agent_msg": result})
