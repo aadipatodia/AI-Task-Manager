@@ -1072,7 +1072,10 @@ def check_for_reset_trigger(command: str, sender: str, pid: str, users_collectio
     Checks if user wants to reset. If yes, clears session and sends message.
     Returns True if reset was triggered (caller should return immediately).
     """
+    log_reasoning("RESET_CHECK_START", {"command": command, "command_type": type(command).__name__})
+    
     if not command:
+        log_reasoning("RESET_CHECK_FAIL", "command is None or empty")
         return False
     
     reset_phrases = [
@@ -1082,9 +1085,15 @@ def check_for_reset_trigger(command: str, sender: str, pid: str, users_collectio
         "start over"
     ]
     
+    normalized = command.lower().strip()
+    log_reasoning("RESET_CHECK_NORMALIZED", {"normalized": normalized, "checking_against": reset_phrases})
+    
     # Check for exact match
-    if command.lower().strip() not in reset_phrases:
+    if normalized not in reset_phrases:
+        log_reasoning("RESET_CHECK_FAIL", f"'{normalized}' not in reset phrases")
         return False
+    
+    log_reasoning("RESET_TRIGGER_MATCHED", {"phrase": normalized})
     
     # Reset triggered - now resolve user and clear session
     try:
@@ -1109,7 +1118,8 @@ def check_for_reset_trigger(command: str, sender: str, pid: str, users_collectio
         
     except Exception as e:
         logger.error(f"Reset trigger failed: {e}")
-        return True  # Still return True to prevent further processing
+        return True
+
 
 async def handle_message(command, sender, pid, message=None, full_message=None):
     
@@ -1270,6 +1280,15 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         if intent == "TASK_ASSIGNMENT":
             result = await run_gemini_extractor(
                 prompt=f"""You are helping assign a task.
+                
+SPECIAL COMMANDS - If user says ANY of these exact phrases:
+- "start over"
+- "reset conversation"
+- "clear session"
+- "restart bot"
+
+Return ONLY this JSON:
+{{"reset": true}}
 
 KNOWN INFORMATION (do NOT ask again):
 {json.dumps(slots, indent=2)}
@@ -1317,6 +1336,15 @@ Rules:
         elif intent == "UPDATE_TASK_STATUS":
             result = await run_gemini_extractor(
                 prompt=f"""You are helping update a task status.
+                
+SPECIAL COMMANDS - If user says ANY of these exact phrases:
+- "start over"
+- "reset conversation"
+- "clear session"
+- "restart bot"
+
+Return ONLY this JSON:
+{{"reset": true}}
 
 KNOWN INFORMATION (do NOT ask again):
 {json.dumps(slots, indent=2)}
@@ -1361,6 +1389,15 @@ Rules:
         elif intent == "ADD_USER":
             result = await run_gemini_extractor(
                 prompt=f"""You are helping add a new user.
+                
+SPECIAL COMMANDS - If user says ANY of these exact phrases:
+- "start over"
+- "reset conversation"
+- "clear session"
+- "restart bot"
+
+Return ONLY this JSON:
+{{"reset": true}}
 
 KNOWN INFORMATION (do NOT ask again):
 {json.dumps(slots, indent=2)}
@@ -1396,6 +1433,14 @@ Rules:
         elif intent == "VIEW_EMPLOYEE_PERFORMANCE":
             result = await run_gemini_extractor(
                 prompt=f"""
+                SPECIAL COMMANDS - If user says ANY of these exact phrases:
+                - "start over"
+                - "reset conversation"
+                - "clear session"
+                - "restart bot"
+                Return ONLY this JSON:
+                {{"reset": true}}
+                
                 REPORT TYPE RULES:
                 1. If the user mentions a specific person (e.g., "Abhilasha", "Rahul") -> report_type = "Count", name = "extracted name"
                 2. If the user asks for a general/overall report or no name is found -> report_type = "Detail", name = null
@@ -1411,6 +1456,14 @@ Rules:
         elif intent == "DELETE_USER":
             result = await run_gemini_extractor(
                 prompt=f"""You are helping delete a user.
+SPECIAL COMMANDS - If user says ANY of these exact phrases:
+- "start over"
+- "reset conversation"
+- "clear session"
+- "restart bot"
+
+Return ONLY this JSON:
+{{"reset": true}}
 
 KNOWN INFORMATION (do NOT ask again):
 {json.dumps(slots, indent=2)}
@@ -1459,6 +1512,8 @@ Rules:
         merged_data = merge_slots(session_id, result)
         log_reasoning("AGENT_2_FLAG_TRUE", {"parameters_extracted": merged_data})
         append_message(session_id, "slots", merged_data)
+        
+        
 
         # Execute Tool Calls
         try:
