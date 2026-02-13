@@ -1155,7 +1155,8 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             })
 
             # Call Agent 1
-            is_supported, intent, confidence, reasoning = intent_classifier(command)
+            has_document = is_current_msg_doc or (pending_doc_data is not None)
+            is_supported, intent, confidence, reasoning = intent_classifier(command, has_document=has_document)
             
             log_reasoning("INTENT_CLASSIFIED", {
                 "intent": intent,
@@ -1197,28 +1198,25 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         AGENT2_INTENTS = {"TASK_ASSIGNMENT", "UPDATE_TASK_STATUS", "ADD_USER", "DELETE_USER", "VIEW_EMPLOYEE_PERFORMANCE"}
         agent2_required = intent in AGENT2_INTENTS
         
-        if message and not command:
+        if is_current_msg_doc and not command:
             set_pending_document(session_id, message)
             send_whatsapp_message(
                 sender, 
-                "I've received your document. Would you like to 'Assign a new task' with this or 'Update status of a specific task'?", , 
+                "I've received your document. Would you like to 'Assign a new task' with this or 'Update status of a specific task'?",
                 pid
             )
             return
 
-        pending_doc = get_pending_document(session_id)
-
-        # Check if the current message is a document (dictionary with 'type')
-        if message and isinstance(message, dict) and message.get("type"):
-            # If a new doc comes in, store it as the pending doc
+        # Re-establish ctx_document
+        ctx_document = None
+        if is_current_msg_doc:
             set_pending_document(session_id, message)
             ctx_document = message
             log_reasoning("DOC_PERSISTENCE", "New document received and stored.")
-        else:
-            # If no new doc in this turn, check if one was stored previously
-            ctx_document = pending_doc
-            if ctx_document:
-                log_reasoning("DOC_PERSISTENCE", "Using existing pending document from Redis.")
+        elif pending_doc_data:
+            set_pending_document(session_id, pending_doc_data) # Keep it alive for tools/clarification
+            ctx_document = pending_doc_data
+            log_reasoning("DOC_PERSISTENCE", "Using existing pending document from Redis.")
 
         ctx = ManagerContext(
             sender_phone=sender,

@@ -167,12 +167,16 @@ def clean_json(text: str) -> str:
     text = re.sub(r"```$", "", text)
     return text.strip()
 
-def intent_classifier(user_message: str):
+def intent_classifier(user_message: str, has_document: bool = False):
     client = init_gemini()
+
+    prompt = INTENT_CLASSIFIER_PROMPT
+    if has_document:
+        prompt += "\n\nCONTEXT: The user has uploaded a document and is replying to a prompt about it. The intent MUST be either 'TASK_ASSIGNMENT' or 'UPDATE_TASK_STATUS'. Do NOT choose other intents."
 
     response = client.models.generate_content(
         model=MODEL_NAME,
-        contents=f"{INTENT_CLASSIFIER_PROMPT}\n\nUser message:\n{user_message}"
+        contents=f"{prompt}\n\nUser message:\n{user_message}"
     )
 
     cleaned = clean_json(response.text)
