@@ -1247,8 +1247,10 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         # ──── AUTH: Resolve user from MongoDB (multi-user) ────
         user = resolve_user_by_phone(users_collection, sender)
         if not user:
+            top_mgr = get_top_manager_phone()
+            logger.info(f"[AUTH_DEBUG] sender={sender} | top_manager_env={top_mgr} | match={normalize_phone(sender) == top_mgr}")
             # Allow top manager even if not yet seeded in MongoDB
-            if normalize_phone(sender) == get_top_manager_phone():
+            if normalize_phone(sender) == top_mgr:
                 logger.info("[AUTH] Top manager not in DB yet — auto-seeding.")
                 top_user = {
                     "name": "Top Manager",
@@ -1580,17 +1582,21 @@ USER QUERY (verbatim):
 "{command}"
 
 Your job:
-- Reuse information already present
-- Ask ONE follow-up question if something is missing
+- Extract name and mobile number from the user's message
+- Accept whatever name the user provides as-is (first name only is fine)
+- Do NOT ask to confirm or clarify the name — use it exactly as given
+- A 10-digit number (or 12-digit starting with 91) is a valid mobile number
+- Only ask a follow-up if name OR mobile is completely missing
 - Do NOT invent values
+- email is optional — set to null if not provided
 
 Required:
-- name
+- name (accept as-is, do NOT ask for full name)
 - mobile (10 digits)
 Optional:
 - email
 
-If returning JSON, use EXACTLY:
+If BOTH name and mobile are present, return JSON immediately:
 {{
   "name": string,
   "mobile": string,
@@ -1600,6 +1606,7 @@ If returning JSON, use EXACTLY:
 Rules:
 - Either return JSON OR a follow-up question
 - No explanations
+- NEVER ask to confirm the name
 """,
                 message=full_convo_context
             )
