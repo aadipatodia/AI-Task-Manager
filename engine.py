@@ -1067,26 +1067,22 @@ def merge_slots(session_id: str, new_slots: dict):
     append_message(session_id, "slots", merged)
     return merged
 
-def should_reset_conversation(message: str) -> bool:
+def check_for_reset_trigger(message: str) -> bool:
     """
-    Check if the user message contains exact reset trigger phrases.
-    Returns True only if the message IS one of the trigger phrases (not just contains it).
+    Checks if the user explicitly wants to kill the current session.
     """
     if not message:
         return False
-    
-    # Normalize the message
-    normalized_msg = message.strip().lower()
-    
-    # Define exact trigger phrases
-    RESET_TRIGGERS = [
+        
+    reset_phrases = [
         "reset conversation",
-        "start over",
-        "clear chat"
+        "clear session",
+        "restart bot",
+        "start over"
     ]
     
-    # Check for exact match (not substring)
-    return normalized_msg in RESET_TRIGGERS
+    # Normalize and check for exact match
+    return message.lower().strip() in reset_phrases
 
 async def handle_message(command, sender, pid, message=None, full_message=None):
     
@@ -1116,7 +1112,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                     pid
                 )
             return
-        append_message(session_id, "user", command)
         # ====== END OF NEW SECTION ======
         # Determine Role
         if sender == manager_phone:
