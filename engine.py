@@ -17,6 +17,9 @@ from redis_session import (
     append_message,
     set_pending_document,
     get_pending_document,
+    set_pending_document_state,
+    get_pending_document_state,
+    clear_pending_document_state,
     get_session_history,
     end_session_complete
 )
@@ -719,7 +722,6 @@ async def get_performance_report_tool(
                 return None
             target_login = user["login_code"]
 
-
         # Safety check: Only managers can request 'Detail' reports
         final_report_type = report_type
         if final_report_type == "Detail" and ctx.role != "manager":
@@ -919,7 +921,6 @@ async def assign_new_task_tool(
         if not matches:
             return f"I couldn't find any employee named '{assignee_raw}' in the database."
 
-        # HANDLE MULTIPLE USERS FROM MONGO
         if len(matches) > 1:
             log_reasoning("DUPLICATE_FOUND_RESOLVING_VIA_MONGO", {"count": len(matches)})
             clarification_msg = await get_duplicate_resolution_message(matches, assignee_raw)
@@ -1173,6 +1174,32 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 intent = existing_intent
                 is_supported = True
                 log_reasoning("AGENT_2_CONTINUE", {"intent": intent})
+                doc_state = get_pending_document_state(session_id)
+                has_pending_doc = get_pending_document(session_id) is not None
+                if has_pending_doc and doc_state and not doc_state.get("is_first_message"):
+            # Document sent AFTER intent was already set
+            # Intent MUST be one of: TASK_ASSIGNMENT or UPDATE_TASK_STATUS
+                    log_reasoning("DOCUMENT_INTENT_VALIDATION", {
+                        "document_exists": True,
+                        "is_continuation": True,
+                        "must_validate_intent": existing_intent
+                    })
+            
+            # Validate that existing_intent is one of the two allowed values
+                    if existing_intent not in ["TASK_ASSIGNMENT", "UPDATE_TASK_STATUS"]:
+                        log_reasoning("DOCUMENT_INTENT_ERROR", {
+                            "error": f"Document sent with invalid intent '{existing_intent}'",
+                            "must_be_one_of": ["TASK_ASSIGNMENT", "UPDATE_TASK_STATUS"]
+                        })
+                        send_whatsapp_message(
+                            sender,
+                            "Error: Documents can only be used with 'Assign a new task' or 'Update status of a task'.",
+                            pid
+                        )
+                        clear_pending_document_state(session_id)
+                        end_session_complete(login_code, session_id)
+                        return
+        # ============= END DOCUMENT VALIDATION =============
             else:
                 # CONDITION: Intent is null -> Agent 1 call
                 is_supported, intent, confidence, reasoning = intent_classifier(command)
@@ -1200,14 +1227,38 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         AGENT2_INTENTS = {"TASK_ASSIGNMENT", "UPDATE_TASK_STATUS", "ADD_USER", "DELETE_USER", "VIEW_EMPLOYEE_PERFORMANCE"}
         agent2_required = intent in AGENT2_INTENTS
         
+                # ============= DOCUMENT HANDLING =============
         if message and not command:
+            log_reasoning("DOCUMENT_RECEIVED", {
+                "type": message.get("type"),
+                "is_first_message": not existing_intent,
+                "session_id": session_id
+            })
+            
+            # Store document
             set_pending_document(session_id, message)
-            send_whatsapp_message(
-                sender, 
-                "I've received your document. Would you like to 'Assign a new task' with this or 'Update an existing task'?", 
-                pid
-            )
-            return
+            
+            # Track if this is first message (intent = null) or after (intent already set)
+            is_first_msg = not existing_intent
+            set_pending_document_state(session_id, is_first_msg)
+            
+            # If document sent as FIRST message, intent must be null (Agent 1 → null)
+            if is_first_msg:
+                log_reasoning("DOCUMENT_FIRST_MESSAGE", {"intent": None})
+                send_whatsapp_message(
+                    sender, 
+                    "I've received your document. Would you like to 'Assign a new task' with this or 'Update status of a task'?", 
+                    pid
+                )
+                return
+            else:
+                # Document sent AFTER intent already set, continue with existing intent
+                log_reasoning("DOCUMENT_CONTINUATION", {
+                    "existing_intent": existing_intent,
+                    "intent_must_be_one_of_two": ["TASK_ASSIGNMENT", "UPDATE_TASK_STATUS"]
+                })
+        
+        
         pending_doc = get_pending_document(session_id)
         ctx_document = pending_doc if pending_doc else message
         ctx = ManagerContext(
@@ -1475,7 +1526,12 @@ Rules:
         except Exception as e:
             logger.error(f"API Tool Execution Failed for {intent}: {e}")
             # Requirement: Clear cache even on failed API calls
+            clear_pending_document_state(session_id)
             end_session_complete(login_code, session_id)
 
     except Exception:
         logger.error("handle_message failed", exc_info=True)
+        try:
+            clear_pending_document_state(session_id)
+        except:
+            pass

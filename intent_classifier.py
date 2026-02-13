@@ -51,6 +51,12 @@ This intent means that the user is assigning a **new task** to an employee.
 - “Give Neha a task to prepare the monthly report”
 - “Create a task for Aman to deploy backend APIs”
 
+**IMPORTANT: When document is sent:**
+- Intent determination: "Assign a new task" → TASK_ASSIGNMENT
+- Intent determination: "Update status of a task" → UPDATE_TASK_STATUS
+- Intent must NEVER be decided based on PDF content
+- Intent is ONLY determined from user's explicit message choice
+
 ---
 
 ### **VIEW_EMPLOYEE_PERFORMANCE**
@@ -86,6 +92,12 @@ This intent is triggered when a user wants to **update the status of an existing
 * “Update task status to in progress”
 * “I have finished the report task”
 * “Close the task assigned to me”
+
+**IMPORTANT: When document is sent:**
+- Intent determination: "Assign a new task" → TASK_ASSIGNMENT
+- Intent determination: "Update status of a task" → UPDATE_TASK_STATUS
+- Intent must NEVER be decided based on PDF content
+- Intent is ONLY determined from user's explicit message choice
 
 ---
 

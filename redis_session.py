@@ -61,7 +61,6 @@ def get_pending_task(session_id: str) -> dict | None:
 def clear_pending_task(session_id: str):
     redis_client.delete(f"pending_task:{session_id}")
 
-
 def get_agent2_state(session_id: str) -> dict:
     raw = redis_client.get(f"agent2_state:{session_id}")
     if raw:
@@ -96,23 +95,30 @@ def update_agent2_state(
     )
     return state
 
-def set_pending_document(session_id: str, document_data: dict, ttl: int = 600):
-    """Stores document metadata for 10 minutes."""
+def set_pending_document_state(session_id: str, is_first_message: bool, ttl: int = 600):
+    """
+    Tracks if document was sent as FIRST message (intent = null) or after (intent already set)
+    """
     redis_client.setex(
-        f"pending_doc:{session_id}",
+        f"pending_doc_state:{session_id}",
         ttl,
-        json.dumps(document_data)
+        json.dumps({
+            "is_first_message": is_first_message,
+            "timestamp": datetime.now(IST).isoformat()
+        })
     )
 
-def get_pending_document(session_id: str) -> Optional[dict]:
-    """Retrieves and then deletes the pending document (one-time use)."""
-    key = f"pending_doc:{session_id}"
+def get_pending_document_state(session_id: str) -> Optional[dict]:
+    """Retrieves document state info"""
+    key = f"pending_doc_state:{session_id}"
     raw = redis_client.get(key)
     if raw:
-        redis_client.delete(key)
         return json.loads(raw)
     return None
 
+def clear_pending_document_state(session_id: str):
+    """Clears document state after processing"""
+    redis_client.delete(f"pending_doc_state:{session_id}")
 
 def get_session_history(session_id: str) -> List[Dict]:
     raw = redis_client.lrange(f"session:{session_id}", 0, -1)
