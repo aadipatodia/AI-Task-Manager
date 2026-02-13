@@ -1097,6 +1097,10 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         if not command and not message:
             return
+        
+        #  Authorization
+        manager_phone = normalize_phone(os.getenv("MANAGER_PHONE", ""))
+        team = load_team()
 
         # ====== ADD THIS SECTION HERE ======
         if should_reset_conversation(command):
@@ -1108,16 +1112,11 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 log_reasoning("CONVERSATION_RESET", {"sender": sender, "trigger": command})
                 send_whatsapp_message(
                     sender, 
-                    "Conversation reset. How can I help you today?", 
+                    "Ok lets start again, please tell me how can I be of your help",
                     pid
                 )
             return
         # ====== END OF NEW SECTION ======
-
-        #  Authorization
-        manager_phone = normalize_phone(os.getenv("MANAGER_PHONE", ""))
-        team = load_team()
-
         # Determine Role
         if sender == manager_phone:
             role = "manager"
