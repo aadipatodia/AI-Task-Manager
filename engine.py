@@ -1508,12 +1508,20 @@ Rules:
                 send_whatsapp_message(sender, result, pid)
                 return
 
-        # Agent 2 produced JSON (the "Flag" is now set to true)
+        # Check if Agent 2 detected a reset command
+        if isinstance(result, dict) and result.get("reset") is True:
+            log_reasoning("AGENT_2_RESET_DETECTED", {"trigger": command})
+            end_session_complete(login_code, session_id)
+            send_whatsapp_message(
+                sender, 
+                "Ok lets start again, please tell me how can I be of your help", 
+                pid
+            )
+            return
+
         merged_data = merge_slots(session_id, result)
         log_reasoning("AGENT_2_FLAG_TRUE", {"parameters_extracted": merged_data})
         append_message(session_id, "slots", merged_data)
-        
-        
 
         # Execute Tool Calls
         try:
