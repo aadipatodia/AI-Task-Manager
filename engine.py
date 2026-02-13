@@ -1281,7 +1281,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             result = await run_gemini_extractor(
                 prompt=f"""You are helping assign a task.
                 
-SPECIAL COMMANDS - If user says ANY of these exact phrases:
+SPECIAL COMMANDS - If user says ANY of these exact phrases and NO MORE CLARIFICATION QUESTIONS MUST BE ASKED:
 - "start over"
 - "reset conversation"
 - "clear session"
@@ -1337,7 +1337,7 @@ Rules:
             result = await run_gemini_extractor(
                 prompt=f"""You are helping update a task status.
                 
-SPECIAL COMMANDS - If user says ANY of these exact phrases:
+SPECIAL COMMANDS - If user says ANY of these exact phrases and NO MORE CLARIFICATION QUESTIONS MUST BE ASKED:
 - "start over"
 - "reset conversation"
 - "clear session"
@@ -1390,7 +1390,7 @@ Rules:
             result = await run_gemini_extractor(
                 prompt=f"""You are helping add a new user.
                 
-SPECIAL COMMANDS - If user says ANY of these exact phrases:
+SPECIAL COMMANDS - If user says ANY of these exact phrases and NO MORE CLARIFICATION QUESTIONS MUST BE ASKED:
 - "start over"
 - "reset conversation"
 - "clear session"
@@ -1438,7 +1438,7 @@ Rules:
                 - "reset conversation"
                 - "clear session"
                 - "restart bot"
-                Return ONLY this JSON:
+                Return ONLY this JSON and NO MORE CLARIFICATION QUESTIONS MUST BE ASKED:
                 {{"reset": true}}
                 
                 REPORT TYPE RULES:
@@ -1462,7 +1462,7 @@ SPECIAL COMMANDS - If user says ANY of these exact phrases:
 - "clear session"
 - "restart bot"
 
-Return ONLY this JSON:
+Return ONLY this JSON, and NO MORE CLARIFICATION QUESTIONS MUST BE ASKED:
 {{"reset": true}}
 
 KNOWN INFORMATION (do NOT ask again):
