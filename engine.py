@@ -1116,6 +1116,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                     pid
                 )
             return
+        append_message(session_id, "user", command)
         # ====== END OF NEW SECTION ======
         # Determine Role
         if sender == manager_phone:
