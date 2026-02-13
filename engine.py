@@ -1067,59 +1067,26 @@ def merge_slots(session_id: str, new_slots: dict):
     append_message(session_id, "slots", merged)
     return merged
 
-def check_for_reset_trigger(command: str, sender: str, pid: str, users_collection) -> bool:
+def should_reset_conversation(message: str) -> bool:
     """
-    Checks if user wants to reset. If yes, clears session and sends message.
-    Returns True if reset was triggered (caller should return immediately).
+    Check if the user message contains exact reset trigger phrases.
+    Returns True only if the message IS one of the trigger phrases (not just contains it).
     """
-    log_reasoning("RESET_CHECK_START", {"command": command, "command_type": type(command).__name__})
-    
-    if not command:
-        log_reasoning("RESET_CHECK_FAIL", "command is None or empty")
+    if not message:
         return False
     
-    reset_phrases = [
+    # Normalize the message
+    normalized_msg = message.strip().lower()
+    
+    # Define exact trigger phrases
+    RESET_TRIGGERS = [
         "reset conversation",
-        "clear session",
-        "restart bot",
-        "start over"
+        "start over",
+        "clear chat"
     ]
     
-    normalized = command.lower().strip()
-    log_reasoning("RESET_CHECK_NORMALIZED", {"normalized": normalized, "checking_against": reset_phrases})
-    
-    # Check for exact match
-    if normalized not in reset_phrases:
-        log_reasoning("RESET_CHECK_FAIL", f"'{normalized}' not in reset phrases")
-        return False
-    
-    log_reasoning("RESET_TRIGGER_MATCHED", {"phrase": normalized})
-    
-    # Reset triggered - now resolve user and clear session
-    try:
-        user = resolve_user_by_phone(users_collection, sender)
-        manager_phone = normalize_phone(os.getenv("MANAGER_PHONE", ""))
-        
-        if not user and sender == manager_phone:
-            user = {"login_code": "MANAGER", "phone": sender, "name": "Manager"}
-        
-        if user:
-            login_code = user["login_code"]
-            session_id = get_or_create_session(login_code)
-            end_session_complete(login_code, session_id)
-            log_reasoning("CONVERSATION_RESET", {"sender": sender, "trigger": command})
-        
-        send_whatsapp_message(
-            sender, 
-            "Ok lets start again, please tell me how can I be of your help", 
-            pid
-        )
-        return True
-        
-    except Exception as e:
-        logger.error(f"Reset trigger failed: {e}")
-        return True
-
+    # Check for exact match (not substring)
+    return normalized_msg in RESET_TRIGGERS
 
 async def handle_message(command, sender, pid, message=None, full_message=None):
     
@@ -1130,14 +1097,12 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         if not command and not message:
             return
-        
-        if check_for_reset_trigger(command, sender, pid, users_collection):
-            return 
-        
+
         #  Authorization
         manager_phone = normalize_phone(os.getenv("MANAGER_PHONE", ""))
         team = load_team()
 
+        # Determine Role
         if sender == manager_phone:
             role = "manager"
         elif any(normalize_phone(u["phone"]) == sender for u in team):
@@ -1280,15 +1245,6 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         if intent == "TASK_ASSIGNMENT":
             result = await run_gemini_extractor(
                 prompt=f"""You are helping assign a task.
-                
-SPECIAL COMMANDS - If user says ANY of these exact phrases and NO MORE CLARIFICATION QUESTIONS MUST BE ASKED:
-- "start over"
-- "reset conversation"
-- "clear session"
-- "restart bot"
-
-Return ONLY this JSON:
-{{"reset": true}}
 
 KNOWN INFORMATION (do NOT ask again):
 {json.dumps(slots, indent=2)}
@@ -1336,15 +1292,6 @@ Rules:
         elif intent == "UPDATE_TASK_STATUS":
             result = await run_gemini_extractor(
                 prompt=f"""You are helping update a task status.
-                
-SPECIAL COMMANDS - If user says ANY of these exact phrases and NO MORE CLARIFICATION QUESTIONS MUST BE ASKED:
-- "start over"
-- "reset conversation"
-- "clear session"
-- "restart bot"
-
-Return ONLY this JSON:
-{{"reset": true}}
 
 KNOWN INFORMATION (do NOT ask again):
 {json.dumps(slots, indent=2)}
@@ -1389,15 +1336,6 @@ Rules:
         elif intent == "ADD_USER":
             result = await run_gemini_extractor(
                 prompt=f"""You are helping add a new user.
-                
-SPECIAL COMMANDS - If user says ANY of these exact phrases and NO MORE CLARIFICATION QUESTIONS MUST BE ASKED:
-- "start over"
-- "reset conversation"
-- "clear session"
-- "restart bot"
-
-Return ONLY this JSON:
-{{"reset": true}}
 
 KNOWN INFORMATION (do NOT ask again):
 {json.dumps(slots, indent=2)}
@@ -1433,14 +1371,6 @@ Rules:
         elif intent == "VIEW_EMPLOYEE_PERFORMANCE":
             result = await run_gemini_extractor(
                 prompt=f"""
-                SPECIAL COMMANDS - If user says ANY of these exact phrases:
-                - "start over"
-                - "reset conversation"
-                - "clear session"
-                - "restart bot"
-                Return ONLY this JSON and NO MORE CLARIFICATION QUESTIONS MUST BE ASKED:
-                {{"reset": true}}
-                
                 REPORT TYPE RULES:
                 1. If the user mentions a specific person (e.g., "Abhilasha", "Rahul") -> report_type = "Count", name = "extracted name"
                 2. If the user asks for a general/overall report or no name is found -> report_type = "Detail", name = null
@@ -1456,14 +1386,6 @@ Rules:
         elif intent == "DELETE_USER":
             result = await run_gemini_extractor(
                 prompt=f"""You are helping delete a user.
-SPECIAL COMMANDS - If user says ANY of these exact phrases:
-- "start over"
-- "reset conversation"
-- "clear session"
-- "restart bot"
-
-Return ONLY this JSON, and NO MORE CLARIFICATION QUESTIONS MUST BE ASKED:
-{{"reset": true}}
 
 KNOWN INFORMATION (do NOT ask again):
 {json.dumps(slots, indent=2)}
@@ -1508,17 +1430,7 @@ Rules:
                 send_whatsapp_message(sender, result, pid)
                 return
 
-        # Check if Agent 2 detected a reset command
-        if isinstance(result, dict) and result.get("reset") is True:
-            log_reasoning("AGENT_2_RESET_DETECTED", {"trigger": command})
-            end_session_complete(login_code, session_id)
-            send_whatsapp_message(
-                sender, 
-                "Ok lets start again, please tell me how can I be of your help", 
-                pid
-            )
-            return
-
+        # Agent 2 produced JSON (the "Flag" is now set to true)
         merged_data = merge_slots(session_id, result)
         log_reasoning("AGENT_2_FLAG_TRUE", {"parameters_extracted": merged_data})
         append_message(session_id, "slots", merged_data)
