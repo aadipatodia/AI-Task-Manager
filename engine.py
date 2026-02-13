@@ -1148,28 +1148,36 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             log_reasoning("DOC_ONLY_FLOW", "Document received without text. Choice prompt sent.")
             return # EXIT EARLY - Wait for user to pick an action
 
-        # 2. Resolve Intent (For text messages or replies to choice prompt)
-        if is_cross_questioning and existing_intent:
-            intent = existing_intent
-            is_supported = True
-            log_reasoning("SESSION_FLOW", {"action": "RESUME", "intent": intent})
-        else:
-            # Check if a doc exists now OR is waiting in Redis
-            has_doc_context = is_current_msg_doc or (pending_doc_data is not None)
-            
-            # Call Agent 1 (Intent Classifier)
-            is_supported, intent, confidence, reasoning = intent_classifier(command, has_document=has_doc_context)
+        # 2. Resolve Intent (Smart Switching)
+        has_doc_context = is_current_msg_doc or (pending_doc_data is not None)
+        
+        # We call Agent 1 to check for a new or specific intent
+        is_supported, new_intent, confidence, reasoning = intent_classifier(command, has_document=has_doc_context)
 
+        # DECISION LOGIC: Use existing lock or switch to new intent?
+        if is_cross_questioning and existing_intent:
+            # If Agent 1 is confident in a NEW intent (like TASK_ASSIGNMENT), switch to it
+            if new_intent and confidence >= 0.8:
+                intent = new_intent
+                log_reasoning("SESSION_FLOW", {"action": "SWITCH_INTENT", "new": intent, "old": existing_intent})
+                append_message(session_id, "system", f"INTENT_SET: {intent}")
+            else:
+                # If Agent 1 is unsure (e.g. user just said a name), stay with the existing flow
+                intent = existing_intent
+                is_supported = True
+                log_reasoning("SESSION_FLOW", {"action": "RESUME", "intent": intent})
+        else:
+            # Fresh message flow
+            intent = new_intent
             if is_supported and intent:
                 log_reasoning("INTENT_CLASSIFIED", {"intent": intent, "has_doc": has_doc_context})
                 append_message(session_id, "system", f"INTENT_SET: {intent}")
             else:
-                # Failure fallback - Only send if there is no doc waiting either
                 log_reasoning("CLASSIFICATION_FAILED", {"reasoning": reasoning})
                 send_whatsapp_message(sender, "I'm sorry, I didn't quite catch that. How can I help with your tasks today?", pid)
                 end_session_complete(login_code, session_id)
                 return
-
+            
         # 3. Finalize Context Document
         ctx_document = None
         if is_current_msg_doc:
@@ -1190,12 +1198,14 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             try:
                 if intent == "VIEW_EMPLOYEES_UNDER_MANAGER":
                     await get_task_list_tool(ctx, view="users")
+                    end_session_complete(login_code, session_id)
                 elif intent == "VIEW_PENDING_TASKS":
                     pending = await get_task_list_tool(ctx, view="tasks")
                     if pending:
                         send_whatsapp_message(sender, "\n".join(pending), pid)
                 elif intent == "VIEW_EMPLOYEE_PERFORMANCE":
                     await get_performance_report_tool(ctx)
+                    end_session_complete(login_code, session_id)
             except Exception as e:
                 logger.error(f"Error executing direct tool {intent}: {e}")
             finally:
