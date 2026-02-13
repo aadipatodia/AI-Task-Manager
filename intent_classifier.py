@@ -119,6 +119,20 @@ This intent is triggered when the user wants to **remove or deactivate an existi
 
 ---
 
+### **DOCUMENT_UPLOAD_HANDLING**
+If the user has uploaded a document and is responding to the bot's question: "Would you like to 'Assign a new task' with this or 'Update an existing task'?", the intent **MUST** be one of the following two:
+The decision MUST be based on the content of the user's message.
+
+1. **TASK_ASSIGNMENT**
+   - If the user wants to use the document to create or assign a **new task**.
+   - **Examples:** "Assign a new task", "New task", "Create task", "Assign", "tell ABc tocomplete report on this document", "Forward this to Rahul".
+
+2. **UPDATE_TASK_STATUS**
+   - If the user wants to use the document to update an **existing task**.
+   - **Examples:** "Update an existing task", "Update status", "Existing task", "Update", "This is for the pending report task", "Mark task 123 as done with this proof".
+
+---
+
 IT SHOULD BE NOTED THAT ABOVE GIVEN ARE JUST SOME EXAMPLES OF EACH INTENT BUT ARE NOT LIMITED TO THESE
 
 
