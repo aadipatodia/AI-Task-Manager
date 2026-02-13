@@ -26,7 +26,13 @@ from redis_session import (
     end_session_complete
 )
 from intent_classifier import intent_classifier
-from user_resolver import resolve_user_by_phone
+from user_resolver import (
+    resolve_user_by_phone,
+    get_all_subordinates,
+    is_subordinate,
+    get_top_manager_phone,
+    get_hierarchy_chain
+)
 from agent3 import agent3_intent_guard
 import asyncio 
 from datetime import timezone, timedelta
@@ -408,12 +414,14 @@ def load_team():
 def resolve_role(user_phone: str) -> str:
     """
     Determine if a user is a 'manager' or 'employee'.
-    A user is a manager if ANY other user in MongoDB has
-    manager_phone == this user's phone.
+    - Top manager (from env) is always 'manager'.
+    - Anyone who has subordinates (direct or indirect) is 'manager'.
     """
     if users_collection is None:
         return "employee"
     phone = normalize_phone(user_phone)
+    if phone == get_top_manager_phone():
+        return "manager"
     subordinate = users_collection.find_one({"manager_phone": phone, "phone": {"$ne": phone}})
     if subordinate:
         return "manager"
@@ -422,16 +430,12 @@ def resolve_role(user_phone: str) -> str:
 
 def get_team_for_user(user_phone: str) -> list:
     """
-    Return only users who report to this phone number (direct reports).
-    Excludes the manager themselves from the list.
+    Return ALL users below this phone in the hierarchy (recursive).
+    Excludes the user themselves.
     """
     if users_collection is None:
         return []
-    phone = normalize_phone(user_phone)
-    return list(users_collection.find(
-        {"manager_phone": phone, "phone": {"$ne": phone}},
-        {"_id": 0}
-    ))
+    return get_all_subordinates(users_collection, user_phone)
 
 async def add_user_tool(
     ctx: UserContext,
@@ -446,6 +450,11 @@ async def add_user_tool(
         "email": email,
         "requested_by": ctx.sender_phone
     })
+
+    # ── HIERARCHY CHECK: only registered users can add ──
+    # The auth gate already ensures sender is registered.
+    # The new user's manager_phone will be set to the sender,
+    # placing them below the sender in the hierarchy.
     
     req = AddDeleteUserRequest(
         ACTION="Add",
@@ -520,7 +529,16 @@ async def delete_user_tool(
     name: str,
     mobile: str,
     email: Optional[str] = None
-) -> None:
+) -> Optional[str]:
+
+    # ── HIERARCHY CHECK: can only delete subordinates ──
+    target_phone = normalize_phone(mobile)
+    if not is_subordinate(users_collection, ctx.sender_phone, target_phone):
+        logger.warning(
+            f"[HIERARCHY] {ctx.sender_phone} tried to delete {target_phone} "
+            f"but they are not a subordinate."
+        )
+        return "You can only remove users who are under you in the hierarchy."
 
     req = AddDeleteUserRequest(
         ACTION="Delete",
@@ -544,7 +562,7 @@ async def delete_user_tool(
     # Successful deletion
     if str(res.get("result")) == "1" or str(res.get("RESULT")) == "1":
         if users_collection is not None:
-            users_collection.delete_one({"phone": "91" + mobile[-10:]})
+            users_collection.delete_one({"phone": target_phone})
             logger.info(
                 f"User with mobile {mobile[-10:]} removed from MongoDB."
             )
@@ -815,9 +833,9 @@ async def get_performance_report_tool(
     ctx: UserContext,
     report_type: str,  # Now passed from Gemini's extracted JSON
     name: Optional[str] = None
-) -> None:
+) -> Optional[str]:
     try:
-        # Scope to current user's direct reports
+        # Scope to current user's subordinates (full hierarchy)
         team = get_team_for_user(ctx.sender_phone)
 
         # Resolve target login_code if a name is provided
@@ -829,15 +847,15 @@ async def get_performance_report_tool(
                 None
             )
             if not user:
-                logger.error(f"User {name} not found in your team for performance report.")
-                return None
+                logger.warning(f"[HIERARCHY] {ctx.sender_phone} requested report for '{name}' — not a subordinate.")
+                return "You can only view performance reports for people under you in the hierarchy."
             target_login = user["login_code"]
 
         # Safety check: Only managers can request 'Detail' reports
         final_report_type = report_type
         if final_report_type == "Detail" and ctx.role != "manager":
             logger.warning("Unauthorized Detail report request blocked.")
-            return None
+            return "Only managers can request detailed performance reports."
 
         req = WhatsAppPdfReportRequest(
             ASSIGNED_TO=target_login,
@@ -1004,7 +1022,7 @@ async def assign_new_task_tool(
                 None
             )
             if not resolved_user:
-                return None
+                return "You can only assign tasks to people under you in the hierarchy."
             matches = [resolved_user]
         else:
             # DIRECT MONGO SEARCH: No Appsavy API call here
@@ -1020,7 +1038,7 @@ async def assign_new_task_tool(
         })
 
         if not matches:
-            return f"I couldn't find any employee named '{assignee_raw}' in the database."
+            return f"I couldn't find '{assignee_raw}' among the people under you. You can only assign tasks to your subordinates."
 
         if len(matches) > 1:
             log_reasoning("DUPLICATE_FOUND_RESOLVING_VIA_MONGO", {"count": len(matches)})
@@ -1084,15 +1102,58 @@ async def update_task_status_tool(
     task_id: str,
     status: str,
     remark: Optional[str] = None
-) -> None:
+) -> Optional[str]:
     """
     Updates the status of an existing task using the pre-mapped status from Agent 2.
+    Hierarchy rule: "Reopened" status can only be set by someone above the
+    task assignee in the hierarchy.
     """
     log_reasoning("UPDATE_TASK_STATUS_START", {
         "task_id": task_id,
         "status": status,
         "by": ctx.role
     })
+
+    # ── HIERARCHY CHECK for Reopen ──
+    if status in ("Reopened", "Reopen"):
+        # Fetch task to find assignee
+        try:
+            task_res = await call_appsavy_api(
+                "GET_TASKS",
+                GetTasksRequest(
+                    Event="106830",
+                    Child=[{
+                        "Control_Id": "106831",
+                        "AC_ID": "110803",
+                        "Parent": [
+                            {"Control_Id": "106825", "Value": "", "Data_Form_Id": ""},
+                            {"Control_Id": "106824", "Value": "", "Data_Form_Id": ""},
+                            {"Control_Id": "106827", "Value": "", "Data_Form_Id": ""},
+                            {"Control_Id": "106829", "Value": task_id, "Data_Form_Id": ""},
+                            {"Control_Id": "107046", "Value": "", "Data_Form_Id": ""},
+                            {"Control_Id": "107809", "Value": "0", "Data_Form_Id": ""}
+                        ]
+                    }]
+                )
+            )
+            tasks = normalize_tasks_response(task_res)
+            if tasks:
+                assignee_code = tasks[0].get("REPORTER") or tasks[0].get("ASSIGNEE") or ""
+                # Resolve assignee phone from login_code
+                if assignee_code and users_collection is not None:
+                    assignee_user = users_collection.find_one(
+                        {"login_code": assignee_code}, {"_id": 0}
+                    )
+                    if assignee_user:
+                        if not is_subordinate(users_collection, ctx.sender_phone, assignee_user["phone"]):
+                            logger.warning(
+                                f"[HIERARCHY] {ctx.sender_phone} tried to reopen task {task_id} "
+                                f"but assignee {assignee_user['phone']} is not a subordinate."
+                            )
+                            return "You can only reopen tasks assigned to people under you in the hierarchy."
+        except Exception as e:
+            logger.warning(f"[HIERARCHY] Could not verify reopen permission: {e}")
+            # Allow through on error to avoid blocking legitimate updates
 
     sender_mobile = ctx.sender_phone[-10:]
 
@@ -1186,8 +1247,26 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         # ──── AUTH: Resolve user from MongoDB (multi-user) ────
         user = resolve_user_by_phone(users_collection, sender)
         if not user:
-            send_whatsapp_message(sender, "Access Denied: Your number is not registered.", pid)
-            return
+            # Allow top manager even if not yet seeded in MongoDB
+            if normalize_phone(sender) == get_top_manager_phone():
+                logger.info("[AUTH] Top manager not in DB yet — auto-seeding.")
+                top_user = {
+                    "name": "Top Manager",
+                    "phone": normalize_phone(sender),
+                    "email": "",
+                    "login_code": "TOP-MGR-001",
+                    "manager_phone": normalize_phone(sender)
+                }
+                if users_collection is not None:
+                    users_collection.update_one(
+                        {"phone": top_user["phone"]},
+                        {"$set": top_user},
+                        upsert=True
+                    )
+                user = top_user
+            else:
+                send_whatsapp_message(sender, "Access Denied: Your number is not registered.", pid)
+                return
 
         login_code = user["login_code"]
         role = resolve_role(sender)  # Dynamic: manager if anyone reports to them
@@ -1605,7 +1684,9 @@ Rules:
                 end_session_complete(login_code, session_id)
             elif intent == "UPDATE_TASK_STATUS" and all(k in merged_data for k in ("task_id", "status")):
                 log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
-                await update_task_status_tool(ctx, **merged_data)
+                tool_output = await update_task_status_tool(ctx, **merged_data)
+                if isinstance(tool_output, str):
+                    send_whatsapp_message(sender, tool_output, pid)
                 clear_pending_document_state(session_id)
                 end_session_complete(login_code, session_id)
 
@@ -1617,17 +1698,21 @@ Rules:
 
             elif intent == "DELETE_USER" and all(k in merged_data for k in ("name", "mobile")):
                 log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
-                await delete_user_tool(ctx, **merged_data)
+                tool_output = await delete_user_tool(ctx, **merged_data)
+                if isinstance(tool_output, str):
+                    send_whatsapp_message(sender, tool_output, pid)
                 clear_pending_document_state(session_id)
                 end_session_complete(login_code, session_id)
             
             elif intent == "VIEW_EMPLOYEE_PERFORMANCE" and "report_type" in merged_data:
                 log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
-                await get_performance_report_tool(
+                tool_output = await get_performance_report_tool(
                     ctx,
                     report_type=merged_data["report_type"], 
                     name=merged_data.get("name")
                 )
+                if isinstance(tool_output, str):
+                    send_whatsapp_message(sender, tool_output, pid)
                 clear_pending_document_state(session_id)
                 end_session_complete(login_code, session_id)
             
