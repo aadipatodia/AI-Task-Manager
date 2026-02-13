@@ -6,6 +6,8 @@ import datetime
 import base64
 from google.genai import Client
 import requests
+import time
+import uuid
 import logging
 import re
 from typing import List, Optional, Dict, Any
@@ -23,7 +25,6 @@ from redis_session import (
     get_session_history,
     end_session_complete
 )
-
 from intent_classifier import intent_classifier
 from user_resolver import resolve_user_by_phone
 import asyncio 
@@ -299,9 +300,17 @@ class AddDeleteUserRequest(BaseModel):
     
 async def run_gemini_extractor(prompt: str, message: str):
     client = Client(api_key=os.getenv("GEMINI_API_KEY"))
-    response = client.models.generate_content(
-        model="gemini-2.5-pro",
-        contents=f"{prompt}\n\nUSER MESSAGE:\n{message}"
+    async def _gemini_call(client, prompt, message):
+        return client.models.generate_content(
+            model="gemini-2.5-pro",
+            contents=f"{prompt}\n\nUSER MESSAGE:\n{message}"
+        )
+    response = await timed_api_call(
+        "GEMINI_GENERATE_CONTENT",
+        _gemini_call,
+        client,
+        prompt,
+        message
     )
 
     text = response.text.strip()
@@ -486,6 +495,33 @@ async def delete_user_tool(
 
     return None
 
+async def timed_api_call(api_name: str, func, *args, **kwargs):
+
+    request_id = str(uuid.uuid4())[:8]
+    start_time = time.perf_counter()
+
+    logger.info(f"[API_START] {api_name} | request_id={request_id}")
+
+    try:
+        result = await func(*args, **kwargs)
+        duration = round((time.perf_counter() - start_time) * 1000, 2)
+
+        logger.info(
+            f"[API_END] {api_name} | request_id={request_id} | "
+            f"time_taken_ms={duration}"
+        )
+
+        return result
+
+    except Exception as e:
+        duration = round((time.perf_counter() - start_time) * 1000, 2)
+
+        logger.error(
+            f"[API_ERROR] {api_name} | request_id={request_id} | "
+            f"time_taken_ms={duration} | error={str(e)}"
+        )
+        raise
+
 def log_reasoning(step: str, details: dict | str):
     logger.info(
         "[GEMINI_REASONING] %s | %s",
@@ -578,12 +614,18 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
             "payload_type": payload.__class__.__name__
         })
         
-        res = await asyncio.to_thread(
-            requests.post,
-            config["url"],
-            headers=config["headers"],
-            json=payload.model_dump(),
-            timeout=15
+        async def _appsavy_call():
+            return await asyncio.to_thread(
+                requests.post,
+                config["url"],
+                headers=config["headers"],
+                json=payload.model_dump(),
+                timeout=15
+            )
+
+        res = await timed_api_call(
+            f"APPSAVY_{key}",
+            _appsavy_call
         )
         
         logger.info(f"API {key} response status: {res.status_code}")
