@@ -15,12 +15,15 @@ from send_message import send_whatsapp_message
 from redis_session import (
     get_or_create_session,
     append_message,
+    set_pending_document,
+    get_pending_document,
     set_pending_document_state,
     get_pending_document_state,
     clear_pending_document_state,
     get_session_history,
     end_session_complete
 )
+
 from intent_classifier import intent_classifier
 from user_resolver import resolve_user_by_phone
 import asyncio 
