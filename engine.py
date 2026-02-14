@@ -1579,7 +1579,14 @@ Return ONLY one word: YES or NO""",
             result = await run_gemini_extractor(
                 prompt=f"""You are helping assign a task.
 
-IMPORTANT — READ THE FULL CONVERSATION HISTORY BELOW:
+⚠️ ABSOLUTE RULE — NEVER ASSUME OR INVENT VALUES:
+- If the user has NOT explicitly stated a deadline, time, or date, the deadline field is MISSING.
+- You MUST ask "What is the deadline?" if no deadline was mentioned.
+- NEVER default to EOD, 6pm, end of day, or any other time.
+- NEVER fill in a deadline yourself. Only use a deadline the user explicitly provided.
+- This rule has NO exceptions.
+
+READ THE FULL CONVERSATION HISTORY:
 The complete conversation history is provided after this prompt as "USER MESSAGE".
 You MUST read EVERY message in the conversation to extract field values.
 Information is spread across multiple messages. For example:
@@ -1593,26 +1600,25 @@ PREVIOUSLY EXTRACTED & SAVED INFORMATION (do NOT ask for these again):
 Current Date: {ctx.current_time.strftime("%Y-%m-%d")}
 Current Time: {ctx.current_time.strftime("%I:%M %p")}
 
-RULES:
+DEADLINE CONVERSION (only when user HAS provided a time/date):
 - Convert relative deadlines (e.g., "in 4 hours", "tomorrow", "by EOD", "3pm") into absolute ISO 8601 format.
-- "EOD" should be treated as 18:00 (6:00 PM) of the current day — but ONLY if the user explicitly says "EOD" or "end of day".
+- "EOD" means 18:00 of the current day — ONLY if the user explicitly said "EOD" or "end of day".
 - A time like "3pm" or "8pm" without a date means TODAY at that time.
-- Ensure the 'deadline' string is strictly a valid ISO format.
-- If the user has NOT mentioned ANY deadline or time reference at all, the deadline is MISSING. Do NOT assume EOD or any default. Ask for it.
+- If the user said NO time or date at all → deadline is MISSING → ask for it.
 
 Your job:
 - FIRST: Scan ALL user messages in the conversation history to find assignee, task_name, and deadline.
 - THEN: Check the PREVIOUSLY EXTRACTED information above for any saved values.
 - Combine both sources. Only ask a question if a field is COMPLETELY absent from BOTH sources.
-- If ALL required fields are present → return JSON immediately.
+- If ALL three required fields are present → return JSON immediately.
 - If ANY required field is missing → ask ONE clear follow-up question.
-- Do NOT invent or assume values. If the user did not mention a deadline, ASK for it.
+- Do NOT invent or assume values.
 - Do NOT repeat information already given.
 
 Required fields:
 - assignee (name or phone)
 - task_name
-- deadline (ISO format if possible)
+- deadline (ISO format — ONLY if user explicitly provided a time/date)
 
 STRICT RULES TO PREVENT UNNECESSARY QUESTIONS:
 - ONLY ask a question if one of the 3 required fields (assignee, task_name, deadline) is COMPLETELY MISSING from the entire conversation.
@@ -1642,6 +1648,8 @@ CRITICAL OUTPUT RULES:
 - If a required field is missing, return ONLY the question as plain text (e.g., "What is the deadline?").
 - If all fields are present, return ONLY the JSON object with no extra text.
 - NEVER wrap JSON in markdown code fences (no ```json or ```).
+
+FINAL REMINDER: If the user never mentioned a deadline, time, or date → the deadline is MISSING → return the question "What is the deadline?" as plain text. Do NOT return JSON with an assumed deadline.
 """,
                 message=full_convo_context
             )
