@@ -1788,8 +1788,19 @@ Rules:
                 try:
                     parsed_json = json.loads(json_match.group(1))
                     if isinstance(parsed_json, dict):
-                        # Check if any required value is null/empty — means it's incomplete
-                        has_nulls = any(v is None or v == "" for v in parsed_json.values())
+                        # Define required fields per intent — optional fields with null are OK
+                        REQUIRED_FIELDS = {
+                            "TASK_ASSIGNMENT": {"assignee", "task_name", "deadline"},
+                            "UPDATE_TASK_STATUS": {"task_id", "status"},
+                            "ADD_USER": {"name", "mobile"},
+                            "DELETE_USER": {"name", "mobile"},
+                            "VIEW_EMPLOYEE_PERFORMANCE": {"report_type"},
+                        }
+                        required = REQUIRED_FIELDS.get(intent, set(parsed_json.keys()))
+                        # Only check nulls on required fields
+                        has_nulls = any(
+                            (v is None or v == "") for k, v in parsed_json.items() if k in required
+                        )
                         if has_nulls:
                             # Extract the question part (text after the JSON)
                             remaining_text = cleaned_result[json_match.end():].strip()
@@ -1803,8 +1814,8 @@ Rules:
                                 send_whatsapp_message(sender, remaining_text, pid)
                                 return
                             else:
-                                # JSON with nulls but no question — ask for missing field
-                                missing = [k for k, v in parsed_json.items() if v is None or v == ""]
+                                # JSON with nulls on required fields but no question — ask for missing field
+                                missing = [k for k, v in parsed_json.items() if k in required and (v is None or v == "")]
                                 question = f"Could you please provide the {missing[0]}?"
                                 partial_slots = {k: v for k, v in parsed_json.items() if v is not None and v != ""}
                                 if partial_slots:
