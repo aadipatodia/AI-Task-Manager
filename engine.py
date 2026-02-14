@@ -1296,6 +1296,47 @@ def merge_slots(session_id: str, new_slots: dict):
     append_message(session_id, "slots", merged)
     return merged
 
+def _extract_clarification_question(text: str) -> str:
+    """
+    Gemini sometimes returns reasoning/analysis before the actual question.
+    This extracts only the clean question to send to the user.
+    """
+    if not text:
+        return text
+
+    # Known exact questions Agent 2 should ask — check if any appears in the text
+    known_questions = [
+        "Who should this task be assigned to?",
+        "What is the task?",
+        "What is the deadline?",
+        "What status would you like to set?",
+        "Could you please provide the",
+        "What is the mobile number?",
+        "What is the name?",
+    ]
+
+    for q in known_questions:
+        idx = text.find(q)
+        if idx != -1:
+            # Return from the known question to the end (may include options)
+            return text[idx:].strip()
+
+    # Fallback: find the last sentence that ends with "?"
+    lines = text.strip().split("\n")
+    for line in reversed(lines):
+        line = line.strip()
+        if line.endswith("?"):
+            return line
+
+    # Last resort: return the last non-empty line
+    for line in reversed(lines):
+        line = line.strip()
+        if line:
+            return line
+
+    return text
+
+
 # Hard conversation reset phrases
 RESET_PHRASES = {
     "start over",
@@ -1736,6 +1777,7 @@ RULES:
 - The ONLY valid questions are: "Who should this task be assigned to?", "What is the task?", "What is the deadline?"
 - Return ONLY a JSON object OR ONLY a plain text question. Never both.
 - Never wrap JSON in code fences.
+- Do NOT include any reasoning, analysis, explanation, or thought process. Output ONLY the final JSON or ONLY the question. Nothing else.
 
 JSON format:
 {{
@@ -1911,6 +1953,7 @@ Rules:
                             # Extract the question part (text after the JSON)
                             remaining_text = cleaned_result[json_match.end():].strip()
                             if remaining_text:
+                                remaining_text = _extract_clarification_question(remaining_text)
                                 # Save the partial data as slots, send only the question
                                 partial_slots = {k: v for k, v in parsed_json.items() if v is not None and v != ""}
                                 if partial_slots:
@@ -1946,15 +1989,17 @@ Rules:
                         log_reasoning("AGENT_2_JSON_PARSED", {"source": "string_cleaned"})
                     else:
                         clarification_text = parsed if isinstance(parsed, str) else cleaned_result
+                        clarification_text = _extract_clarification_question(str(clarification_text))
                         log_reasoning("AGENT_2_CLARIFICATION_SENT", {"agent_msg": clarification_text})
                         append_message(session_id, "assistant", f"[CLARIFY] {clarification_text}")
                         await send_whatsapp_message(sender, clarification_text, pid)
                         return
                 except json.JSONDecodeError:
-                    # Plain text question — send as clarification
-                    log_reasoning("AGENT_2_CLARIFICATION_SENT", {"agent_msg": result})
-                    append_message(session_id, "assistant", f"[CLARIFY] {result}") 
-                    await send_whatsapp_message(sender, result, pid)
+                    # Plain text — strip any reasoning, extract only the question
+                    clarification = _extract_clarification_question(result)
+                    log_reasoning("AGENT_2_CLARIFICATION_SENT", {"agent_msg": clarification, "raw": result})
+                    append_message(session_id, "assistant", f"[CLARIFY] {clarification}")
+                    await send_whatsapp_message(sender, clarification, pid)
                     return
 
         # Agent 2 produced JSON (the "Flag" is now set to true)
