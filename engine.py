@@ -1460,9 +1460,39 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         
         # Direct Tools (Agent 1 Only)
         if not agent2_required:
+            # Handle PENDING_TASKS_AMBIGUOUS clarification BEFORE try/finally
+            # (session must stay open when asking clarification)
+            if intent == "PENDING_TASKS_AMBIGUOUS" and not is_cross_questioning:
+                clarify_msg = "Would you like to see your own pending tasks or the pending tasks of your team members?"
+                append_message(session_id, "assistant", f"[CLARIFY] {clarify_msg}")
+                send_whatsapp_message(sender, clarify_msg, pid)
+                return
+
             try:
                 if intent == "VIEW_EMPLOYEES_UNDER_MANAGER":
                     await get_task_list_tool(ctx, view="users")
+                elif intent == "PENDING_TASKS_AMBIGUOUS":
+                    # Cross-questioning: user is responding to our clarification
+                    user_reply = command.strip().lower() if command else ""
+                    own_keywords = {"my", "mine", "me", "self", "myself", "my tasks", "my own", "for me", "1"}
+                    team_keywords = {"team", "employees", "subordinates", "under me", "reportees", "staff", "people", "others", "2"}
+                    wants_own = any(kw in user_reply for kw in own_keywords)
+                    wants_team = any(kw in user_reply for kw in team_keywords)
+
+                    if wants_own and not wants_team:
+                        log_reasoning("PENDING_DISAMBIGUATED", {"choice": "own_tasks"})
+                        pending = await get_task_list_tool(ctx, view="tasks")
+                        if pending:
+                            send_whatsapp_message(sender, "\n".join(pending), pid)
+                    elif wants_team and not wants_own:
+                        log_reasoning("PENDING_DISAMBIGUATED", {"choice": "team_tasks"})
+                        await get_performance_report_tool(ctx, report_type="Detail")
+                    else:
+                        # Still ambiguous — default to showing own tasks
+                        log_reasoning("PENDING_DISAMBIGUATED", {"choice": "still_unclear_defaulting_own"})
+                        pending = await get_task_list_tool(ctx, view="tasks")
+                        if pending:
+                            send_whatsapp_message(sender, "\n".join(pending), pid)
                 elif intent == "VIEW_PENDING_TASKS":
                     pending = await get_task_list_tool(ctx, view="tasks")
                     if pending:
@@ -1477,6 +1507,63 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 end_session_complete(login_code, session_id)
             
             return
+
+        # ── TASK_ASSIGNMENT: Handle confirmation reply BEFORE Agent 2 ──
+        if intent == "TASK_ASSIGNMENT" and is_cross_questioning:
+            last_asst = next((m for m in reversed(history) if m["role"] == "assistant"), None)
+            if last_asst and "[TASK_CONFIRM]" in last_asst.get("content", ""):
+                # Use Gemini to decide if user confirmed or denied
+                confirm_result = await run_gemini_extractor(
+                    prompt="""The user was asked to confirm a task creation. Based on their reply, decide if they are saying YES (confirm/proceed) or NO (cancel/reject).
+
+Rules:
+- Understand meaning, not just keywords. The user may reply in English, Hindi, or informal language.
+- "yes", "ha", "haan", "ji", "ok", "sure", "go ahead", "do it", "correct", "sahi hai", "theek hai", "kar do", "bana do", "assign karo" etc. → YES
+- "no", "nahi", "nah", "cancel", "mat karo", "ruk", "wrong", "galat" etc. → NO
+- If unclear, default to NO.
+
+Return ONLY one word: YES or NO""",
+                    message=command
+                )
+
+                is_confirmed = isinstance(confirm_result, str) and confirm_result.strip().upper() == "YES"
+
+                if not is_confirmed:
+                    log_reasoning("TASK_CONFIRM_DENIED", {"user_reply": command})
+                    send_whatsapp_message(sender, "Task creation cancelled.", pid)
+                    clear_pending_document_state(session_id)
+                    end_session_complete(login_code, session_id)
+                    return
+
+                # Confirmed — retrieve saved slots and create the task
+                log_reasoning("TASK_CONFIRM_APPROVED", {"user_reply": command})
+                merged_data = next((m["content"] for m in reversed(history) if m.get("role") == "slots"), {})
+                if isinstance(merged_data, str):
+                    try:
+                        merged_data = json.loads(merged_data)
+                    except Exception:
+                        merged_data = {}
+
+                if all(k in merged_data for k in ("assignee", "task_name", "deadline")):
+                    try:
+                        log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
+                        tool_output = await assign_new_task_tool(ctx, **merged_data)
+                        if isinstance(tool_output, str):
+                            append_message(session_id, "assistant", f"[CLARIFY] {tool_output}")
+                            send_whatsapp_message(sender, tool_output, pid)
+                            return
+                    except Exception as e:
+                        logger.error(f"API Tool Execution Failed for TASK_ASSIGNMENT: {e}")
+                    finally:
+                        clear_pending_document_state(session_id)
+                        end_session_complete(login_code, session_id)
+                    return
+                else:
+                    log_reasoning("TASK_CONFIRM_SLOTS_MISSING", {"merged_data": merged_data})
+                    send_whatsapp_message(sender, "Something went wrong. Please start over.", pid)
+                    clear_pending_document_state(session_id)
+                    end_session_complete(login_code, session_id)
+                    return
 
         # Agent-2 : Parameter Extraction
         # Retrieve latest slots and format history for Agent 2
@@ -1516,6 +1603,20 @@ Required fields:
 - assignee (name or phone)
 - task_name
 - deadline (ISO format if possible)
+
+STRICT RULES TO PREVENT UNNECESSARY QUESTIONS:
+- ONLY ask a question if one of the 3 required fields (assignee, task_name, deadline) is COMPLETELY MISSING from the conversation.
+- If the user has provided ANY description of what needs to be done, that IS the task_name. Use it AS-IS.
+  Examples: "complete report" → task_name = "complete report". "prepare documents" → task_name = "prepare documents".
+- Do NOT ask for more details, clarification, or elaboration on a field that already has a value.
+- Do NOT ask "What is the report about?" or "Can you specify which report?" — if user said "report", use "report".
+- Do NOT ask for the full name of a task if a short description was already given.
+- The ONLY questions you should ever ask are:
+  1. "Who should this task be assigned to?" (if assignee is missing)
+  2. "What is the task?" (if task_name is completely missing — not mentioned at all)
+  3. "What is the deadline?" (if deadline is missing)
+- If all 3 fields can be extracted from the conversation history, return JSON immediately. NO MORE QUESTIONS.
+- When reviewing conversation history, look at ALL messages (not just the latest one) to find field values.
 
 Current date: {ctx.current_time.strftime("%Y-%m-%d")}
 
@@ -1697,15 +1798,18 @@ Rules:
         # Execute Tool Calls
         try:
             if intent == "TASK_ASSIGNMENT" and all(k in merged_data for k in ("assignee", "task_name", "deadline")):
-                log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
-                tool_output = await assign_new_task_tool(ctx, **merged_data)
-                
-                if isinstance(tool_output, str):
-                    append_message(session_id, "assistant", f"[CLARIFY] {tool_output}") 
-                    send_whatsapp_message(sender, tool_output, pid)
-                    return 
-                clear_pending_document_state(session_id)
-                end_session_complete(login_code, session_id)
+                # Send confirmation before creating
+                confirm_msg = (
+                    f"Please confirm the task details:\n\n"
+                    f"*Task:* {merged_data['task_name']}\n"
+                    f"*Assigned to:* {merged_data['assignee']}\n"
+                    f"*Deadline:* {merged_data['deadline']}\n\n"
+                    f"Should I create this task?"
+                )
+                log_reasoning("TASK_CONFIRM_SENT", {"details": merged_data})
+                append_message(session_id, "assistant", f"[TASK_CONFIRM] {confirm_msg}")
+                send_whatsapp_message(sender, confirm_msg, pid)
+                return
             elif intent == "UPDATE_TASK_STATUS" and all(k in merged_data for k in ("task_id", "status")):
                 log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
                 tool_output = await update_task_status_tool(ctx, **merged_data)

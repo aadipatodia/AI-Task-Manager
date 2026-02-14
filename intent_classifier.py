@@ -15,6 +15,7 @@ SUPPORTED_INTENTS = {
     "VIEW_EMPLOYEES_UNDER_MANAGER",
     "UPDATE_TASK_STATUS",
     "VIEW_PENDING_TASKS",
+    "PENDING_TASKS_AMBIGUOUS",
     "ADD_USER",
     "DELETE_USER"
 }
@@ -37,6 +38,7 @@ VIEW_EMPLOYEE_PERFORMANCE
 VIEW_EMPLOYEES_UNDER_MANAGER
 UPDATE_TASK_STATUS
 VIEW_PENDING_TASKS
+PENDING_TASKS_AMBIGUOUS
 ADD_USER
 DELETE_USER
 
@@ -81,7 +83,7 @@ This intent is used when a **manager wants to see the list of employees who repo
 * “Show employees under me”
 * “Who are my team members?”
 * "Employee list"
-* "PENDING TASKS"
+
 
 ---
 
@@ -104,13 +106,37 @@ This intent is triggered when a user wants to **update the status of an existing
 ---
 
 ### **VIEW_PENDING_TASKS**
-This intent is used when a user wants to **view their own pending tasks** or, in the case of a manager, the pending tasks of their team or a specific employee.
+This intent is used when the user **clearly states** they want to see **their own** pending tasks.
 **Example user messages:**
-* “Show my pending tasks”
-* “What tasks are still pending for me?”
-* “Any unfinished tasks today for me?”
+* "Show my pending tasks"
+* "What tasks are still pending for me?"
+* "Any unfinished tasks today for me?"
+* "Show me my tasks"
 
-IT SHOULD BE NOTED THAT IT MUST ONLY BE DECIDED AS INTENT IF USER SPECIFIES THAT THEY WANT TO SEE THEIR PENDING TASKS IF NOTHING IS SPECIFIED THEN INTENT IS GOING O BE VIEW_PERFORMANCE_REPORT (FOR ALL EMPLOYEES)
+**KEY RULE:** This intent should ONLY be used when the user explicitly says "my" or clearly refers to themselves. If it is unclear whose pending tasks they want to see, use PENDING_TASKS_AMBIGUOUS instead.
+
+---
+
+### **PENDING_TASKS_AMBIGUOUS**
+This intent is used when the user asks about **pending tasks** but does NOT clearly specify whether they want to see:
+- Their OWN pending tasks, OR
+- Pending tasks of their TEAM / people under them
+
+**Example user messages (AMBIGUOUS — use this intent):**
+* "Pending tasks"
+* "List of pending tasks"
+* "Show pending tasks"
+* "What are the pending tasks?"
+* "Any pending tasks?"
+* "Tasks that are pending"
+
+**Example user messages (NOT ambiguous — do NOT use this intent):**
+* "Show my pending tasks" → VIEW_PENDING_TASKS (clearly says "my")
+* "Pending tasks for Rahul" → VIEW_EMPLOYEE_PERFORMANCE (clearly names a person)
+* "Show pending tasks of my team" → VIEW_EMPLOYEE_PERFORMANCE (clearly says "team")
+* "What are Neha's pending tasks?" → VIEW_EMPLOYEE_PERFORMANCE (clearly names a person)
+
+**RULE:** If the user mentions a specific person's name OR says "my team" / "team" → it is NOT ambiguous. If the user says "my" pending tasks → it is NOT ambiguous. Only use PENDING_TASKS_AMBIGUOUS when there is genuine ambiguity about whose tasks they want.
 
 ---
 
