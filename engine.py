@@ -534,17 +534,9 @@ async def delete_user_tool(
     email: Optional[str] = None
 ) -> Optional[str]:
 
-    # ── HIERARCHY CHECK: can only delete subordinates ──
-    target_phone = normalize_phone(mobile)
-    if not is_subordinate(users_collection, ctx.sender_phone, target_phone):
-        logger.warning(
-            f"[HIERARCHY] {ctx.sender_phone} tried to delete {target_phone} "
-            f"but they are not a subordinate."
-        )
-        return "You can only remove users who are under you in the hierarchy."
-
     # Normalize mobile: strip spaces, +, country code → clean 10 digits
-    clean_mobile = normalize_phone(mobile)[-10:]
+    target_phone = normalize_phone(mobile)
+    clean_mobile = target_phone[-10:]
 
     req = AddDeleteUserRequest(
         ACTION="Delete",
@@ -854,14 +846,14 @@ async def get_performance_report_tool(
             )
             if not user:
                 logger.warning(f"[HIERARCHY] {ctx.sender_phone} requested report for '{name}' — not a subordinate.")
-                return "You can only view performance reports for people under you in the hierarchy."
+                return None
             target_login = user["login_code"]
 
         # Safety check: Only managers can request 'Detail' reports
         final_report_type = report_type
         if final_report_type == "Detail" and ctx.role != "manager":
             logger.warning("Unauthorized Detail report request blocked.")
-            return "Only managers can request detailed performance reports."
+            return None
 
         req = WhatsAppPdfReportRequest(
             ASSIGNED_TO=target_login,
@@ -1028,7 +1020,8 @@ async def assign_new_task_tool(
                 None
             )
             if not resolved_user:
-                return "You can only assign tasks to people under you in the hierarchy."
+                logger.warning(f"[HIERARCHY] {ctx.sender_phone} tried to assign task to {normalized_phone} — not a subordinate.")
+                return None
             matches = [resolved_user]
         else:
             # DIRECT MONGO SEARCH: No Appsavy API call here
@@ -1044,7 +1037,8 @@ async def assign_new_task_tool(
         })
 
         if not matches:
-            return f"I couldn't find '{assignee_raw}' among the people under you. You can only assign tasks to your subordinates."
+            logger.warning(f"[HIERARCHY] {ctx.sender_phone} tried to assign task to '{assignee_raw}' — not found among subordinates.")
+            return None
 
         if len(matches) > 1:
             log_reasoning("DUPLICATE_FOUND_RESOLVING_VIA_MONGO", {"count": len(matches)})
@@ -1156,7 +1150,7 @@ async def update_task_status_tool(
                                 f"[HIERARCHY] {ctx.sender_phone} tried to reopen task {task_id} "
                                 f"but assignee {assignee_user['phone']} is not a subordinate."
                             )
-                            return "You can only reopen tasks assigned to people under you in the hierarchy."
+                            return None
         except Exception as e:
             logger.warning(f"[HIERARCHY] Could not verify reopen permission: {e}")
             # Allow through on error to avoid blocking legitimate updates
@@ -1878,9 +1872,7 @@ Rules:
                 return
             elif intent == "UPDATE_TASK_STATUS" and all(k in merged_data for k in ("task_id", "status")):
                 log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
-                tool_output = await update_task_status_tool(ctx, **merged_data)
-                if isinstance(tool_output, str):
-                    send_whatsapp_message(sender, tool_output, pid)
+                await update_task_status_tool(ctx, **merged_data)
                 clear_pending_document_state(session_id)
                 end_session_complete(login_code, session_id)
 
@@ -1892,21 +1884,17 @@ Rules:
 
             elif intent == "DELETE_USER" and all(k in merged_data for k in ("name", "mobile")):
                 log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
-                tool_output = await delete_user_tool(ctx, **merged_data)
-                if isinstance(tool_output, str):
-                    send_whatsapp_message(sender, tool_output, pid)
+                await delete_user_tool(ctx, **merged_data)
                 clear_pending_document_state(session_id)
                 end_session_complete(login_code, session_id)
             
             elif intent == "VIEW_EMPLOYEE_PERFORMANCE" and "report_type" in merged_data:
                 log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
-                tool_output = await get_performance_report_tool(
+                await get_performance_report_tool(
                     ctx,
                     report_type=merged_data["report_type"], 
                     name=merged_data.get("name")
                 )
-                if isinstance(tool_output, str):
-                    send_whatsapp_message(sender, tool_output, pid)
                 clear_pending_document_state(session_id)
                 end_session_complete(login_code, session_id)
             
