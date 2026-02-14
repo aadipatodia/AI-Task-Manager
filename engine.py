@@ -1635,9 +1635,12 @@ If returning JSON, use EXACTLY this format:
   "deadline": string
 }}
 
-Rules:
-- Either return JSON OR a question
-- Do not explain anything else
+CRITICAL OUTPUT RULES:
+- Return ONLY JSON or ONLY a plain text question. NEVER BOTH.
+- Do NOT return JSON with null values and then ask a question — just ask the question directly as plain text.
+- If a required field is missing, return ONLY the question as plain text (e.g., "What is the deadline?").
+- If all fields are present, return ONLY the JSON object with no extra text.
+- NEVER wrap JSON in markdown code fences (no ```json or ```).
 """,
                 message=full_convo_context
             )
@@ -1777,27 +1780,64 @@ Rules:
         if isinstance(result, str):
             cleaned_result = result.strip().replace("```json", "").replace("```", "").strip()
             
-            try:
-                # Try to parse it. If it works, it's NOT a clarification, it's DATA.
-                parsed = json.loads(cleaned_result)
-                # Must be a dict to be valid slot data; a parsed JSON string
-                # (e.g. "What is the mobile number?") is still a clarification.
-                if isinstance(parsed, dict):
-                    result = parsed
-                    log_reasoning("AGENT_2_JSON_PARSED", {"source": "string_cleaned"})
-                else:
-                    # JSON string literal — treat as clarification
-                    clarification_text = parsed if isinstance(parsed, str) else cleaned_result
-                    log_reasoning("AGENT_2_CLARIFICATION_SENT", {"agent_msg": clarification_text})
-                    append_message(session_id, "assistant", f"[CLARIFY] {clarification_text}")
-                    send_whatsapp_message(sender, clarification_text, pid)
+            # Handle mixed response: JSON + question text combined
+            # e.g. '{"assignee": "Ariya", ...}\nWhat is the deadline?'
+            json_match = re.search(r'(\{[^{}]*\})', cleaned_result, re.DOTALL)
+            if json_match:
+                try:
+                    parsed_json = json.loads(json_match.group(1))
+                    if isinstance(parsed_json, dict):
+                        # Check if any required value is null/empty — means it's incomplete
+                        has_nulls = any(v is None or v == "" for v in parsed_json.values())
+                        if has_nulls:
+                            # Extract the question part (text after the JSON)
+                            remaining_text = cleaned_result[json_match.end():].strip()
+                            if remaining_text:
+                                # Save the partial data as slots, send only the question
+                                partial_slots = {k: v for k, v in parsed_json.items() if v is not None and v != ""}
+                                if partial_slots:
+                                    merge_slots(session_id, partial_slots)
+                                log_reasoning("AGENT_2_CLARIFICATION_SENT", {"agent_msg": remaining_text})
+                                append_message(session_id, "assistant", f"[CLARIFY] {remaining_text}")
+                                send_whatsapp_message(sender, remaining_text, pid)
+                                return
+                            else:
+                                # JSON with nulls but no question — ask for missing field
+                                missing = [k for k, v in parsed_json.items() if v is None or v == ""]
+                                question = f"Could you please provide the {missing[0]}?"
+                                partial_slots = {k: v for k, v in parsed_json.items() if v is not None and v != ""}
+                                if partial_slots:
+                                    merge_slots(session_id, partial_slots)
+                                log_reasoning("AGENT_2_CLARIFICATION_SENT", {"agent_msg": question})
+                                append_message(session_id, "assistant", f"[CLARIFY] {question}")
+                                send_whatsapp_message(sender, question, pid)
+                                return
+                        else:
+                            # Complete JSON — use it
+                            result = parsed_json
+                            log_reasoning("AGENT_2_JSON_PARSED", {"source": "string_cleaned"})
+                except json.JSONDecodeError:
+                    pass
+            
+            # If result is still a string at this point, try plain JSON parse
+            if isinstance(result, str):
+                try:
+                    parsed = json.loads(cleaned_result)
+                    if isinstance(parsed, dict):
+                        result = parsed
+                        log_reasoning("AGENT_2_JSON_PARSED", {"source": "string_cleaned"})
+                    else:
+                        clarification_text = parsed if isinstance(parsed, str) else cleaned_result
+                        log_reasoning("AGENT_2_CLARIFICATION_SENT", {"agent_msg": clarification_text})
+                        append_message(session_id, "assistant", f"[CLARIFY] {clarification_text}")
+                        send_whatsapp_message(sender, clarification_text, pid)
+                        return
+                except json.JSONDecodeError:
+                    # Plain text question — send as clarification
+                    log_reasoning("AGENT_2_CLARIFICATION_SENT", {"agent_msg": result})
+                    append_message(session_id, "assistant", f"[CLARIFY] {result}") 
+                    send_whatsapp_message(sender, result, pid)
                     return
-            except json.JSONDecodeError:
-                # If parsing fails, it's definitely a question/clarification for the user.
-                log_reasoning("AGENT_2_CLARIFICATION_SENT", {"agent_msg": result})
-                append_message(session_id, "assistant", f"[CLARIFY] {result}") 
-                send_whatsapp_message(sender, result, pid)
-                return
 
         # Agent 2 produced JSON (the "Flag" is now set to true)
         merged_data = merge_slots(session_id, result)
