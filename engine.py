@@ -997,8 +997,8 @@ async def assign_new_task_tool(
     deadline: str
 ) -> Optional[str]:
     try:
-        # Load all users — hierarchy check is handled by the backend
-        team = load_team()
+        # Scope to current user's direct reports
+        team = get_team_for_user(ctx.sender_phone)
         assignee_raw = assignee.strip()
 
         log_reasoning("ASSIGN_TASK_START", {
@@ -1020,7 +1020,7 @@ async def assign_new_task_tool(
                 None
             )
             if not resolved_user:
-                logger.warning(f"{ctx.sender_phone} tried to assign task to {normalized_phone} — user not found.")
+                logger.warning(f"[HIERARCHY] {ctx.sender_phone} tried to assign task to {normalized_phone} — not a subordinate.")
                 return None
             matches = [resolved_user]
         else:
@@ -1037,7 +1037,7 @@ async def assign_new_task_tool(
         })
 
         if not matches:
-            logger.warning(f"{ctx.sender_phone} tried to assign task to '{assignee_raw}' — user not found.")
+            logger.warning(f"[HIERARCHY] {ctx.sender_phone} tried to assign task to '{assignee_raw}' — not found among subordinates.")
             return None
 
         if len(matches) > 1:
