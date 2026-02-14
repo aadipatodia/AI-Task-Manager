@@ -5,17 +5,19 @@ import json
 import datetime
 import base64
 from google.genai import Client
-import requests
+import httpx
 import time
 import uuid
 import logging
 import re
+import concurrent.futures
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from send_message import send_whatsapp_message
 from redis_session import (
     get_or_create_session,
+    get_or_create_session_with_history,
     append_message,
     set_pending_document,
     get_pending_document,
@@ -25,7 +27,7 @@ from redis_session import (
     get_session_history,
     end_session_complete
 )
-from intent_classifier import intent_classifier
+from intent_classifier import intent_classifier, async_intent_classifier
 from user_resolver import (
     resolve_user_by_phone,
     get_all_subordinates,
@@ -57,8 +59,17 @@ users_collection = db['users'] if db is not None else None
 
 APPSAVY_BASE_URL = "https://configapps.appsavy.com/api/AppsavyRestService"
 
-# Shared HTTP session for Appsavy/Meta API calls — reuses TCP connections
-_http_session = requests.Session()
+# Async HTTP client for Appsavy/Meta API calls — connection pooling + concurrent-safe
+_http_client = httpx.AsyncClient(
+    timeout=httpx.Timeout(15.0, connect=5.0),
+    limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+)
+
+# Dedicated thread pool for blocking Gemini SDK calls (default pool is too small)
+_gemini_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=20,
+    thread_name_prefix="gemini"
+)
 
 API_CONFIGS = {
     "ADD_DELETE_USER":{
@@ -322,22 +333,21 @@ def _get_gemini_client() -> Client:
     return _gemini_client
 
 async def run_gemini_extractor(prompt: str, message: str):
-    client = _get_gemini_client()
+    gemini_client = _get_gemini_client()
+    loop = asyncio.get_running_loop()
 
-    async def _gemini_call(client, prompt, message):
-        return await asyncio.to_thread(
-            lambda: client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=f"{prompt}\n\nUSER MESSAGE:\n{message}"
-            )
+    def _blocking_gemini():
+        return gemini_client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=f"{prompt}\n\nUSER MESSAGE:\n{message}"
         )
+
+    async def _gemini_call():
+        return await loop.run_in_executor(_gemini_executor, _blocking_gemini)
 
     response = await timed_api_call(
         "GEMINI_GENERATE_CONTENT",
-        _gemini_call,
-        client,
-        prompt,
-        message
+        _gemini_call
     )
 
     if not response:
@@ -571,10 +581,11 @@ async def add_user_tool(
             }
             
             if users_collection is not None:
-                users_collection.update_one(
+                await asyncio.to_thread(
+                    users_collection.update_one,
                     {"phone": new_user["phone"]},
                     {"$set": new_user},
-                    upsert=True
+                    True  # upsert
                 )
 
             logger.info(f"Successfully synced {name} to MongoDB with ID {login_code}")
@@ -619,7 +630,7 @@ async def delete_user_tool(
     # Only delete from MongoDB if the Appsavy API confirmed successful deletion
     if is_success and "permission denied" not in msg and "error" not in msg:
         if users_collection is not None:
-            users_collection.delete_one({"phone": target_phone})
+            await asyncio.to_thread(users_collection.delete_one, {"phone": target_phone})
             logger.info(
                 f"User with mobile {clean_mobile} successfully deleted from Appsavy and removed from MongoDB."
             )
@@ -678,7 +689,9 @@ async def get_duplicate_resolution_message(matches: list, assignee_name: str) ->
         login_code = candidate.get("login_code")
         
         # Search Mongo for the authoritative record
-        user_record = users_collection.find_one({"login_code": login_code})
+        user_record = await asyncio.to_thread(
+            users_collection.find_one, {"login_code": login_code}
+        )
         
         if user_record:
             name = user_record.get("name", candidate.get("name", "Unknown")).upper()
@@ -753,20 +766,18 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
             "payload_type": payload.__class__.__name__
         })
         
-        async def _appsavy_call():
-            return await asyncio.to_thread(
-                _http_session.post,
-                config["url"],
-                headers=config["headers"],
-                json=payload.model_dump(),
-                timeout=15
-            )
+        request_id = str(uuid.uuid4())[:8]
+        start_time = time.perf_counter()
+        logger.info(f"[API_START] APPSAVY_{key} | request_id={request_id}")
 
-        res = await timed_api_call(
-            f"APPSAVY_{key}",
-            _appsavy_call
+        res = await _http_client.post(
+            config["url"],
+            headers=config["headers"],
+            json=payload.model_dump(),
         )
-        
+
+        duration = round((time.perf_counter() - start_time) * 1000, 2)
+        logger.info(f"[API_END] APPSAVY_{key} | request_id={request_id} | time_taken_ms={duration}")
         logger.info(f"API {key} response status: {res.status_code}")
         logger.info(f"API {key} response body: {res.text}")
         
@@ -784,17 +795,15 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
         return None
 
 async def download_and_encode_document(document_data: Dict):
-    """Downloads media from Meta and returns base64 string (non-blocking)."""
+    """Downloads media from Meta and returns base64 string (fully async)."""
     try:
         access_token = os.getenv("ACCESS_TOKEN")
         media_id = document_data.get("id")
         
         headers = {"Authorization": f"Bearer {access_token}"}
-        r = await asyncio.to_thread(
-            _http_session.get,
+        r = await _http_client.get(
             f"https://graph.facebook.com/v20.0/{media_id}/",
             headers=headers,
-            timeout=10
         )
         
         if r.status_code != 200:
@@ -802,11 +811,9 @@ async def download_and_encode_document(document_data: Dict):
             return None
         
         download_url = r.json().get("url")
-        dr = await asyncio.to_thread(
-            _http_session.get,
+        dr = await _http_client.get(
             download_url,
             headers=headers,
-            timeout=15
         )
         
         if dr.status_code == 200:
@@ -1203,7 +1210,8 @@ async def update_task_status_tool(
                 assignee_code = tasks[0].get("REPORTER") or tasks[0].get("ASSIGNEE") or ""
                 # Resolve assignee phone from login_code
                 if assignee_code and users_collection is not None:
-                    assignee_user = users_collection.find_one(
+                    assignee_user = await asyncio.to_thread(
+                        users_collection.find_one,
                         {"login_code": assignee_code}, {"_id": 0}
                     )
                     if assignee_user:
@@ -1308,7 +1316,8 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             return
 
         # ──── AUTH: Resolve user from MongoDB (multi-user) ────
-        user = resolve_user_by_phone(users_collection, sender)
+        # Fix 3: Offload blocking MongoDB call to thread pool
+        user = await asyncio.to_thread(resolve_user_by_phone, users_collection, sender)
         if not user:
             top_mgr = get_top_manager_phone()
             logger.info(f"[AUTH_DEBUG] sender={sender} | top_manager_env={top_mgr} | match={normalize_phone(sender) == top_mgr}")
@@ -1323,30 +1332,33 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                     "manager_phone": normalize_phone(sender)
                 }
                 if users_collection is not None:
-                    users_collection.update_one(
+                    await asyncio.to_thread(
+                        users_collection.update_one,
                         {"phone": top_user["phone"]},
                         {"$set": top_user},
-                        upsert=True
+                        True  # upsert
                     )
                 user = top_user
             else:
-                send_whatsapp_message(sender, "Access Denied: Your number is not registered.", pid)
+                await send_whatsapp_message(sender, "Access Denied: Your number is not registered.", pid)
                 return
 
         login_code = user["login_code"]
-        role = resolve_role(sender)  # Dynamic: manager if anyone reports to them
 
-        # Use phone number (unique per WhatsApp) as session key
-        # to guarantee per-user isolation (login_code could collide)
+        # Fix 5: Parallelize session creation + role resolution (independent operations)
         session_key = sender
-        session_id = get_or_create_session(session_key)
+        session_id_result, role = await asyncio.gather(
+            asyncio.to_thread(get_or_create_session, session_key),
+            asyncio.to_thread(resolve_role, sender)
+        )
+        session_id = session_id_result
 
         # ──── HARD RESET CHECK ────
         if command and command.strip().lower() in RESET_PHRASES:
             log_reasoning("HARD_RESET_TRIGGERED", {"by": sender})
             clear_pending_document_state(session_id)
             end_session_complete(session_key, session_id)
-            send_whatsapp_message(
+            await send_whatsapp_message(
                 sender,
                 "Conversation has been reset. How can I assist you?",
                 pid
@@ -1425,7 +1437,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                     log_reasoning("DOCUMENT_FIRST_MESSAGE", {"intent": None})
                     clarify_doc_msg = "I've received your document. Would you like to 'Assign a new task' with this or 'Update status of a task'?"
                     append_message(session_id, "assistant", f"[CLARIFY] {clarify_doc_msg}")
-                    send_whatsapp_message(
+                    await send_whatsapp_message(
                         sender, 
                         clarify_doc_msg, 
                         pid
@@ -1462,7 +1474,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             else:
                 # CONDITION : Cross question and intent is null -> Error
                 log_reasoning("ERROR", {"reason": "Cross-question state detected but no existing_intent found."})
-                send_whatsapp_message(sender, "System error: Lost context of previous request. Please start over.", pid)
+                await send_whatsapp_message(sender, "System error: Lost context of previous request. Please start over.", pid)
                 clear_pending_document_state(session_id)
                 end_session_complete(session_key, session_id)
                 return
@@ -1492,7 +1504,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                             "error": f"Document sent with invalid intent '{existing_intent}'",
                             "must_be_one_of": ["TASK_ASSIGNMENT", "UPDATE_TASK_STATUS"]
                         })
-                        send_whatsapp_message(
+                        await send_whatsapp_message(
                             sender,
                             "Error: Documents can only be used with 'Assign a new task' or 'Update status of a task'.",
                             pid
@@ -1503,9 +1515,8 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 # ============= END DOCUMENT VALIDATION =============
             else:
                 # CONDITION: Intent is null -> Agent 1 call
-                is_supported, intent, confidence, reasoning = await asyncio.to_thread(
-                    intent_classifier, command
-                )
+                # Fix 2: Use dedicated thread pool instead of default (avoids pool starvation)
+                is_supported, intent, confidence, reasoning = await async_intent_classifier(command)
         
                 log_reasoning("INTENT_CLASSIFIED", {
                     "intent": intent,
@@ -1517,7 +1528,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 if is_supported and intent:
                     append_message(session_id, "system", f"INTENT_SET: {intent}")
                 else:
-                    send_whatsapp_message(
+                    await send_whatsapp_message(
                         sender,
                         "I'm sorry, I didn't quite catch that. I can help with task assignment, "
                         "updates, performance reports, and user management. What would you like to do?",
@@ -1549,7 +1560,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             if intent == "PENDING_TASKS_AMBIGUOUS" and not is_cross_questioning:
                 clarify_msg = "Would you like to see your own pending tasks or the pending tasks of your team members?"
                 append_message(session_id, "assistant", f"[CLARIFY] {clarify_msg}")
-                send_whatsapp_message(sender, clarify_msg, pid)
+                await send_whatsapp_message(sender, clarify_msg, pid)
                 return
 
             try:
@@ -1584,11 +1595,11 @@ Return ONLY one word: OWN or TEAM""",
                         log_reasoning("PENDING_DISAMBIGUATED", {"choice": "own_tasks"})
                         pending = await get_task_list_tool(ctx, view="tasks")
                         if pending:
-                            send_whatsapp_message(sender, "\n".join(pending), pid)
+                            await send_whatsapp_message(sender, "\n".join(pending), pid)
                 elif intent == "VIEW_PENDING_TASKS":
                     pending = await get_task_list_tool(ctx, view="tasks")
                     if pending:
-                        send_whatsapp_message(sender, "\n".join(pending), pid)
+                        await send_whatsapp_message(sender, "\n".join(pending), pid)
                 elif intent == "VIEW_EMPLOYEE_PERFORMANCE":
                     await get_performance_report_tool(ctx)
             except Exception as e:
@@ -1622,7 +1633,7 @@ Return ONLY one word: YES or NO""",
 
                 if not is_confirmed:
                     log_reasoning("TASK_CONFIRM_DENIED", {"user_reply": command})
-                    send_whatsapp_message(sender, "Task creation cancelled.", pid)
+                    await send_whatsapp_message(sender, "Task creation cancelled.", pid)
                     clear_pending_document_state(session_id)
                     end_session_complete(session_key, session_id)
                     return
@@ -1642,7 +1653,7 @@ Return ONLY one word: YES or NO""",
                         tool_output = await assign_new_task_tool(ctx, **merged_data)
                         if isinstance(tool_output, str):
                             append_message(session_id, "assistant", f"[CLARIFY] {tool_output}")
-                            send_whatsapp_message(sender, tool_output, pid)
+                            await send_whatsapp_message(sender, tool_output, pid)
                             return
                     except Exception as e:
                         logger.error(f"API Tool Execution Failed for TASK_ASSIGNMENT: {e}")
@@ -1652,7 +1663,7 @@ Return ONLY one word: YES or NO""",
                     return
                 else:
                     log_reasoning("TASK_CONFIRM_SLOTS_MISSING", {"merged_data": merged_data})
-                    send_whatsapp_message(sender, "Something went wrong. Please start over.", pid)
+                    await send_whatsapp_message(sender, "Something went wrong. Please start over.", pid)
                     clear_pending_document_state(session_id)
                     end_session_complete(session_key, session_id)
                     return
@@ -1903,7 +1914,7 @@ Rules:
                                     merge_slots(session_id, partial_slots)
                                 log_reasoning("AGENT_2_CLARIFICATION_SENT", {"agent_msg": remaining_text})
                                 append_message(session_id, "assistant", f"[CLARIFY] {remaining_text}")
-                                send_whatsapp_message(sender, remaining_text, pid)
+                                await send_whatsapp_message(sender, remaining_text, pid)
                                 return
                             else:
                                 # JSON with nulls on required fields but no question — ask for missing field
@@ -1914,7 +1925,7 @@ Rules:
                                     merge_slots(session_id, partial_slots)
                                 log_reasoning("AGENT_2_CLARIFICATION_SENT", {"agent_msg": question})
                                 append_message(session_id, "assistant", f"[CLARIFY] {question}")
-                                send_whatsapp_message(sender, question, pid)
+                                await send_whatsapp_message(sender, question, pid)
                                 return
                         else:
                             # Complete JSON — use it
@@ -1934,13 +1945,13 @@ Rules:
                         clarification_text = parsed if isinstance(parsed, str) else cleaned_result
                         log_reasoning("AGENT_2_CLARIFICATION_SENT", {"agent_msg": clarification_text})
                         append_message(session_id, "assistant", f"[CLARIFY] {clarification_text}")
-                        send_whatsapp_message(sender, clarification_text, pid)
+                        await send_whatsapp_message(sender, clarification_text, pid)
                         return
                 except json.JSONDecodeError:
                     # Plain text question — send as clarification
                     log_reasoning("AGENT_2_CLARIFICATION_SENT", {"agent_msg": result})
                     append_message(session_id, "assistant", f"[CLARIFY] {result}") 
-                    send_whatsapp_message(sender, result, pid)
+                    await send_whatsapp_message(sender, result, pid)
                     return
 
         # Agent 2 produced JSON (the "Flag" is now set to true)
@@ -1960,7 +1971,7 @@ Rules:
                 )
                 log_reasoning("TASK_CONFIRM_SENT", {"details": merged_data})
                 append_message(session_id, "assistant", f"[TASK_CONFIRM] {confirm_msg}")
-                send_whatsapp_message(sender, confirm_msg, pid)
+                await send_whatsapp_message(sender, confirm_msg, pid)
                 return
             elif intent == "UPDATE_TASK_STATUS" and all(k in merged_data for k in ("task_id", "status")):
                 log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})

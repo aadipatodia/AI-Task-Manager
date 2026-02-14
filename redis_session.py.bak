@@ -45,32 +45,11 @@ def get_or_create_session(session_key: str) -> str:
         return session_id
     return create_session(session_key)
 
-
-def get_or_create_session_with_history(session_key: str) -> tuple:
-    """Combined session + history fetch in fewer Redis round-trips.
-    Returns (session_id, history_list) — saves 1 RT vs separate calls."""
-    session_id = redis_client.get(f"user_active_session:{session_key}")
-    if session_id:
-        # Batch: TTL refresh + history fetch in ONE pipeline round-trip
-        pipe = redis_client.pipeline()
-        pipe.expire(f"user_active_session:{session_key}", SESSION_TTL)
-        pipe.expire(f"session:{session_id}", SESSION_TTL)
-        pipe.expire(f"agent2_state:{session_id}", SESSION_TTL)
-        pipe.lrange(f"session:{session_id}", 0, -1)
-        results = pipe.execute()
-        raw_history = results[3]  # 4th command result
-        history = _parse_history_raw(raw_history)
-        return session_id, history
-    session_id = create_session(session_key)
-    return session_id, []
-
 def append_message(session_id: str, role: str, content: str | dict):
     """Append message to session history. Content can be string or dict (for slots)"""
     content_to_store = content if isinstance(content, str) else json.dumps(content)
     
-    # Pipeline: RPUSH + EXPIRE in one round-trip (was 2 separate calls)
-    pipe = redis_client.pipeline()
-    pipe.rpush(
+    redis_client.rpush(
         f"session:{session_id}",
         json.dumps({
             "role": role,
@@ -78,8 +57,8 @@ def append_message(session_id: str, role: str, content: str | dict):
             "ts": datetime.now(IST).isoformat()
         })
     )
-    pipe.expire(f"session:{session_id}", SESSION_TTL)
-    pipe.execute()
+    # Refresh TTL on write
+    redis_client.expire(f"session:{session_id}", SESSION_TTL)
 
 def set_pending_document(session_id: str, document_data: dict, ttl: int = 600):
     """
@@ -134,15 +113,11 @@ def clear_pending_document_state(session_id: str):
 def get_session_history(session_id: str) -> List[Dict]:
     """Retrieve full conversation history for a session"""
     raw = redis_client.lrange(f"session:{session_id}", 0, -1)
-    return _parse_history_raw(raw)
-
-
-def _parse_history_raw(raw: list) -> List[Dict]:
-    """Parse raw Redis list entries into structured history dicts."""
     history = []
     for x in raw:
         try:
             msg = json.loads(x)
+            # If content is a JSON string (slots), parse it back to dict
             if msg["role"] == "slots" and isinstance(msg["content"], str):
                 try:
                     msg["content"] = json.loads(msg["content"])

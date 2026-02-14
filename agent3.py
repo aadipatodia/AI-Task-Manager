@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import logging
 import re
 from typing import Optional, Tuple, List, Dict
@@ -12,6 +13,12 @@ from google.genai import Client
 import os
 
 logger = logging.getLogger(__name__)
+
+# Dedicated thread pool for blocking Gemini SDK calls in Agent 3
+_agent3_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=20,
+    thread_name_prefix="agent3-gemini"
+)
 
 # If user has been inactive for 10+ minutes, auto-reset (likely new conversation)
 INACTIVITY_THRESHOLD = 600  # seconds
@@ -166,7 +173,9 @@ OR
 """
 
     try:
-        response = await asyncio.to_thread(
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            _agent3_executor,
             lambda: client.models.generate_content(
                 model="gemini-2.0-flash",
                 contents=prompt

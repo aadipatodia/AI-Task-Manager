@@ -1,6 +1,8 @@
 import os
 import json
 import re
+import asyncio
+import concurrent.futures
 from dotenv import load_dotenv
 from google.genai import Client
 
@@ -8,6 +10,12 @@ from google.genai import Client
 load_dotenv()
 
 MODEL_NAME = "gemini-2.0-flash"
+
+# Dedicated thread pool for blocking Gemini SDK calls (avoids starving default pool)
+_classifier_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=20,
+    thread_name_prefix="intent-classifier"
+)
 
 SUPPORTED_INTENTS = {
     "TASK_ASSIGNMENT",
@@ -241,6 +249,18 @@ def intent_classifier(user_message: str, has_document: bool = False):
         return True, intent, confidence, reasoning
 
     return False, None, confidence, reasoning
+
+
+async def async_intent_classifier(user_message: str, has_document: bool = False):
+    """Async wrapper that runs intent_classifier in a dedicated thread pool
+    instead of the default asyncio executor (which has only ~8 workers)."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _classifier_executor,
+        intent_classifier,
+        user_message,
+        has_document
+    )
 
 
 # -----------------------------
