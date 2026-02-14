@@ -8,7 +8,11 @@ load_dotenv()
 # === CONFIGURATION ===
 DEFAULT_PHONE_ID = os.getenv("PHONE_NUMBER_ID")
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
-VERSION = "v22.0" 
+VERSION = "v22.0"
+
+# Shared HTTP session — reuses TCP connections (connection pooling)
+_http_session = requests.Session()
+_http_session.headers.update({"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"})
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -51,7 +55,7 @@ def send_whatsapp_message(recipient_number, message_text, phone_number_id=None):
             f"Message Length: {len(message_text)}"
         )
 
-        response = requests.post(url, json=payload, headers=headers)
+        response = _http_session.post(url, json=payload, headers=headers)
 
         # 🔹 Log AFTER receiving response
         logger.info(
@@ -115,7 +119,7 @@ def send_registration_template(recipient_number, user_identifier, phone_number_i
     }
 
     try:
-        response = requests.post(url, headers=headers, json=payload)
+        response = _http_session.post(url, headers=headers, json=payload)
         if response.status_code == 200:
             print(f"  Success! Template sent to {user_identifier}")
             return True
@@ -133,7 +137,7 @@ def upload_media(file_path, phone_number_id=None):
         with open(file_path, "rb") as f:
             files = {"file": (os.path.basename(file_path), f)}
             data = {"type": "application/octet-stream", "messaging_product": "whatsapp"}
-            response = requests.post(url, data=data, files=files, headers={"Authorization": f"Bearer {ACCESS_TOKEN}"})
+            response = _http_session.post(url, data=data, files=files, headers={"Authorization": f"Bearer {ACCESS_TOKEN}"})
         return response.json().get("id") if response.status_code == 200 else None
     except Exception as e:
         return None
@@ -165,7 +169,7 @@ def send_whatsapp_document(recipient_number, file_path=None, document_url=None, 
     else: return None
 
     try:
-        response = requests.post(url, json=payload, headers=headers)
+        response = _http_session.post(url, json=payload, headers=headers)
         return response.json() if response.status_code == 200 else None
     except Exception as e:
         return None

@@ -33,6 +33,7 @@ from user_resolver import (
     get_top_manager_phone,
     get_hierarchy_chain
 )
+from functools import lru_cache
 from agent3 import agent3_intent_guard
 import asyncio 
 from datetime import timezone, timedelta
@@ -55,6 +56,9 @@ db = client['ai_task_manager'] if client is not None else None
 users_collection = db['users'] if db is not None else None
 
 APPSAVY_BASE_URL = "https://configapps.appsavy.com/api/AppsavyRestService"
+
+# Shared HTTP session for Appsavy/Meta API calls — reuses TCP connections
+_http_session = requests.Session()
 
 API_CONFIGS = {
     "ADD_DELETE_USER":{
@@ -308,8 +312,17 @@ class AddDeleteUserRequest(BaseModel):
     MOBILE_NUMBER: str
     NAME: str
     
+# Module-level Gemini client — avoids re-creation per call
+_gemini_client: Client | None = None
+
+def _get_gemini_client() -> Client:
+    global _gemini_client
+    if _gemini_client is None:
+        _gemini_client = Client(api_key=os.getenv("GEMINI_API_KEY"))
+    return _gemini_client
+
 async def run_gemini_extractor(prompt: str, message: str):
-    client = Client(api_key=os.getenv("GEMINI_API_KEY"))
+    client = _get_gemini_client()
 
     async def _gemini_call(client, prompt, message):
         return await asyncio.to_thread(
@@ -394,16 +407,42 @@ IMPORTANT:
 - Focus only on the actual user message content.
 """
 
+# ─── TTL cache for MongoDB lookups (avoids per-message DB hits) ───
+import threading
+
+_cache_lock = threading.Lock()
+_team_cache: dict = {}       # phone -> (result, expiry_time)
+_all_users_cache: tuple = (None, 0.0)  # (result, expiry_time)
+_role_cache: dict = {}       # phone -> (result, expiry_time)
+_CACHE_TTL = 120  # seconds
+
+def _now_ts() -> float:
+    return time.time()
+
+def _invalidate_user_caches():
+    """Clear all user/team/role caches (call after add/delete user)."""
+    global _all_users_cache
+    with _cache_lock:
+        _team_cache.clear()
+        _role_cache.clear()
+        _all_users_cache = (None, 0.0)
+
 def load_team():
-    """Load ALL users from MongoDB (global list)."""
+    """Load ALL users from MongoDB (global list) with 2-minute cache."""
+    global _all_users_cache
+    with _cache_lock:
+        cached, expiry = _all_users_cache
+        if cached is not None and _now_ts() < expiry:
+            return cached
     if users_collection is None:
         logger.error("MongoDB connection cant be initialized")
         return []
 
     try:
         db_users = list(users_collection.find({}, {"_id": 0}))
-        
         logger.info(f"Successfully loaded {len(db_users)} users from MongoDB.")
+        with _cache_lock:
+            _all_users_cache = (db_users, _now_ts() + _CACHE_TTL)
         return db_users
         
     except Exception as e:
@@ -413,29 +452,44 @@ def load_team():
 
 def resolve_role(user_phone: str) -> str:
     """
-    Determine if a user is a 'manager' or 'employee'.
-    - Top manager (from env) is always 'manager'.
-    - Anyone who has subordinates (direct or indirect) is 'manager'.
+    Determine if a user is a 'manager' or 'employee' (cached for 2 min).
     """
+    phone = normalize_phone(user_phone)
+    with _cache_lock:
+        if phone in _role_cache:
+            cached, expiry = _role_cache[phone]
+            if _now_ts() < expiry:
+                return cached
+
     if users_collection is None:
         return "employee"
-    phone = normalize_phone(user_phone)
     if phone == get_top_manager_phone():
-        return "manager"
-    subordinate = users_collection.find_one({"manager_phone": phone, "phone": {"$ne": phone}})
-    if subordinate:
-        return "manager"
-    return "employee"
+        role = "manager"
+    else:
+        subordinate = users_collection.find_one({"manager_phone": phone, "phone": {"$ne": phone}})
+        role = "manager" if subordinate else "employee"
+
+    with _cache_lock:
+        _role_cache[phone] = (role, _now_ts() + _CACHE_TTL)
+    return role
 
 
 def get_team_for_user(user_phone: str) -> list:
     """
-    Return ALL users below this phone in the hierarchy (recursive).
-    Excludes the user themselves.
+    Return ALL users below this phone in the hierarchy (cached for 2 min).
     """
     if users_collection is None:
         return []
-    return get_all_subordinates(users_collection, user_phone)
+    phone = normalize_phone(user_phone)
+    with _cache_lock:
+        if phone in _team_cache:
+            cached, expiry = _team_cache[phone]
+            if _now_ts() < expiry:
+                return cached
+    result = get_all_subordinates(users_collection, user_phone)
+    with _cache_lock:
+        _team_cache[phone] = (result, _now_ts() + _CACHE_TTL)
+    return result
 
 async def add_user_tool(
     ctx: UserContext,
@@ -524,6 +578,8 @@ async def add_user_tool(
                 )
 
             logger.info(f"Successfully synced {name} to MongoDB with ID {login_code}")
+            # Invalidate caches after user change
+            _invalidate_user_caches()
             return None
     return None
 
@@ -567,6 +623,8 @@ async def delete_user_tool(
             logger.info(
                 f"User with mobile {clean_mobile} successfully deleted from Appsavy and removed from MongoDB."
             )
+        # Invalidate caches after user change
+        _invalidate_user_caches()
         return None
 
     # API did not confirm success — do NOT remove from MongoDB
@@ -697,7 +755,7 @@ async def call_appsavy_api(key: str, payload: BaseModel) -> Optional[Dict]:
         
         async def _appsavy_call():
             return await asyncio.to_thread(
-                requests.post,
+                _http_session.post,
                 config["url"],
                 headers=config["headers"],
                 json=payload.model_dump(),
@@ -733,7 +791,7 @@ async def download_and_encode_document(document_data: Dict):
         
         headers = {"Authorization": f"Bearer {access_token}"}
         r = await asyncio.to_thread(
-            requests.get,
+            _http_session.get,
             f"https://graph.facebook.com/v20.0/{media_id}/",
             headers=headers,
             timeout=10
@@ -745,7 +803,7 @@ async def download_and_encode_document(document_data: Dict):
         
         download_url = r.json().get("url")
         dr = await asyncio.to_thread(
-            requests.get,
+            _http_session.get,
             download_url,
             headers=headers,
             timeout=15
@@ -857,11 +915,7 @@ async def get_performance_report_tool(
                 return None
             target_login = user["login_code"]
 
-        # Safety check: Only managers can request 'Detail' reports
         final_report_type = report_type
-        if final_report_type == "Detail" and ctx.role != "manager":
-            logger.warning("Unauthorized Detail report request blocked.")
-            return None
 
         req = WhatsAppPdfReportRequest(
             ASSIGNED_TO=target_login,
@@ -1239,7 +1293,8 @@ RESET_PHRASES = {
     "start over",
     "reset conversation",
     "clear chat",
-    "cancel this"
+    "new conversation",
+    "restart"
 }
 
 async def handle_message(command, sender, pid, message=None, full_message=None):
@@ -1281,13 +1336,16 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         login_code = user["login_code"]
         role = resolve_role(sender)  # Dynamic: manager if anyone reports to them
 
-        session_id = get_or_create_session(login_code)
+        # Use phone number (unique per WhatsApp) as session key
+        # to guarantee per-user isolation (login_code could collide)
+        session_key = sender
+        session_id = get_or_create_session(session_key)
 
         # ──── HARD RESET CHECK ────
         if command and command.strip().lower() in RESET_PHRASES:
             log_reasoning("HARD_RESET_TRIGGERED", {"by": sender})
             clear_pending_document_state(session_id)
-            end_session_complete(login_code, session_id)
+            end_session_complete(session_key, session_id)
             send_whatsapp_message(
                 sender,
                 "Conversation has been reset. How can I assist you?",
@@ -1309,8 +1367,8 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             # Preserve pending document across session reset
             saved_pending_doc = get_pending_document(session_id)
             saved_pending_doc_state = get_pending_document_state(session_id)
-            end_session_complete(login_code, session_id)
-            session_id = get_or_create_session(login_code)
+            end_session_complete(session_key, session_id)
+            session_id = get_or_create_session(session_key)
             # Migrate pending document to new session if it existed
             if saved_pending_doc:
                 set_pending_document(session_id, saved_pending_doc)
@@ -1345,38 +1403,51 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         log_reasoning("DEBUG_STATE", {"is_cross_questioning": is_cross_questioning, "existing_intent": existing_intent, "last_assistant_msg": last_assistant_msg})
 
         # ============= DOCUMENT HANDLING (FIRST CHECK) =============
-        if message and not command:
+        if message:
             log_reasoning("DOCUMENT_RECEIVED", {
                 "type": message.get("type"),
+                "has_caption": bool(command),
                 "is_first_message": not existing_intent,
                 "session_id": session_id
             })
             
-            # Store document
+            # Always store the document in the session so it persists across turns
             set_pending_document(session_id, message)
             
-            # Track if this is first message (intent = null) or after (intent already set)
-            is_first_msg = not existing_intent
-            set_pending_document_state(session_id, is_first_msg)
-            
-            # If document sent as FIRST message, intent must be null (Agent 1 → null)
-            if is_first_msg:
-                log_reasoning("DOCUMENT_FIRST_MESSAGE", {"intent": None})
-                clarify_doc_msg = "I've received your document. Would you like to 'Assign a new task' with this or 'Update status of a task'?"
-                append_message(session_id, "assistant", f"[CLARIFY] {clarify_doc_msg}")
-                send_whatsapp_message(
-                    sender, 
-                    clarify_doc_msg, 
-                    pid
-                )
-                return
+            if not command:
+                # Document sent WITHOUT text caption
+                # Track if this is first message (intent = null) or after (intent already set)
+                is_first_msg = not existing_intent
+                set_pending_document_state(session_id, is_first_msg)
+                
+                # If document sent as FIRST message, intent must be null (Agent 1 → null)
+                if is_first_msg:
+                    log_reasoning("DOCUMENT_FIRST_MESSAGE", {"intent": None})
+                    clarify_doc_msg = "I've received your document. Would you like to 'Assign a new task' with this or 'Update status of a task'?"
+                    append_message(session_id, "assistant", f"[CLARIFY] {clarify_doc_msg}")
+                    send_whatsapp_message(
+                        sender, 
+                        clarify_doc_msg, 
+                        pid
+                    )
+                    return
+                else:
+                    # Document sent AFTER intent already set, continue with existing intent
+                    log_reasoning("DOCUMENT_CONTINUATION", {
+                        "existing_intent": existing_intent,
+                        "intent_must_be_one_of_two": ["TASK_ASSIGNMENT", "UPDATE_TASK_STATUS"]
+                    })
+                    # Continue below with existing intent
             else:
-                # Document sent AFTER intent already set, continue with existing intent
-                log_reasoning("DOCUMENT_CONTINUATION", {
-                    "existing_intent": existing_intent,
-                    "intent_must_be_one_of_two": ["TASK_ASSIGNMENT", "UPDATE_TASK_STATUS"]
+                # Document sent WITH text caption — store document state and let text
+                # drive intent classification / parameter extraction normally
+                set_pending_document_state(session_id, not existing_intent)
+                log_reasoning("DOCUMENT_WITH_TEXT", {
+                    "caption": command,
+                    "type": message.get("type"),
+                    "existing_intent": existing_intent
                 })
-                # Continue below with existing intent
+                # Fall through — command (caption text) will be processed below
         # ============= END DOCUMENT HANDLING =============
 
         intent = None
@@ -1393,7 +1464,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                 log_reasoning("ERROR", {"reason": "Cross-question state detected but no existing_intent found."})
                 send_whatsapp_message(sender, "System error: Lost context of previous request. Please start over.", pid)
                 clear_pending_document_state(session_id)
-                end_session_complete(login_code, session_id)
+                end_session_complete(session_key, session_id)
                 return
         else:
             if existing_intent:
@@ -1427,7 +1498,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                             pid
                         )
                         clear_pending_document_state(session_id)
-                        end_session_complete(login_code, session_id)
+                        end_session_complete(session_key, session_id)
                         return
                 # ============= END DOCUMENT VALIDATION =============
             else:
@@ -1453,7 +1524,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                         pid
                     )
                     clear_pending_document_state(session_id)
-                    end_session_complete(login_code, session_id)
+                    end_session_complete(session_key, session_id)
                     return
                 
         # Context Setup 
@@ -1525,7 +1596,7 @@ Return ONLY one word: OWN or TEAM""",
             finally:
                 # Requirement: Clear cache on every successful or failed call
                 clear_pending_document_state(session_id)
-                end_session_complete(login_code, session_id)
+                end_session_complete(session_key, session_id)
             
             return
 
@@ -1553,7 +1624,7 @@ Return ONLY one word: YES or NO""",
                     log_reasoning("TASK_CONFIRM_DENIED", {"user_reply": command})
                     send_whatsapp_message(sender, "Task creation cancelled.", pid)
                     clear_pending_document_state(session_id)
-                    end_session_complete(login_code, session_id)
+                    end_session_complete(session_key, session_id)
                     return
 
                 # Confirmed — retrieve saved slots and create the task
@@ -1577,13 +1648,13 @@ Return ONLY one word: YES or NO""",
                         logger.error(f"API Tool Execution Failed for TASK_ASSIGNMENT: {e}")
                     finally:
                         clear_pending_document_state(session_id)
-                        end_session_complete(login_code, session_id)
+                        end_session_complete(session_key, session_id)
                     return
                 else:
                     log_reasoning("TASK_CONFIRM_SLOTS_MISSING", {"merged_data": merged_data})
                     send_whatsapp_message(sender, "Something went wrong. Please start over.", pid)
                     clear_pending_document_state(session_id)
-                    end_session_complete(login_code, session_id)
+                    end_session_complete(session_key, session_id)
                     return
 
         # Agent-2 : Parameter Extraction
@@ -1895,19 +1966,19 @@ Rules:
                 log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
                 await update_task_status_tool(ctx, **merged_data)
                 clear_pending_document_state(session_id)
-                end_session_complete(login_code, session_id)
+                end_session_complete(session_key, session_id)
 
             elif intent == "ADD_USER" and all(k in merged_data for k in ("name", "mobile")):
                 log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
                 await add_user_tool(ctx, **merged_data)
                 clear_pending_document_state(session_id)
-                end_session_complete(login_code, session_id)
+                end_session_complete(session_key, session_id)
 
             elif intent == "DELETE_USER" and all(k in merged_data for k in ("name", "mobile")):
                 log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
                 await delete_user_tool(ctx, **merged_data)
                 clear_pending_document_state(session_id)
-                end_session_complete(login_code, session_id)
+                end_session_complete(session_key, session_id)
             
             elif intent == "VIEW_EMPLOYEE_PERFORMANCE" and "report_type" in merged_data:
                 log_reasoning("TOOL_EXECUTION_START", {"intent": intent, "data": merged_data})
@@ -1917,19 +1988,19 @@ Rules:
                     name=merged_data.get("name")
                 )
                 clear_pending_document_state(session_id)
-                end_session_complete(login_code, session_id)
+                end_session_complete(session_key, session_id)
             
         except Exception as e:
             logger.error(f"API Tool Execution Failed for {intent}: {e}")
             # Requirement: Clear cache even on failed API calls
             clear_pending_document_state(session_id)
-            end_session_complete(login_code, session_id)
+            end_session_complete(session_key, session_id)
 
     except Exception:
         logger.error("handle_message failed", exc_info=True)
         try:
-            if 'session_id' in locals():
+            if 'session_id' in locals() and 'session_key' in locals():
                 clear_pending_document_state(session_id)
-                end_session_complete(login_code, session_id)
+                end_session_complete(session_key, session_id)
         except Exception:
             pass

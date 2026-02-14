@@ -193,12 +193,17 @@ Format:
 }
 """
 
-def init_gemini():
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise EnvironmentError("GEMINI_API_KEY missing")
+# Module-level Gemini client singleton
+_gemini_client: Client | None = None
 
-    return Client(api_key=api_key)
+def init_gemini() -> Client:
+    global _gemini_client
+    if _gemini_client is None:
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise EnvironmentError("GEMINI_API_KEY missing")
+        _gemini_client = Client(api_key=api_key)
+    return _gemini_client
 
 def clean_json(text: str) -> str:
     text = text.strip()

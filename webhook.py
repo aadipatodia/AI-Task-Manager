@@ -1,10 +1,27 @@
 from fastapi import FastAPI, Request, HTTPException, Query
 import os
+import asyncio
 import logging
 from dotenv import load_dotenv
 from google_auth_oauthlib.flow import Flow
 from engine import handle_message, SCOPES, REDIRECT_URI
 from redis_session import redis_client  # Leverage existing Redis connection
+
+
+async def _safe_handle(command, sender, pid, message_data, full_message):
+    """Wrapper that catches exceptions so fire-and-forget tasks never crash silently."""
+    try:
+        await handle_message(
+            command,
+            sender,
+            pid,
+            message=message_data,
+            full_message=full_message,
+        )
+    except Exception:
+        logging.getLogger(__name__).error(
+            "Background handle_message failed", exc_info=True
+        )
 
 # Initialize logging
 logging.basicConfig(level=logging.INFO)
@@ -95,13 +112,11 @@ async def handle_webhook(request: Request):
                         message_data = {"image": img, "type": "image"}
 
                 if user_command.strip() or message_data:
-                    # Pass the message to the engine for processing
-                    await handle_message(
-                        user_command, 
-                        sender_phone, 
-                        phone_number_id, 
-                        message=message_data, 
-                        full_message=message
+                    # Fire-and-forget: process in background so webhook returns 200 instantly.
+                    # This prevents Meta from retrying and avoids head-of-line blocking
+                    # when multiple users send messages at the same time.
+                    asyncio.create_task(
+                        _safe_handle(user_command, sender_phone, phone_number_id, message_data, message)
                     )
 
     return {"status": "EVENT_RECEIVED"}
