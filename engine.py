@@ -1066,8 +1066,16 @@ async def assign_new_task_tool(
     deadline: str
 ) -> Optional[str]:
     try:
-        # Scope to current user's direct reports
+        # Scope to current user's direct reports + include self for self-assignment
         team = get_team_for_user(ctx.sender_phone)
+        sender_user = await asyncio.to_thread(
+            resolve_user_by_phone, users_collection, ctx.sender_phone
+        )
+        if sender_user and not any(
+            normalize_phone(u.get("phone", "")) == normalize_phone(ctx.sender_phone)
+            for u in team
+        ):
+            team = team + [sender_user]
         assignee_raw = assignee.strip()
 
         log_reasoning("ASSIGN_TASK_START", {
