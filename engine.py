@@ -549,23 +549,31 @@ async def delete_user_tool(
     res = await call_appsavy_api("ADD_DELETE_USER", req)
 
     if not isinstance(res, dict):
+        logger.error(f"Delete user API returned non-dict response for {clean_mobile}: {res}")
         return None
 
     msg = res.get("resultmessage", "").lower()
+    is_success = str(res.get("result")) == "1" or str(res.get("RESULT")) == "1"
 
     # Permission / ownership failure
     if "permission denied" in msg:
+        logger.warning(f"Permission denied when deleting user {clean_mobile}")
         return None
 
-    # Successful deletion
-    if str(res.get("result")) == "1" or str(res.get("RESULT")) == "1":
+    # Only delete from MongoDB if the Appsavy API confirmed successful deletion
+    if is_success and "permission denied" not in msg and "error" not in msg:
         if users_collection is not None:
             users_collection.delete_one({"phone": target_phone})
             logger.info(
-                f"User with mobile {clean_mobile} removed from MongoDB."
+                f"User with mobile {clean_mobile} successfully deleted from Appsavy and removed from MongoDB."
             )
         return None
 
+    # API did not confirm success — do NOT remove from MongoDB
+    logger.warning(
+        f"Appsavy API did not confirm deletion for {clean_mobile}. "
+        f"result={res.get('result')}, message={msg}. MongoDB record retained."
+    )
     return None
 
 async def timed_api_call(api_name: str, func, *args, **kwargs):
@@ -1478,23 +1486,31 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
                     await get_task_list_tool(ctx, view="users")
                 elif intent == "PENDING_TASKS_AMBIGUOUS":
                     # Cross-questioning: user is responding to our clarification
-                    user_reply = command.strip().lower() if command else ""
-                    own_keywords = {"my", "mine", "me", "self", "myself", "my tasks", "my own", "for me", "1"}
-                    team_keywords = {"team", "employees", "subordinates", "under me", "reportees", "staff", "people", "others", "2"}
-                    wants_own = any(kw in user_reply for kw in own_keywords)
-                    wants_team = any(kw in user_reply for kw in team_keywords)
+                    # Use Gemini to understand whether user wants own tasks or team tasks
+                    disambig_result = await run_gemini_extractor(
+                        prompt="""The user was asked: "Would you like to see your own pending tasks or the pending tasks of your team members?"
 
-                    if wants_own and not wants_team:
-                        log_reasoning("PENDING_DISAMBIGUATED", {"choice": "own_tasks"})
-                        pending = await get_task_list_tool(ctx, view="tasks")
-                        if pending:
-                            send_whatsapp_message(sender, "\n".join(pending), pid)
-                    elif wants_team and not wants_own:
+Based on their reply, decide if they want:
+- OWN: to see their own personal pending tasks
+- TEAM: to see the pending tasks of their team members / employees / subordinates
+
+Rules:
+- Understand meaning, not just keywords. The user may reply in English, Hindi, or informal language.
+- If the user's reply clearly indicates they want their own tasks → return OWN
+- If the user's reply clearly indicates they want team/employee/subordinate tasks → return TEAM
+- If unclear, default to OWN.
+
+Return ONLY one word: OWN or TEAM""",
+                        message=command
+                    )
+
+                    choice = disambig_result.strip().upper() if isinstance(disambig_result, str) else "OWN"
+
+                    if choice == "TEAM":
                         log_reasoning("PENDING_DISAMBIGUATED", {"choice": "team_tasks"})
                         await get_performance_report_tool(ctx, report_type="Detail")
                     else:
-                        # Still ambiguous — default to showing own tasks
-                        log_reasoning("PENDING_DISAMBIGUATED", {"choice": "still_unclear_defaulting_own"})
+                        log_reasoning("PENDING_DISAMBIGUATED", {"choice": "own_tasks"})
                         pending = await get_task_list_tool(ctx, view="tasks")
                         if pending:
                             send_whatsapp_message(sender, "\n".join(pending), pid)
