@@ -1568,7 +1568,18 @@ Return ONLY one word: YES or NO""",
         # Agent-2 : Parameter Extraction
         # Retrieve latest slots and format history for Agent 2
         slots = next((m["content"] for m in reversed(history) if m.get("role") == "slots"), {})
-        full_convo_context = "\n".join([f"{m['role']}: {m['content']}" for m in history])
+        # Build clean conversation context — only user and assistant messages for clarity
+        convo_for_agent2 = []
+        for m in history:
+            if m["role"] == "user":
+                convo_for_agent2.append(f"user: {m['content']}")
+            elif m["role"] == "assistant":
+                # Strip internal tags like [CLARIFY], [TASK_CONFIRM] for cleaner context
+                content = m["content"]
+                for tag in ("[CLARIFY] ", "[TASK_CONFIRM] ", "[CLARIFY_SHIFT] "):
+                    content = content.replace(tag, "")
+                convo_for_agent2.append(f"assistant: {content}")
+        full_convo_context = "\n".join(convo_for_agent2)
         log_reasoning("AGENT_2_HISTORY_CONTEXT", {"history_sent": full_convo_context})
 
         result = None
@@ -1577,79 +1588,55 @@ Return ONLY one word: YES or NO""",
 
         if intent == "TASK_ASSIGNMENT":
             result = await run_gemini_extractor(
-                prompt=f"""You are helping assign a task.
+                prompt=f"""You are helping assign a task by extracting 3 required fields from a conversation.
 
-⚠️ ABSOLUTE RULE — NEVER ASSUME OR INVENT VALUES:
-- If the user has NOT explicitly stated a deadline, time, or date, the deadline field is MISSING.
-- You MUST ask "What is the deadline?" if no deadline was mentioned.
-- NEVER default to EOD, 6pm, end of day, or any other time.
-- NEVER fill in a deadline yourself. Only use a deadline the user explicitly provided.
-- This rule has NO exceptions.
-
-READ THE FULL CONVERSATION HISTORY:
-The complete conversation history is provided after this prompt as "USER MESSAGE".
-You MUST read EVERY message in the conversation to extract field values.
-Information is spread across multiple messages. For example:
-- First message: "Ariya has to complete report" → assignee = "Ariya", task_name = "complete report"
-- Later message: "3pm" → deadline = today at 3pm
-Combine information from ALL messages. Do NOT ignore earlier messages.
-
-PREVIOUSLY EXTRACTED & SAVED INFORMATION (do NOT ask for these again):
+PREVIOUSLY EXTRACTED & SAVED INFORMATION (these are confirmed — do NOT ask for them again):
 {slots_info}
 
 Current Date: {ctx.current_time.strftime("%Y-%m-%d")}
 Current Time: {ctx.current_time.strftime("%I:%M %p")}
 
-DEADLINE CONVERSION (only when user HAS provided a time/date):
-- Convert relative deadlines (e.g., "in 4 hours", "tomorrow", "by EOD", "3pm") into absolute ISO 8601 format.
-- "EOD" means 18:00 of the current day — ONLY if the user explicitly said "EOD" or "end of day".
-- A time like "3pm" or "8pm" without a date means TODAY at that time.
-- If the user said NO time or date at all → deadline is MISSING → ask for it.
+STEP 1 — READ THE CONVERSATION:
+The full conversation between user and assistant is provided below as "USER MESSAGE".
+Scan ALL messages to find values for: assignee, task_name, deadline.
+Information is spread across multiple messages. Examples:
+- "Ariya has to complete report" → assignee = "Ariya", task_name = "complete report"
+- "7pm" (in reply to "What is the deadline?") → deadline = today at 7pm
+- "tomorrow 3pm" → deadline = tomorrow at 3pm
 
-Your job:
-- FIRST: Scan ALL user messages in the conversation history to find assignee, task_name, and deadline.
-- THEN: Check the PREVIOUSLY EXTRACTED information above for any saved values.
-- Combine both sources. Only ask a question if a field is COMPLETELY absent from BOTH sources.
-- If ALL three required fields are present → return JSON immediately.
-- If ANY required field is missing → ask ONE clear follow-up question.
-- Do NOT invent or assume values.
-- Do NOT repeat information already given.
+STEP 2 — COMBINE with saved information above.
+If a field exists in EITHER the conversation OR the saved info, it is PRESENT.
 
-Required fields:
-- assignee (name or phone)
-- task_name
-- deadline (ISO format — ONLY if user explicitly provided a time/date)
+STEP 3 — DECIDE:
+- ALL 3 fields present → return JSON
+- ANY field missing → ask ONE question
 
-STRICT RULES TO PREVENT UNNECESSARY QUESTIONS:
-- ONLY ask a question if one of the 3 required fields (assignee, task_name, deadline) is COMPLETELY MISSING from the entire conversation.
-- If the user has provided ANY description of what needs to be done, that IS the task_name. Use it AS-IS.
-  Examples: "complete report" → task_name = "complete report". "prepare documents" → task_name = "prepare documents".
-- Do NOT ask for more details, clarification, or elaboration on a field that already has a value.
-- Do NOT ask "What is the report about?" or "Can you specify which report?" — if user said "report", use "report".
-- Do NOT ask for the full name of a task if a short description was already given.
-- The ONLY questions you should ever ask are:
-  1. "Who should this task be assigned to?" (if assignee is missing from ALL messages)
-  2. "What is the task?" (if task_name is completely missing from ALL messages — not mentioned at all)
-  3. "What is the deadline?" (if deadline is missing from ALL messages)
-- If all 3 fields can be extracted from the conversation history, return JSON immediately. NO MORE QUESTIONS.
+DEADLINE RULES:
+- When the user HAS provided a time (e.g., "7pm", "3pm", "tomorrow", "in 2 hours", "EOD") → convert to ISO 8601.
+- "EOD" or "end of day" → {ctx.current_time.strftime("%Y-%m-%d")}T18:00:00
+- A bare time like "7pm" → TODAY at that time: {ctx.current_time.strftime("%Y-%m-%d")}T19:00:00
+- If the user says a time that has ALREADY PASSED today, it means that time TOMORROW. Example: current time is {ctx.current_time.strftime("%I:%M %p")}, user says "12:30 pm" but 12:30 PM today has passed → use TOMORROW: {(ctx.current_time + datetime.timedelta(days=1)).strftime("%Y-%m-%d")}T12:30:00
+- When the user has NOT mentioned any time or date anywhere in the conversation → deadline is MISSING → ask for it.
+- Do NOT invent a deadline if the user never mentioned one.
 
-Current date: {ctx.current_time.strftime("%Y-%m-%d")}
+REQUIRED FIELDS:
+1. assignee — name or phone of the person
+2. task_name — what needs to be done (use user's words as-is, do not elaborate)
+3. deadline — ISO 8601 datetime (only from user's explicit input)
 
-If returning JSON, use EXACTLY this format:
+RULES:
+- If the user already provided a value, do NOT ask about it again.
+- If task_name was given as "complete report", use "complete report" exactly. Do NOT ask for elaboration.
+- The ONLY valid questions are: "Who should this task be assigned to?", "What is the task?", "What is the deadline?"
+- Return ONLY a JSON object OR ONLY a plain text question. Never both.
+- Never wrap JSON in code fences.
+
+JSON format:
 {{
   "assignee": string,
   "task_name": string,
   "deadline": string
 }}
-
-CRITICAL OUTPUT RULES:
-- Return ONLY JSON or ONLY a plain text question. NEVER BOTH.
-- Do NOT return JSON with null values and then ask a question — just ask the question directly as plain text.
-- If a required field is missing, return ONLY the question as plain text (e.g., "What is the deadline?").
-- If all fields are present, return ONLY the JSON object with no extra text.
-- NEVER wrap JSON in markdown code fences (no ```json or ```).
-
-FINAL REMINDER: If the user never mentioned a deadline, time, or date → the deadline is MISSING → return the question "What is the deadline?" as plain text. Do NOT return JSON with an assumed deadline.
 """,
                 message=full_convo_context
             )
