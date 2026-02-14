@@ -1715,12 +1715,15 @@ STEP 3 — DECIDE:
 - ANY field missing → ask ONE question
 
 DEADLINE RULES:
-- When the user HAS provided a time (e.g., "7pm", "3pm", "tomorrow", "in 2 hours", "EOD") → convert to ISO 8601.
+- A deadline is ONLY present if the user explicitly states a specific date, time, or relative time expression.
+- VALID deadline expressions (ONLY these count): "7pm", "3pm", "tomorrow", "in 2 hours", "EOD", "end of day", "by Friday", "next week", "Feb 20", "2026-02-15", etc.
+- INVALID / NOT a deadline (these are NOT deadline expressions — do NOT convert them): "once completed", "when done", "ASAP", "as soon as possible", "urgently", "immediately", "at the earliest", "soon", "quickly". These are instructions, NOT deadlines.
+- If the user has NOT provided a VALID deadline expression anywhere in the conversation → deadline is MISSING → you MUST ask: "What is the deadline?"
+- Do NOT assume EOD or any default. Do NOT invent a deadline. If in doubt, the deadline is MISSING.
+- When the user HAS provided a valid time (e.g., "7pm", "3pm", "tomorrow", "in 2 hours", "EOD") → convert to ISO 8601.
 - "EOD" or "end of day" → {ctx.current_time.strftime("%Y-%m-%d")}T18:00:00
 - A bare time like "7pm" → TODAY at that time: {ctx.current_time.strftime("%Y-%m-%d")}T19:00:00
 - If the user says a time that has ALREADY PASSED today, it means that time TOMORROW. Example: current time is {ctx.current_time.strftime("%I:%M %p")}, user says "12:30 pm" but 12:30 PM today has passed → use TOMORROW: {(ctx.current_time + datetime.timedelta(days=1)).strftime("%Y-%m-%d")}T12:30:00
-- When the user has NOT mentioned any time or date anywhere in the conversation → deadline is MISSING → ask for it.
-- Do NOT invent a deadline if the user never mentioned one.
 
 REQUIRED FIELDS:
 1. assignee — name or phone of the person
