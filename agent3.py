@@ -24,6 +24,8 @@ _agent3_executor = concurrent.futures.ThreadPoolExecutor(
 INACTIVITY_THRESHOLD = 600  # seconds
 # Prevent infinite clarification loops
 MAX_CLARIFICATIONS = 2
+# Timeout for Gemini SDK calls (seconds)
+AGENT3_GEMINI_TIMEOUT = 15
 
 # Module-level Gemini client (avoids re-creation per call)
 _gemini_client: Optional[Client] = None
@@ -174,12 +176,15 @@ OR
 
     try:
         loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            _agent3_executor,
-            lambda: client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=prompt
-            )
+        response = await asyncio.wait_for(
+            loop.run_in_executor(
+                _agent3_executor,
+                lambda: client.models.generate_content(
+                    model="gemini-2.0-flash",
+                    contents=prompt
+                )
+            ),
+            timeout=AGENT3_GEMINI_TIMEOUT
         )
 
         text = response.text.strip()
@@ -210,6 +215,8 @@ OR
                 )
                 return "ASK_CLARIFICATION", clarification
 
+    except asyncio.TimeoutError:
+        logger.error(f"[AGENT3_TIMEOUT] Gemini call timed out after {AGENT3_GEMINI_TIMEOUT}s")
     except Exception as e:
         logger.warning(f"[AGENT3_ERROR] {str(e)}")
 

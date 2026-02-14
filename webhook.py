@@ -9,15 +9,31 @@ from redis_session import redis_client  # Leverage existing Redis connection
 
 
 async def _safe_handle(command, sender, pid, message_data, full_message):
-    """Wrapper that catches exceptions so fire-and-forget tasks never crash silently."""
+    """Wrapper with global timeout — prevents any single message from hanging forever."""
     try:
-        await handle_message(
-            command,
-            sender,
-            pid,
-            message=message_data,
-            full_message=full_message,
+        await asyncio.wait_for(
+            handle_message(
+                command,
+                sender,
+                pid,
+                message=message_data,
+                full_message=full_message,
+            ),
+            timeout=120  # 2 minutes max for entire message processing
         )
+    except asyncio.TimeoutError:
+        logging.getLogger(__name__).error(
+            f"[GLOBAL_TIMEOUT] handle_message timed out for {sender} after 120s"
+        )
+        try:
+            from send_message import send_whatsapp_message
+            await send_whatsapp_message(
+                sender,
+                "Your request took too long to process. Please try again.",
+                pid
+            )
+        except Exception:
+            pass
     except Exception:
         logging.getLogger(__name__).error(
             "Background handle_message failed", exc_info=True
@@ -112,11 +128,25 @@ async def handle_webhook(request: Request):
                         message_data = {"image": img, "type": "image"}
 
                 if user_command.strip() or message_data:
+                    logger.info(
+                        f"[MSG_RECEIVED] From: {sender_phone} | "
+                        f"Type: {msg_type} | "
+                        f"MsgID: {msg_id} | "
+                        f"Text: {user_command[:100] if user_command else '(no text)'} | "
+                        f"HasMedia: {bool(message_data)}"
+                    )
                     # Fire-and-forget: process in background so webhook returns 200 instantly.
                     # This prevents Meta from retrying and avoids head-of-line blocking
                     # when multiple users send messages at the same time.
                     asyncio.create_task(
                         _safe_handle(user_command, sender_phone, phone_number_id, message_data, message)
+                    )
+                else:
+                    logger.info(
+                        f"[MSG_SKIPPED] From: {sender_phone} | "
+                        f"Type: {msg_type} | "
+                        f"MsgID: {msg_id} | "
+                        f"Reason: No text and no media data"
                     )
 
     return {"status": "EVENT_RECEIVED"}

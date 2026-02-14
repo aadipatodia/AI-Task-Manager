@@ -2,6 +2,7 @@ import os
 import json
 import re
 import asyncio
+import logging
 import concurrent.futures
 from dotenv import load_dotenv
 from google.genai import Client
@@ -252,15 +253,23 @@ def intent_classifier(user_message: str, has_document: bool = False):
 
 
 async def async_intent_classifier(user_message: str, has_document: bool = False):
-    """Async wrapper that runs intent_classifier in a dedicated thread pool
-    instead of the default asyncio executor (which has only ~8 workers)."""
+    """Async wrapper with timeout protection — prevents thread pool starvation."""
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        _classifier_executor,
-        intent_classifier,
-        user_message,
-        has_document
-    )
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(
+                _classifier_executor,
+                intent_classifier,
+                user_message,
+                has_document
+            ),
+            timeout=20
+        )
+    except asyncio.TimeoutError:
+        logging.getLogger(__name__).error(
+            f"[INTENT_CLASSIFIER_TIMEOUT] Timed out classifying: {user_message[:80]}"
+        )
+        return False, None, 0.0, "Classification timed out"
 
 
 # -----------------------------

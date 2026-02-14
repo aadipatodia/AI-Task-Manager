@@ -44,6 +44,9 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 load_dotenv()
 
+# Timeout for Gemini SDK calls (seconds) — prevents thread pool starvation
+GEMINI_TIMEOUT = 30
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -343,12 +346,19 @@ async def run_gemini_extractor(prompt: str, message: str):
         )
 
     async def _gemini_call():
-        return await loop.run_in_executor(_gemini_executor, _blocking_gemini)
+        return await asyncio.wait_for(
+            loop.run_in_executor(_gemini_executor, _blocking_gemini),
+            timeout=GEMINI_TIMEOUT
+        )
 
-    response = await timed_api_call(
-        "GEMINI_GENERATE_CONTENT",
-        _gemini_call
-    )
+    try:
+        response = await timed_api_call(
+            "GEMINI_GENERATE_CONTENT",
+            _gemini_call
+        )
+    except asyncio.TimeoutError:
+        logger.error(f"[GEMINI_TIMEOUT] run_gemini_extractor timed out after {GEMINI_TIMEOUT}s")
+        raise ValueError(f"Gemini timed out after {GEMINI_TIMEOUT}s")
 
     if not response:
         raise ValueError("Gemini returned empty response")
@@ -2065,6 +2075,14 @@ Rules:
 
     except Exception:
         logger.error("handle_message failed", exc_info=True)
+        try:
+            await send_whatsapp_message(
+                sender,
+                "Something went wrong while processing your request. Please try again.",
+                pid
+            )
+        except Exception:
+            pass
         try:
             if 'session_id' in locals() and 'session_key' in locals():
                 clear_pending_document_state(session_id)
