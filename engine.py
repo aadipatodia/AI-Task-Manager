@@ -1304,8 +1304,17 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         if action == "RESET":
             log_reasoning("AGENT_3_RESET", {"reason": "Intent shift or inactivity"})
+            # Preserve pending document across session reset
+            saved_pending_doc = get_pending_document(session_id)
+            saved_pending_doc_state = get_pending_document_state(session_id)
             end_session_complete(login_code, session_id)
             session_id = get_or_create_session(login_code)
+            # Migrate pending document to new session if it existed
+            if saved_pending_doc:
+                set_pending_document(session_id, saved_pending_doc)
+                if saved_pending_doc_state:
+                    set_pending_document_state(session_id, saved_pending_doc_state.get("is_first_message", True))
+                log_reasoning("DOCUMENT_MIGRATED", {"new_session": session_id})
 
         # Save user input to history (after agent3 check)
         if command and command.strip():
@@ -1351,9 +1360,11 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
             # If document sent as FIRST message, intent must be null (Agent 1 → null)
             if is_first_msg:
                 log_reasoning("DOCUMENT_FIRST_MESSAGE", {"intent": None})
+                clarify_doc_msg = "I've received your document. Would you like to 'Assign a new task' with this or 'Update status of a task'?"
+                append_message(session_id, "assistant", f"[CLARIFY] {clarify_doc_msg}")
                 send_whatsapp_message(
                     sender, 
-                    "I've received your document. Would you like to 'Assign a new task' with this or 'Update status of a task'?", 
+                    clarify_doc_msg, 
                     pid
                 )
                 return
