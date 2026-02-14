@@ -1298,9 +1298,9 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
         action, clarification_msg = await agent3_intent_guard(session_id, command)
 
         if action == "ASK_CLARIFICATION":
-            log_reasoning("AGENT_3_SHIFT_DETECTED", {"message": clarification_msg})
-            send_whatsapp_message(sender, clarification_msg, pid)
-            return
+            # Intent shift detected — reset session and reprocess message through Agent 1
+            log_reasoning("AGENT_3_SHIFT_DETECTED", {"action": "RESET_AND_REPROCESS", "message": clarification_msg})
+            action = "RESET"  # Treat shift as reset so message goes to Agent 1
 
         if action == "RESET":
             log_reasoning("AGENT_3_RESET", {"reason": "Intent shift or inactivity"})
