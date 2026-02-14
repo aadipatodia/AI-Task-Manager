@@ -1664,11 +1664,16 @@ RULES:
 - "EOD" should be treated as 18:00 (6:00 PM) of the current day.
 - Ensure the 'deadline' string is strictly a valid ISO format.
 
-MAPPING RULES (Return EXACTLY one of these 4 values for the 'status' field):
+STATUS MAPPING RULES (Return EXACTLY one of these 4 values for the 'status' field):
 - If the user wants to start, is working on it, or it's pending -> "Work In Progress"
 - If the user has finished, completed, or fixed it -> "Closed"
 - If the user wants to restart or redo a closed task -> "Reopened"
 - If the user says it is still open or should stay open -> "Open"
+
+CRITICAL: The status field is REQUIRED and must come from the user's explicit words.
+- If the user has NOT mentioned or implied any status (e.g., they only said "update a task" or only provided a task ID), the status is MISSING.
+- Do NOT guess or default to any status. If status is missing, ask: "What status would you like to set? (Open / Work In Progress / Closed / Reopened)"
+- Only return JSON when BOTH task_id AND status are present.
 
 Required fields:
 - task_id: string
