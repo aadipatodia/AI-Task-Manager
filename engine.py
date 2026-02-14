@@ -1577,18 +1577,26 @@ Return ONLY one word: YES or NO""",
             result = await run_gemini_extractor(
                 prompt=f"""You are helping assign a task.
 
-KNOWN INFORMATION (do NOT ask again):
+PREVIOUSLY EXTRACTED INFORMATION (do NOT ask again):
 {json.dumps(slots, indent=2)}
 
-USER QUERY (verbatim):
+LATEST USER MESSAGE:
 "{command}"
 
 Current Date: {ctx.current_time.strftime("%Y-%m-%d")}
 Current Time: {ctx.current_time.strftime("%I:%M %p")}
 
+CRITICAL: The FULL CONVERSATION HISTORY is provided below as "USER MESSAGE". 
+You MUST scan ALL messages in the conversation to find values for the required fields.
+Information may be spread across multiple messages. For example:
+- First message: "Ariya has to complete report" → assignee = "Ariya", task_name = "complete report"
+- Second message: "3pm" → deadline = today at 3pm
+Combine information from ALL messages before deciding what is missing.
+
 RULES:
-- Convert relative deadlines (e.g., "in 4 hours", "tomorrow", "by EOD") into absolute ISO 8601 format.
+- Convert relative deadlines (e.g., "in 4 hours", "tomorrow", "by EOD", "3pm") into absolute ISO 8601 format.
 - "EOD" should be treated as 18:00 (6:00 PM) of the current day.
+- A time like "3pm" or "8pm" without a date means TODAY at that time.
 - Ensure the 'deadline' string is strictly a valid ISO format.
 
 Your job:
