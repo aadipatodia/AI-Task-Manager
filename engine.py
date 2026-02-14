@@ -1573,25 +1573,25 @@ Return ONLY one word: YES or NO""",
 
         result = None
 
+        slots_info = json.dumps(slots, indent=2) if slots else "None yet — extract ALL fields from the conversation history below."
+
         if intent == "TASK_ASSIGNMENT":
             result = await run_gemini_extractor(
                 prompt=f"""You are helping assign a task.
 
-PREVIOUSLY EXTRACTED INFORMATION (do NOT ask again):
-{json.dumps(slots, indent=2)}
+IMPORTANT — READ THE FULL CONVERSATION HISTORY BELOW:
+The complete conversation history is provided after this prompt as "USER MESSAGE".
+You MUST read EVERY message in the conversation to extract field values.
+Information is spread across multiple messages. For example:
+- First message: "Ariya has to complete report" → assignee = "Ariya", task_name = "complete report"
+- Later message: "3pm" → deadline = today at 3pm
+Combine information from ALL messages. Do NOT ignore earlier messages.
 
-LATEST USER MESSAGE:
-"{command}"
+PREVIOUSLY EXTRACTED & SAVED INFORMATION (do NOT ask for these again):
+{slots_info}
 
 Current Date: {ctx.current_time.strftime("%Y-%m-%d")}
 Current Time: {ctx.current_time.strftime("%I:%M %p")}
-
-CRITICAL: The FULL CONVERSATION HISTORY is provided below as "USER MESSAGE". 
-You MUST scan ALL messages in the conversation to find values for the required fields.
-Information may be spread across multiple messages. For example:
-- First message: "Ariya has to complete report" → assignee = "Ariya", task_name = "complete report"
-- Second message: "3pm" → deadline = today at 3pm
-Combine information from ALL messages before deciding what is missing.
 
 RULES:
 - Convert relative deadlines (e.g., "in 4 hours", "tomorrow", "by EOD", "3pm") into absolute ISO 8601 format.
@@ -1600,12 +1600,13 @@ RULES:
 - Ensure the 'deadline' string is strictly a valid ISO format.
 
 Your job:
-- Reuse ANY information already present in the user query
-- Extract missing values ONLY if they are not clearly specified
-- If ALL required fields are present → return JSON
-- If ANY required field is missing → ask ONE clear follow-up question
-- Do NOT invent values
-- Do NOT repeat information already given
+- FIRST: Scan ALL user messages in the conversation history to find assignee, task_name, and deadline.
+- THEN: Check the PREVIOUSLY EXTRACTED information above for any saved values.
+- Combine both sources. Only ask a question if a field is COMPLETELY absent from BOTH sources.
+- If ALL required fields are present → return JSON immediately.
+- If ANY required field is missing → ask ONE clear follow-up question.
+- Do NOT invent values.
+- Do NOT repeat information already given.
 
 Required fields:
 - assignee (name or phone)
@@ -1613,18 +1614,17 @@ Required fields:
 - deadline (ISO format if possible)
 
 STRICT RULES TO PREVENT UNNECESSARY QUESTIONS:
-- ONLY ask a question if one of the 3 required fields (assignee, task_name, deadline) is COMPLETELY MISSING from the conversation.
+- ONLY ask a question if one of the 3 required fields (assignee, task_name, deadline) is COMPLETELY MISSING from the entire conversation.
 - If the user has provided ANY description of what needs to be done, that IS the task_name. Use it AS-IS.
   Examples: "complete report" → task_name = "complete report". "prepare documents" → task_name = "prepare documents".
 - Do NOT ask for more details, clarification, or elaboration on a field that already has a value.
 - Do NOT ask "What is the report about?" or "Can you specify which report?" — if user said "report", use "report".
 - Do NOT ask for the full name of a task if a short description was already given.
 - The ONLY questions you should ever ask are:
-  1. "Who should this task be assigned to?" (if assignee is missing)
-  2. "What is the task?" (if task_name is completely missing — not mentioned at all)
-  3. "What is the deadline?" (if deadline is missing)
+  1. "Who should this task be assigned to?" (if assignee is missing from ALL messages)
+  2. "What is the task?" (if task_name is completely missing from ALL messages — not mentioned at all)
+  3. "What is the deadline?" (if deadline is missing from ALL messages)
 - If all 3 fields can be extracted from the conversation history, return JSON immediately. NO MORE QUESTIONS.
-- When reviewing conversation history, look at ALL messages (not just the latest one) to find field values.
 
 Current date: {ctx.current_time.strftime("%Y-%m-%d")}
 
