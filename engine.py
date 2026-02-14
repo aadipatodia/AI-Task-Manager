@@ -1320,7 +1320,7 @@ async def handle_message(command, sender, pid, message=None, full_message=None):
 
         # Setup Context
         last_assistant_msg = next((m for m in reversed(history) if m["role"] == "assistant"), None)
-        is_cross_questioning = last_assistant_msg and "[CLARIFY]" in last_assistant_msg["content"]
+        is_cross_questioning = last_assistant_msg and ("[CLARIFY]" in last_assistant_msg["content"] or "[TASK_CONFIRM]" in last_assistant_msg["content"])
 
         # Find the most recent intent saved in the system history
         existing_intent = next(
@@ -1595,9 +1595,10 @@ Current Time: {ctx.current_time.strftime("%I:%M %p")}
 
 RULES:
 - Convert relative deadlines (e.g., "in 4 hours", "tomorrow", "by EOD", "3pm") into absolute ISO 8601 format.
-- "EOD" should be treated as 18:00 (6:00 PM) of the current day.
+- "EOD" should be treated as 18:00 (6:00 PM) of the current day — but ONLY if the user explicitly says "EOD" or "end of day".
 - A time like "3pm" or "8pm" without a date means TODAY at that time.
 - Ensure the 'deadline' string is strictly a valid ISO format.
+- If the user has NOT mentioned ANY deadline or time reference at all, the deadline is MISSING. Do NOT assume EOD or any default. Ask for it.
 
 Your job:
 - FIRST: Scan ALL user messages in the conversation history to find assignee, task_name, and deadline.
@@ -1605,7 +1606,7 @@ Your job:
 - Combine both sources. Only ask a question if a field is COMPLETELY absent from BOTH sources.
 - If ALL required fields are present → return JSON immediately.
 - If ANY required field is missing → ask ONE clear follow-up question.
-- Do NOT invent values.
+- Do NOT invent or assume values. If the user did not mention a deadline, ASK for it.
 - Do NOT repeat information already given.
 
 Required fields:
